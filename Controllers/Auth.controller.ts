@@ -577,16 +577,6 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         `
                             INSERT INTO addresses (user_id, address, city, state, country, pincode, latitude, longitude, updated_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                            ON CONFLICT (user_id)
-                            DO UPDATE SET
-                                address = EXCLUDED.address,
-                                city = EXCLUDED.city,
-                                state = EXCLUDED.state,
-                                country = EXCLUDED.country,
-                                pincode = EXCLUDED.pincode,
-                                latitude = EXCLUDED.latitude,
-                                longitude = EXCLUDED.longitude,
-                                updated_at = NOW()
                         `,
                         [
                             user.id,

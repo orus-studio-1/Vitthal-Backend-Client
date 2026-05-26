@@ -257,6 +257,8 @@ CREATE TABLE IF NOT EXISTS products (
     approval_notes TEXT,
     created_by_user_id UUID,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    quotation_limit INTEGER CHECK (quotation_limit > 0),
+    vendor_can_set_quotation_limit BOOLEAN NOT NULL DEFAULT FALSE,
     rating NUMERIC(2,1) NOT NULL DEFAULT 0 CHECK (rating >= 0 AND rating <= 5),
     review_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -617,6 +619,8 @@ CREATE TABLE IF NOT EXISTS quotation_requests (
     admin_confirmed_at TIMESTAMPTZ,
     admin_user_id UUID,
 
+    quotation_group_id UUID,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -829,6 +833,8 @@ ALTER TABLE products
     ADD COLUMN IF NOT EXISTS approval_notes TEXT,
     ADD COLUMN IF NOT EXISTS created_by_user_id UUID,
     ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS quotation_limit INTEGER CHECK (quotation_limit > 0),
+    ADD COLUMN IF NOT EXISTS vendor_can_set_quotation_limit BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
@@ -949,6 +955,7 @@ CREATE INDEX IF NOT EXISTS idx_quotation_requests_status ON quotation_requests(s
 CREATE INDEX IF NOT EXISTS idx_quotation_requests_product_id ON quotation_requests(product_id);
 CREATE INDEX IF NOT EXISTS idx_quotation_messages_quotation_id ON quotation_messages(quotation_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_quotation_requests_admin_status ON quotation_requests(admin_confirmation_status) WHERE admin_confirmation_status IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_quotation_requests_group_id ON quotation_requests(quotation_group_id) WHERE quotation_group_id IS NOT NULL;
 
 -- ================================
 -- NOTIFICATIONS

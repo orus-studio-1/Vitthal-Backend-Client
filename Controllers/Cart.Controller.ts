@@ -24,10 +24,10 @@ export const getCartDataController = async (req: Request, res: Response): Promis
                 ci.price_at_added,
                 ci.created_at,
                 p.name as product_name,
+                p.quotation_limit,
                 vp.price as current_price,
                 vp.moq,
                 vp.quotation_enabled,
-                vp.quotation_min_qty,
                 vp.stock_quantity,
                 (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) as image_url,
                 v.company_name as vendor_name
@@ -78,32 +78,35 @@ export const addCartItemController = async (req: Request, res: Response): Promis
             cartId = cartResult.rows[0].id;
         }
 
-        // 2. Get current price from vendor_products (price lives here, not in products)
+        // 2. Get current price from vendor_products
         const priceResult = await pool.query(
-            `SELECT price, moq, quotation_enabled, quotation_min_qty FROM vendor_products WHERE product_id = $1 AND vendor_id = $2 AND is_active = true`,
+            `SELECT vp.price, vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
+             FROM vendor_products vp
+             JOIN products p ON p.id = vp.product_id
+             WHERE vp.product_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
             [product_id, vendor_id]
         );
         if (priceResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not available from this vendor" });
         }
         const currentPrice = priceResult.rows[0].price;
-        const quotationEnabled = Boolean(priceResult.rows[0].quotation_enabled);
-        const quotationMinQty = priceResult.rows[0].quotation_min_qty ? Number(priceResult.rows[0].quotation_min_qty) : null;
+        const quotationLimit = priceResult.rows[0].quotation_limit ? Number(priceResult.rows[0].quotation_limit) : null;
         const moq = Number(priceResult.rows[0].moq) || 1;
 
-        if (cartType === "direct" && quotationEnabled && quotationMinQty && quantity >= quotationMinQty) {
+        // Check if quantity requires quotation flow (based on product-level quotation_limit)
+        if (cartType === "direct" && quotationLimit && quantity >= quotationLimit) {
             return res.status(409).json({
-                message: `This item requires quotation for quantities of ${quotationMinQty} or more`,
+                message: `This product requires quotation for quantities of ${quotationLimit} or more`,
                 requiresQuotation: true,
-                minQuoteQty: quotationMinQty,
+                minQuoteQty: quotationLimit,
             });
         }
 
         if (cartType === "quotation") {
-            if (!quotationEnabled) {
-                return res.status(400).json({ message: "Quotation is not enabled for this product" });
+            if (!quotationLimit) {
+                return res.status(400).json({ message: "Quotation is not enabled for this product (no quotation limit set)" });
             }
-            const minAllowed = quotationMinQty ? Math.max(quotationMinQty, moq) : moq;
+            const minAllowed = Math.max(quotationLimit, moq);
             if (quantity < minAllowed) {
                 return res.status(400).json({ message: `Minimum quotation quantity is ${minAllowed}` });
             }
@@ -149,29 +152,31 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
         const cartId = cartResult.rows[0].id;
 
         const priceResult = await pool.query(
-            `SELECT moq, quotation_enabled, quotation_min_qty FROM vendor_products WHERE product_id = $1 AND vendor_id = $2 AND is_active = true`,
+            `SELECT vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
+             FROM vendor_products vp
+             JOIN products p ON p.id = vp.product_id
+             WHERE vp.product_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
             [product_id, vendor_id]
         );
         if (priceResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not available from this vendor" });
         }
-        const quotationEnabled = Boolean(priceResult.rows[0].quotation_enabled);
-        const quotationMinQty = priceResult.rows[0].quotation_min_qty ? Number(priceResult.rows[0].quotation_min_qty) : null;
+        const quotationLimit = priceResult.rows[0].quotation_limit ? Number(priceResult.rows[0].quotation_limit) : null;
         const moq = Number(priceResult.rows[0].moq) || 1;
 
-        if (cartType === "direct" && quotationEnabled && quotationMinQty && quantity >= quotationMinQty) {
+        if (cartType === "direct" && quotationLimit && quantity >= quotationLimit) {
             return res.status(409).json({
-                message: `This item requires quotation for quantities of ${quotationMinQty} or more`,
+                message: `This product requires quotation for quantities of ${quotationLimit} or more`,
                 requiresQuotation: true,
-                minQuoteQty: quotationMinQty,
+                minQuoteQty: quotationLimit,
             });
         }
 
         if (cartType === "quotation") {
-            if (!quotationEnabled) {
-                return res.status(400).json({ message: "Quotation is not enabled for this product" });
+            if (!quotationLimit) {
+                return res.status(400).json({ message: "Quotation is not enabled for this product (no quotation limit set)" });
             }
-            const minAllowed = quotationMinQty ? Math.max(quotationMinQty, moq) : moq;
+            const minAllowed = Math.max(quotationLimit, moq);
             if (quantity < minAllowed) {
                 return res.status(400).json({ message: `Minimum quotation quantity is ${minAllowed}` });
             }

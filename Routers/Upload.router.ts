@@ -27,38 +27,62 @@ const upload = multer({
   },
 });
 
+const uploadSingle = upload.single("file");
+
 /**
  * Upload a file to S3
  */
-uploadRouter.post("/upload", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
-  try {
-    if (!req.file) {
-      res.status(400).json({ success: false, message: "No file uploaded." });
+uploadRouter.post("/upload", (req: Request, res: Response): void => {
+  uploadSingle(req, res, async (error) => {
+    if (error) {
+      if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({
+          success: false,
+          message: "GST certificate must be 5MB or smaller.",
+        });
+        return;
+      }
+
+      console.error("Error parsing uploaded file:", error);
+      res.status(400).json({
+        success: false,
+        message: "Unable to process the uploaded file.",
+      });
       return;
     }
 
-    const file = req.file;
-    const originalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
-    const fileName = `uploads/${Date.now()}_${originalName}`;
+    try {
+      if (!req.file) {
+        res.status(400).json({ success: false, message: "No file uploaded." });
+        return;
+      }
 
-    const command = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
-      Key: fileName,
-      Body: file.buffer,
-      ContentType: file.mimetype,
-    });
+      const file = req.file;
+      const originalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
+      const fileName = `uploads/${Date.now()}_${originalName}`;
 
-    await s3Client.send(command);
+      const command = new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: fileName,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      });
 
-    res.status(200).json({
-      success: true,
-      message: "File uploaded successfully",
-      fileName,
-    });
-  } catch (error) {
-    console.error("Error uploading file to S3:", error);
-    res.status(500).json({ success: false, message: "Internal server error" });
-  }
+      await s3Client.send(command);
+
+      res.status(200).json({
+        success: true,
+        message: "File uploaded successfully",
+        fileName,
+      });
+    } catch (error) {
+      console.error("Error uploading file to S3:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to upload the file to storage. Please try again.",
+      });
+    }
+  });
 });
 
 /**

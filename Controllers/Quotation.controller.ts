@@ -2,6 +2,8 @@ import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { sendQuotationRequestEmail, sendQuotationUpdateEmail } from "../helpers/emailService.helper";
 import { createNotification, notifyAllAdmins } from "./Notification.controller";
+import { generateBaseQuotationDocument, generateVendorQuotationDocument } from "../services/quotationDocument.service";
+import { getPresignedUrl } from "../services/s3.service";
 
 type QuotationAction = "offer" | "counter" | "accept" | "reject";
 
@@ -18,6 +20,12 @@ type QuotationRow = {
     current_offer_by: string | null;
     accepted_price: number | null;
     accepted_quantity: number | null;
+    quotation_group_id: string | null;
+    delivery_days: number | null;
+    token_percentage: number | null;
+    token_amount: number | null;
+    vendor_document_url: string | null;
+    vendor_document_s3_key: string | null;
 };
 
 function normalizeAction(value: unknown): QuotationAction | null {
@@ -70,20 +78,19 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
 
         const cartId = cartResult.rows[0].id as string;
 
+        // Get cart items (vendor_id here is just the "viewing" vendor, we'll broadcast to all)
         const cartItemsResult = await client.query(
             `
-                SELECT
+                SELECT DISTINCT ON (ci.product_id)
                     ci.product_id,
-                    ci.vendor_id,
                     ci.quantity,
                     ci.price_at_added,
                     p.name AS product_name,
-                    v.company_name AS vendor_name,
-                    u.email AS vendor_email
+                    p.description AS product_description,
+                    pc.label AS product_category
                 FROM cart_items ci
                 JOIN products p ON ci.product_id = p.id
-                JOIN vendors v ON ci.vendor_id = v.id
-                JOIN users u ON v.user_id = u.id
+                LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
                 WHERE ci.cart_id = $1
             `,
             [cartId]
@@ -97,75 +104,109 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
         const createdQuotationIds: string[] = [];
 
         for (const item of cartItemsResult.rows) {
-            const quotationResult = await client.query(
+            // Find ALL vendors serving this product with quotation_enabled = true
+            // AND stock_quantity >= product quotation_limit
+            const eligibleVendorsResult = await client.query(
                 `
-                    INSERT INTO quotation_requests (
-                        user_id,
-                        vendor_id,
-                        product_id,
-                        requested_quantity,
-                        requested_price,
-                        status,
-                        request_note,
-                        buyer_city,
-                        buyer_state,
-                        buyer_country,
-                        buyer_pincode
-                    ) VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6, $7, $8, $9, $10)
-                    RETURNING id
+                    SELECT
+                        vp.vendor_id,
+                        v.company_name AS vendor_name,
+                        u.email AS vendor_email,
+                        u.id AS vendor_user_id
+                    FROM vendor_products vp
+                    JOIN vendors v ON vp.vendor_id = v.id
+                    JOIN users u ON v.user_id = u.id
+                    JOIN products p ON vp.product_id = p.id
+                    WHERE vp.product_id = $1
+                      AND vp.quotation_enabled = true
+                      AND vp.is_active = true
+                      AND v.approval_status = 'approved'
+                      AND v.is_active = true
+                      AND v.is_blocked = false
+                      AND u.is_active = true
+                      AND (p.quotation_limit IS NULL OR vp.stock_quantity >= p.quotation_limit)
                 `,
-                [
-                    userId,
-                    item.vendor_id,
-                    item.product_id,
-                    item.quantity,
-                    item.price_at_added,
-                    requestNote || null,
-                    address.city,
-                    address.state,
-                    address.country,
-                    address.pincode,
-                ]
+                [item.product_id]
             );
 
-            const quotationId = quotationResult.rows[0].id as string;
-            createdQuotationIds.push(quotationId);
-
-            await client.query(
-                `
-                    INSERT INTO quotation_messages (
-                        quotation_id,
-                        sender_user_id,
-                        sender_role,
-                        action,
-                        offer_price,
-                        offer_quantity,
-                        note
-                    ) VALUES ($1, $2, 'client', 'request', $3, $4, $5)
-                `,
-                [quotationId, userId, item.price_at_added, item.quantity, requestNote || null]
-            );
-
-            if (item.vendor_email) {
-                await sendQuotationRequestEmail({
-                    vendorEmail: item.vendor_email,
-                    vendorName: item.vendor_name || "Vendor",
-                    buyerId: userId,
-                    buyerCity: address.city,
-                    productName: item.product_name,
-                    quantity: item.quantity,
-                    requestedPrice: item.price_at_added,
-                    note: requestNote || undefined,
-                });
+            if (eligibleVendorsResult.rows.length === 0) {
+                // Skip this product if no eligible vendors
+                continue;
             }
 
-            // Notify the vendor's user about the new quotation request
-            const vendorUserResult = await client.query(
-                `SELECT user_id FROM vendors WHERE id = $1`, [item.vendor_id]
-            );
-            if (vendorUserResult.rows.length) {
+            // Generate a group ID for this product's quotation requests
+            const groupIdResult = await client.query(`SELECT gen_random_uuid() AS group_id`);
+            const quotationGroupId = groupIdResult.rows[0].group_id as string;
+
+            // Create a quotation_request for EACH eligible vendor
+            for (const vendor of eligibleVendorsResult.rows) {
+                const quotationResult = await client.query(
+                    `
+                        INSERT INTO quotation_requests (
+                            user_id,
+                            vendor_id,
+                            product_id,
+                            requested_quantity,
+                            requested_price,
+                            status,
+                            request_note,
+                            buyer_city,
+                            buyer_state,
+                            buyer_country,
+                            buyer_pincode,
+                            quotation_group_id
+                        ) VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6, $7, $8, $9, $10, $11)
+                        RETURNING id
+                    `,
+                    [
+                        userId,
+                        vendor.vendor_id,
+                        item.product_id,
+                        item.quantity,
+                        item.price_at_added,
+                        requestNote || null,
+                        address.city,
+                        address.state,
+                        address.country,
+                        address.pincode,
+                        quotationGroupId,
+                    ]
+                );
+
+                const quotationId = quotationResult.rows[0].id as string;
+                createdQuotationIds.push(quotationId);
+
+                await client.query(
+                    `
+                        INSERT INTO quotation_messages (
+                            quotation_id,
+                            sender_user_id,
+                            sender_role,
+                            action,
+                            offer_price,
+                            offer_quantity,
+                            note
+                        ) VALUES ($1, $2, 'client', 'request', $3, $4, $5)
+                    `,
+                    [quotationId, userId, item.price_at_added, item.quantity, requestNote || null]
+                );
+
+                if (vendor.vendor_email) {
+                    await sendQuotationRequestEmail({
+                        vendorEmail: vendor.vendor_email,
+                        vendorName: vendor.vendor_name || "Vendor",
+                        buyerId: userId,
+                        buyerCity: address.city,
+                        productName: item.product_name,
+                        quantity: item.quantity,
+                        requestedPrice: item.price_at_added,
+                        note: requestNote || undefined,
+                    });
+                }
+
+                // Notify the vendor
                 await createNotification({
-                    userId: vendorUserResult.rows[0].user_id,
+                    userId: vendor.vendor_user_id,
                     type: "quotation_request_received",
                     title: "New quotation request",
                     body: `You received a quotation request for ${item.product_name} (${item.quantity} units)`,
@@ -175,10 +216,57 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             }
         }
 
+        if (createdQuotationIds.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "No eligible vendors found for the products in your quotation cart." });
+        }
+
         await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
 
         await client.query("COMMIT");
-        return res.status(201).json({ message: "Quotation requests submitted", data: { quotationIds: createdQuotationIds } });
+
+        // Generate base quotation documents (after commit, non-blocking)
+        // We do this outside the transaction so failures don't rollback the quotation
+        const documentGenerationJobs: Array<{ groupId: string; item: any }> = [];
+        const groupsCreated = new Set<string>();
+        for (const item of cartItemsResult.rows) {
+            // Find the group ID for this product's quotation requests
+            const groupResult = await pool.query(
+                `SELECT quotation_group_id FROM quotation_requests
+                 WHERE product_id = $1 AND user_id = $2 AND quotation_group_id IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1`,
+                [item.product_id, userId]
+            );
+            if (groupResult.rows.length > 0) {
+                const groupId = groupResult.rows[0].quotation_group_id;
+                if (!groupsCreated.has(groupId)) {
+                    groupsCreated.add(groupId);
+                    documentGenerationJobs.push({ groupId, item });
+                }
+            }
+        }
+
+        // Generate documents in parallel (fire-and-forget with error logging)
+        for (const job of documentGenerationJobs) {
+            generateBaseQuotationDocument({
+                quotationGroupId: job.groupId,
+                userId,
+                productId: job.item.product_id,
+                productName: job.item.product_name,
+                productDescription: job.item.product_description || undefined,
+                productCategory: job.item.product_category || undefined,
+                requestedQuantity: job.item.quantity,
+                requestedPrice: Number(job.item.price_at_added) || 0,
+                clientCity: address.city || "",
+                clientState: address.state || "",
+                clientPincode: address.pincode || "",
+                clientCountry: address.country || "India",
+            }).catch((err) => {
+                console.error(`[QuotationDocument] Failed to generate document for group ${job.groupId}:`, err);
+            });
+        }
+
+        return res.status(201).json({ message: "Quotation requests submitted to all eligible vendors", data: { quotationIds: createdQuotationIds } });
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Error creating quotation:", error);
@@ -195,33 +283,77 @@ export const getClientQuotationsController = async (req: Request, res: Response)
     }
 
     try {
+        // Return quotations grouped by product (quotation_group_id)
         const result = await pool.query(
             `
                 SELECT
-                    qr.id,
-                    qr.status,
+                    qr.quotation_group_id,
+                    qr.product_id,
+                    p.name AS product_name,
+                    p.quotation_limit,
+                    (SELECT image_url FROM products_images WHERE product_id = qr.product_id AND is_primary = true LIMIT 1) AS product_image,
                     qr.requested_quantity,
                     qr.requested_price,
-                    qr.current_offer_price,
-                    qr.current_offer_quantity,
-                    qr.current_offer_by,
-                    qr.accepted_price,
-                    qr.accepted_quantity,
-                    qr.rejection_reason,
-                    qr.created_at,
-                    qr.updated_at,
-                    p.name AS product_name,
-                    v.company_name AS vendor_name
+                    MIN(qr.created_at) AS created_at,
+                    MAX(qr.updated_at) AS updated_at,
+                    COUNT(qr.id)::int AS total_vendors,
+                    COUNT(qr.id) FILTER (WHERE qr.current_offer_by = 'vendor')::int AS vendors_responded,
+                    COUNT(qr.id) FILTER (WHERE qr.status = 'client_accepted')::int AS accepted_count,
+                    COUNT(qr.id) FILTER (WHERE qr.status IN ('client_rejected', 'vendor_rejected'))::int AS rejected_count,
+                    -- Best offer from vendors
+                    MIN(qr.current_offer_price) FILTER (WHERE qr.current_offer_by = 'vendor' AND qr.current_offer_price IS NOT NULL) AS best_offer_price,
+                    -- Overall group status
+                    CASE
+                        WHEN COUNT(qr.id) FILTER (WHERE qr.status = 'client_accepted') > 0 THEN 'accepted'
+                        WHEN COUNT(qr.id) FILTER (WHERE qr.status IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired')) = COUNT(qr.id) THEN 'closed'
+                        WHEN COUNT(qr.id) FILTER (WHERE qr.current_offer_by = 'vendor') > 0 THEN 'offers_received'
+                        ELSE 'pending'
+                    END AS group_status
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
-                JOIN vendors v ON qr.vendor_id = v.id
-                WHERE qr.user_id = $1
+                WHERE qr.user_id = $1 AND qr.quotation_group_id IS NOT NULL
+                GROUP BY qr.quotation_group_id, qr.product_id, p.name, p.quotation_limit, qr.requested_quantity, qr.requested_price
+                ORDER BY MAX(qr.updated_at) DESC
+            `,
+            [authUser.userId]
+        );
+
+        // Also fetch any legacy quotations without group_id (backward compatibility)
+        const legacyResult = await pool.query(
+            `
+                SELECT
+                    qr.id AS quotation_group_id,
+                    qr.product_id,
+                    p.name AS product_name,
+                    p.quotation_limit,
+                    (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image,
+                    qr.requested_quantity,
+                    qr.requested_price,
+                    qr.created_at,
+                    qr.updated_at,
+                    1 AS total_vendors,
+                    CASE WHEN qr.current_offer_by = 'vendor' THEN 1 ELSE 0 END AS vendors_responded,
+                    CASE WHEN qr.status = 'client_accepted' THEN 1 ELSE 0 END AS accepted_count,
+                    CASE WHEN qr.status IN ('client_rejected', 'vendor_rejected') THEN 1 ELSE 0 END AS rejected_count,
+                    qr.current_offer_price AS best_offer_price,
+                    CASE
+                        WHEN qr.status = 'client_accepted' THEN 'accepted'
+                        WHEN qr.status IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired') THEN 'closed'
+                        WHEN qr.current_offer_by = 'vendor' THEN 'offers_received'
+                        ELSE 'pending'
+                    END AS group_status
+                FROM quotation_requests qr
+                JOIN products p ON qr.product_id = p.id
+                WHERE qr.user_id = $1 AND qr.quotation_group_id IS NULL
                 ORDER BY qr.updated_at DESC
             `,
             [authUser.userId]
         );
 
-        return res.status(200).json({ data: result.rows });
+        const allGroups = [...result.rows, ...legacyResult.rows];
+        allGroups.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+
+        return res.status(200).json({ data: allGroups });
     } catch (error) {
         console.error("Error fetching client quotations:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -236,40 +368,143 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
 
     const { id } = req.params;
     if (!id) {
-        return res.status(400).json({ message: "Quotation ID is required" });
+        return res.status(400).json({ message: "Quotation group ID is required" });
     }
 
     try {
-        const quotationResult = await pool.query(
+        // id can be a quotation_group_id or a single quotation id (legacy)
+        // First try to find by quotation_group_id
+        let vendorQuotations = await pool.query(
             `
                 SELECT
                     qr.*,
                     p.name AS product_name,
-                    v.company_name AS vendor_name
+                    p.quotation_limit,
+                    v.company_name AS vendor_name,
+                    (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
                 JOIN vendors v ON qr.vendor_id = v.id
-                WHERE qr.id = $1 AND qr.user_id = $2
-                LIMIT 1
+                WHERE qr.quotation_group_id = $1 AND qr.user_id = $2
+                ORDER BY
+                    CASE WHEN qr.status = 'client_accepted' THEN 0 ELSE 1 END,
+                    qr.current_offer_price ASC NULLS LAST,
+                    qr.updated_at DESC
             `,
             [id, authUser.userId]
         );
 
-        if (quotationResult.rows.length === 0) {
+        // Fallback: try as a single quotation ID (legacy)
+        if (vendorQuotations.rows.length === 0) {
+            vendorQuotations = await pool.query(
+                `
+                    SELECT
+                        qr.*,
+                        p.name AS product_name,
+                        p.quotation_limit,
+                        v.company_name AS vendor_name,
+                        (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image
+                    FROM quotation_requests qr
+                    JOIN products p ON qr.product_id = p.id
+                    JOIN vendors v ON qr.vendor_id = v.id
+                    WHERE qr.id = $1 AND qr.user_id = $2
+                `,
+                [id, authUser.userId]
+            );
+        }
+
+        if (vendorQuotations.rows.length === 0) {
             return res.status(404).json({ message: "Quotation not found" });
         }
 
+        // Get messages for ALL quotations in this group
+        const quotationIds = vendorQuotations.rows.map((q: any) => q.id);
         const messagesResult = await pool.query(
             `
-                SELECT id, sender_role, action, offer_price, offer_quantity, note, reason, created_at
-                FROM quotation_messages
-                WHERE quotation_id = $1
-                ORDER BY created_at ASC
+                SELECT qm.id, qm.quotation_id, qm.sender_role, qm.action, qm.offer_price, qm.offer_quantity, qm.note, qm.reason, qm.created_at,
+                       v.company_name AS vendor_name
+                FROM quotation_messages qm
+                LEFT JOIN quotation_requests qr ON qm.quotation_id = qr.id
+                LEFT JOIN vendors v ON qr.vendor_id = v.id
+                WHERE qm.quotation_id = ANY($1)
+                ORDER BY qm.created_at ASC
             `,
-            [id]
+            [quotationIds]
         );
 
-        return res.status(200).json({ data: { quotation: quotationResult.rows[0], messages: messagesResult.rows } });
+        // Group messages by quotation_id for convenience
+        const messagesByQuotation: Record<string, any[]> = {};
+        for (const msg of messagesResult.rows) {
+            if (!messagesByQuotation[msg.quotation_id]) {
+                messagesByQuotation[msg.quotation_id] = [];
+            }
+            messagesByQuotation[msg.quotation_id].push(msg);
+        }
+
+        // Build response with product info and vendor quotations
+        const firstQuotation = vendorQuotations.rows[0];
+
+        // Get base quotation document
+        const groupId = firstQuotation.quotation_group_id || id;
+        const docResult = await pool.query(
+            `SELECT quotation_number, document_url, s3_key, valid_until, created_at
+             FROM quotation_documents WHERE quotation_group_id = $1 LIMIT 1`,
+            [groupId]
+        );
+        const docRow = docResult.rows.length > 0 ? docResult.rows[0] : null;
+        let document = null;
+        if (docRow) {
+            let documentUrl = docRow.document_url;
+            if (docRow.s3_key) {
+                try {
+                    documentUrl = await getPresignedUrl(docRow.s3_key);
+                } catch (s3Err) {
+                    console.error("Failed to generate presigned URL for base doc:", s3Err);
+                }
+            }
+            document = {
+                quotation_number: docRow.quotation_number,
+                document_url: documentUrl,
+                valid_until: docRow.valid_until,
+                created_at: docRow.created_at,
+            };
+        }
+
+        const mappedVendorQuotations = [];
+        for (const q of vendorQuotations.rows) {
+            let vendorDocUrl = q.vendor_document_url;
+            if (q.vendor_document_s3_key) {
+                try {
+                    vendorDocUrl = await getPresignedUrl(q.vendor_document_s3_key);
+                } catch (s3Err) {
+                    console.error(`Failed to generate presigned URL for vendor doc of request ${q.id}:`, s3Err);
+                }
+            }
+            mappedVendorQuotations.push({
+                ...q,
+                vendor_document_url: vendorDocUrl,
+                messages: messagesByQuotation[q.id] || [],
+            });
+        }
+
+        return res.status(200).json({
+            data: {
+                product_id: firstQuotation.product_id,
+                product_name: firstQuotation.product_name,
+                product_image: firstQuotation.product_image,
+                quotation_limit: firstQuotation.quotation_limit,
+                requested_quantity: firstQuotation.requested_quantity,
+                requested_price: firstQuotation.requested_price,
+                quotation_group_id: groupId,
+                document: document ? {
+                    quotation_number: document.quotation_number,
+                    document_url: document.document_url,
+                    valid_until: document.valid_until,
+                    created_at: document.created_at,
+                } : null,
+                vendor_quotations: mappedVendorQuotations,
+            }
+        });
     } catch (error) {
         console.error("Error fetching quotation:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -416,6 +651,48 @@ export const respondClientQuotationController = async (req: Request, res: Respon
                 `,
                 [quotation.current_offer_price, quotation.current_offer_quantity, orderId, id]
             );
+
+            // Auto-reject other vendors in the same group
+            if (quotation.quotation_group_id) {
+                const otherVendorQuotations = await client.query(
+                    `SELECT id, vendor_id FROM quotation_requests
+                     WHERE quotation_group_id = $1 AND id != $2
+                       AND status NOT IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired')`,
+                    [quotation.quotation_group_id, id]
+                );
+
+                for (const otherQ of otherVendorQuotations.rows) {
+                    await client.query(
+                        `UPDATE quotation_requests
+                         SET status = 'client_rejected',
+                             rejection_reason = 'Another vendor was selected for this quotation',
+                             updated_at = NOW()
+                         WHERE id = $1`,
+                        [otherQ.id]
+                    );
+
+                    await client.query(
+                        `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, reason, note)
+                         VALUES ($1, $2, 'client', 'reject', 'Another vendor was selected', 'Auto-rejected: client accepted another vendor offer')`,
+                        [otherQ.id, authUser.userId]
+                    );
+
+                    // Notify rejected vendor
+                    const rejectedVendorUser = await client.query(
+                        `SELECT user_id FROM vendors WHERE id = $1`, [otherQ.vendor_id]
+                    );
+                    if (rejectedVendorUser.rows.length) {
+                        await createNotification({
+                            userId: rejectedVendorUser.rows[0].user_id,
+                            type: "quotation_rejected",
+                            title: "Quotation closed — another vendor selected",
+                            body: `The client selected a different vendor for this quotation.`,
+                            referenceType: "quotation",
+                            referenceId: otherQ.id,
+                        });
+                    }
+                }
+            }
 
             await client.query(
                 `
@@ -597,7 +874,9 @@ export const getVendorQuotationByIdController = async (req: Request, res: Respon
             `
                 SELECT
                     qr.*,
-                    p.name AS product_name
+                    p.name AS product_name,
+                    p.description AS product_description,
+                    p.quotation_limit
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
                 WHERE qr.id = $1 AND qr.vendor_id = $2
@@ -610,6 +889,8 @@ export const getVendorQuotationByIdController = async (req: Request, res: Respon
             return res.status(404).json({ message: "Quotation not found" });
         }
 
+        const quotation = quotationResult.rows[0];
+
         const messagesResult = await pool.query(
             `
                 SELECT id, sender_role, action, offer_price, offer_quantity, note, reason, created_at
@@ -620,7 +901,50 @@ export const getVendorQuotationByIdController = async (req: Request, res: Respon
             [id]
         );
 
-        return res.status(200).json({ data: { quotation: quotationResult.rows[0], messages: messagesResult.rows } });
+        // Get base quotation document
+        const groupId = quotation.quotation_group_id;
+        let document = null;
+        if (groupId) {
+            const docResult = await pool.query(
+                `SELECT quotation_number, document_url, s3_key, valid_until, created_at
+                 FROM quotation_documents WHERE quotation_group_id = $1 LIMIT 1`,
+                [groupId]
+            );
+            if (docResult.rows.length > 0) {
+                const docRow = docResult.rows[0];
+                let documentUrl = docRow.document_url;
+                if (docRow.s3_key) {
+                    try {
+                        documentUrl = await getPresignedUrl(docRow.s3_key);
+                    } catch (s3Err) {
+                        console.error("Failed to generate presigned URL for base doc (vendor):", s3Err);
+                    }
+                }
+                document = {
+                    quotation_number: docRow.quotation_number,
+                    document_url: documentUrl,
+                    valid_until: docRow.valid_until,
+                    created_at: docRow.created_at,
+                };
+            }
+        }
+
+        // Generate presigned URL for the vendor's own quotation document if it exists
+        if (quotation.vendor_document_s3_key) {
+            try {
+                quotation.vendor_document_url = await getPresignedUrl(quotation.vendor_document_s3_key);
+            } catch (s3Err) {
+                console.error("Failed to generate presigned URL for vendor own doc:", s3Err);
+            }
+        }
+
+        return res.status(200).json({
+            data: {
+                quotation,
+                messages: messagesResult.rows,
+                document,
+            }
+        });
     } catch (error) {
         console.error("Error fetching vendor quotation:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -639,6 +963,8 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
     const offerQuantity = req.body?.offerQuantity;
     const reason = req.body?.reason;
     const note = req.body?.note;
+    const deliveryDays = req.body?.deliveryDays ? Number(req.body.deliveryDays) : null;
+    const tokenPercentage = req.body?.tokenPercentage != null ? Number(req.body.tokenPercentage) : null;
 
     if (!id || !action) {
         return res.status(400).json({ message: "Quotation ID and action are required" });
@@ -693,6 +1019,18 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
         if (action === "offer" || action === "counter") {
             const nextStatus = action === "offer" ? "vendor_offered" : "vendor_countered";
 
+            // On first offer, delivery_days and token_percentage are required
+            if (action === "offer" && (deliveryDays == null || tokenPercentage == null)) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ message: "Delivery days and token money percentage are required for the first offer" });
+            }
+
+            // Calculate token amount
+            const totalAmount = Number(offerPrice) * Number(offerQuantity);
+            const gstAmount = totalAmount * 0.18; // 18% GST
+            const grandTotal = totalAmount + gstAmount;
+            const tokenAmount = tokenPercentage != null ? (tokenPercentage / 100) * grandTotal : null;
+
             await client.query(
                 `
                     UPDATE quotation_requests
@@ -700,10 +1038,13 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
                         current_offer_price = $2,
                         current_offer_quantity = $3,
                         current_offer_by = 'vendor',
+                        delivery_days = COALESCE($5, delivery_days),
+                        token_percentage = COALESCE($6, token_percentage),
+                        token_amount = COALESCE($7, token_amount),
                         updated_at = NOW()
                     WHERE id = $4
                 `,
-                [nextStatus, offerPrice, offerQuantity, id]
+                [nextStatus, offerPrice, offerQuantity, id, deliveryDays, tokenPercentage, tokenAmount]
             );
 
             await client.query(
@@ -772,6 +1113,33 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
         }
 
         await client.query("COMMIT");
+
+        // Generate vendor-specific document on first offer (non-blocking)
+        if ((action === "offer") && quotation.quotation_group_id && deliveryDays && tokenPercentage != null) {
+            const vendorNameResult = await pool.query(
+                `SELECT company_name FROM vendors WHERE id = $1`, [vendorId]
+            );
+            const vendorName = vendorNameResult.rows[0]?.company_name || "Vendor";
+
+            generateVendorQuotationDocument({
+                quotationGroupId: quotation.quotation_group_id,
+                vendorId,
+                vendorName,
+                offerPrice: Number(offerPrice),
+                offerQuantity: Number(offerQuantity),
+                deliveryDays,
+                tokenPercentage,
+            }).then(async (result) => {
+                // Save vendor document URL to quotation_requests
+                await pool.query(
+                    `UPDATE quotation_requests SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+                    [result.documentUrl, result.s3Key, id]
+                );
+            }).catch((err) => {
+                console.error(`[QuotationDocument] Failed to generate vendor document for quotation ${id}:`, err);
+            });
+        }
+
         return res.status(200).json({ message: "Quotation response saved" });
     } catch (error) {
         await client.query("ROLLBACK");

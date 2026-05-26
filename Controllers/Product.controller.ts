@@ -195,7 +195,7 @@ async function getVendorProfileIfExists(userId: string) {
 }
 
 export const addProductController = async (req: Request, res: Response): Promise<Response> => {
-    const { name, description, category, productType, specifications } = req.body;
+    const { name, description, category, productType, specifications, quotationLimit } = req.body;
 
     const { role, userId } = (req as any).user;
     if (!name || !description || !category || !productType) {
@@ -240,6 +240,12 @@ export const addProductController = async (req: Request, res: Response): Promise
         const resolvedCategoryId = await resolveCategoryId(String(category));
         await client.query("BEGIN");
 
+        const parsedQuotationLimit = quotationLimit ? Number(quotationLimit) : null;
+        if (parsedQuotationLimit !== null && (isNaN(parsedQuotationLimit) || parsedQuotationLimit < 1)) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "Quotation limit must be a positive integer" });
+        }
+
         const query = `
             INSERT INTO products (
                 name,
@@ -248,9 +254,10 @@ export const addProductController = async (req: Request, res: Response): Promise
                 product_type,
                 approval_status,
                 created_by_user_id,
-                is_active
+                is_active,
+                quotation_limit
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             returning *
         `;
         const values = [
@@ -260,7 +267,8 @@ export const addProductController = async (req: Request, res: Response): Promise
             productType,
             approvalStatus,
             userId,
-            !actsAsVendor
+            !actsAsVendor,
+            parsedQuotationLimit
         ];
         const result = await client.query(query, values);
 
@@ -315,10 +323,6 @@ export const addVendorProductController = async (req: Request, res: Response): P
         return res.status(400).json({ message: "Product ID, price, moq, and stockQuantity are required" });
     }
 
-    if (Boolean(quotationEnabled) && (quotationMinQty === undefined || quotationMinQty === null || Number(quotationMinQty) < 1)) {
-        return res.status(400).json({ message: "Quotation minimum quantity is required when quotation is enabled" });
-    }
-
     try {
         const vendorProfile = await getVendorProfileIfExists(userId);
         if (role !== "vendor" && !vendorProfile) {
@@ -328,7 +332,7 @@ export const addVendorProductController = async (req: Request, res: Response): P
         const vendor = await getApprovedVendorProfile(userId);
 
         const productResult = await pool.query(
-            `SELECT id, approval_status, created_by_user_id FROM products WHERE id = $1`,
+            `SELECT id, approval_status, created_by_user_id, quotation_limit FROM products WHERE id = $1`,
             [productId]
         );
 
@@ -342,6 +346,15 @@ export const addVendorProductController = async (req: Request, res: Response): P
 
         if (product.approval_status !== "approved" && !canAttachPendingOwnProduct) {
             return res.status(403).json({ message: "You can only add pricing for approved products or your own pending submission." });
+        }
+
+        // Validate: vendor stock must be >= product quotation_limit to opt in for quotations
+        if (Boolean(quotationEnabled) && product.quotation_limit) {
+            if (Number(stockQuantity) < Number(product.quotation_limit)) {
+                return res.status(400).json({
+                    message: `To enable quotations, your stock (${stockQuantity}) must be at least the product's quotation limit (${product.quotation_limit}).`
+                });
+            }
         }
 
         const vendorId = vendor.id;
@@ -639,6 +652,8 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.standard,
                 p.rating,
                 p.review_count,
+                p.quotation_limit,
+                p.vendor_can_set_quotation_limit,
                 ${approvedSpecificationsSelect},
 
                 -- Images array
@@ -662,7 +677,6 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
                         'quotation_enabled', vp.quotation_enabled,
-                        'quotation_min_qty', vp.quotation_min_qty,
                         'rating', v.rating,
                         'review_count', v.review_count,
                         'latitude', va.latitude,
@@ -1183,6 +1197,8 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.grade,
                 p.application,
                 p.standard,
+                p.quotation_limit,
+                p.vendor_can_set_quotation_limit,
                 vp.price,
                 vp.moq,
                 vp.stock_quantity,
@@ -1242,10 +1258,6 @@ export const updateVendorProductController = async (req: Request, res: Response)
         return res.status(400).json({ message: "Price, MOQ, stock quantity, active status, and quotation enabled are required" });
     }
 
-    if (Boolean(quotationEnabled) && (quotationMinQty === undefined || quotationMinQty === null || Number(quotationMinQty) < 1)) {
-        return res.status(400).json({ message: "Quotation minimum quantity is required when quotation is enabled" });
-    }
-
     if (role !== "vendor") {
         return res.status(403).json({ message: "Unauthorized! Only vendors can update their products." });
     }
@@ -1266,6 +1278,19 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         const vendorId = vendor.id;
+
+        // Fetch product quotation_limit for validation
+        const productCheck = await pool.query(
+            `SELECT quotation_limit FROM products WHERE id = $1`,
+            [productId]
+        );
+        if (productCheck.rows.length > 0 && Boolean(quotationEnabled) && productCheck.rows[0].quotation_limit) {
+            if (Number(stockQuantity) < Number(productCheck.rows[0].quotation_limit)) {
+                return res.status(400).json({
+                    message: `To enable quotations, your stock (${stockQuantity}) must be at least the product's quotation limit (${productCheck.rows[0].quotation_limit}).`
+                });
+            }
+        }
 
         // Check if the vendor product exists
         const existingProductResult = await pool.query(

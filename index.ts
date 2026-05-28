@@ -17,11 +17,15 @@ import quotationRouter from './Routers/Quotation.router';
 import notificationRouter from './Routers/Notification.router';
 import uploadRouter from './Routers/Upload.router';
 import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
+import { createServer } from 'http';
+import { initSocket } from './socket';
 
 dotenv.config();
 
 // Create an Express application
 const app = express();
+const httpServer = createServer(app);
+initSocket(httpServer);
 const PORT = 9000;
 
 
@@ -91,7 +95,7 @@ async function startServer() {
         await ensureMarketplaceSchema();
         startAbandonedReminderJob();
 
-        app.listen(PORT, () => {
+        httpServer.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}🚀🚀`);
         });
     } catch (error) {

@@ -82,7 +82,8 @@ export async function registerUser(req: Request, res: Response): Promise<Respons
                 [hashedOTP, expiryTime, existingUser.id]
             );
 
-            if(process.env.Production !== 'true') {
+            console.log(`Generated OTP for ${email}: ${plainOTP} (expires at ${expiryTime.toISOString()})`);
+            if (process.env.Production !== 'true') {
                 console.log(`Generated OTP for ${email}: ${plainOTP} (expires at ${expiryTime.toISOString()})`);
             }
 
@@ -156,7 +157,7 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
             return res.status(401).json({ message: 'Invalid email' });
         }
 
-        if(user.role != role)
+        if (user.role != role)
             return res.status(401).json({ message: `This email is associated with ${user.role} and you are trying to log in as ${role}! That is not allowed.` });
 
         const isPasswordValid = await bcrypt.compare(password, user.password_hash);
@@ -205,7 +206,7 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
 export async function logoutUser(req: Request, res: Response): Promise<Response> {
     const isRequestFrom = req.headers['x-request-from'] || '';
     const refreshToken = req.cookies[`${isRequestFrom}RefreshToken`];
-    
+
     if (!refreshToken) {
         return res.status(400).json({ message: 'Refresh token is required' });
     }
@@ -394,128 +395,128 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             return res.status(401).json({ message: 'Invalid OTP' });
         }
 
-            const normalizedCompanyName = normalizeRequiredText(req.body.companyName);
-            const normalizedBusinessType = normalizeRequiredText(req.body.businessType);
-            const normalizedGstNumber = normalizeRequiredText(req.body.gstNumber);
-            const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
-            const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
-            const normalizedPhone = normalizeRequiredText(req.body.phone);
-            const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
-            const normalizedDesignation = normalizeRequiredText(req.body.designation);
-            const normalizedBusinessDescription = normalizeRequiredText(req.body.businessDescription);
-            const normalizedAddress = normalizeRequiredText(req.body.address);
-            const normalizedCity = normalizeRequiredText(req.body.city);
-            const normalizedState = normalizeRequiredText(req.body.state);
-            const normalizedCountry = normalizeRequiredText(req.body.country);
-            const normalizedPincode = normalizeRequiredText(req.body.pincode);
-            const parsedLatitude = parseCoordinate(req.body.latitude);
-            const parsedLongitude = parseCoordinate(req.body.longitude);
-            const normalizedCreditCycle = normalizeRequiredText(req.body.creditCycle);
-            const parsedMinCommission = req.body.minimumCommissionPercentage ? parseInt(req.body.minimumCommissionPercentage) : null;
-            const parsedMaxCommission = req.body.maximumCommissionPercentage ? parseInt(req.body.maximumCommissionPercentage) : null;
+        const normalizedCompanyName = normalizeRequiredText(req.body.companyName);
+        const normalizedBusinessType = normalizeRequiredText(req.body.businessType);
+        const normalizedGstNumber = normalizeRequiredText(req.body.gstNumber);
+        const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
+        const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
+        const normalizedPhone = normalizeRequiredText(req.body.phone);
+        const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
+        const normalizedDesignation = normalizeRequiredText(req.body.designation);
+        const normalizedBusinessDescription = normalizeRequiredText(req.body.businessDescription);
+        const normalizedAddress = normalizeRequiredText(req.body.address);
+        const normalizedCity = normalizeRequiredText(req.body.city);
+        const normalizedState = normalizeRequiredText(req.body.state);
+        const normalizedCountry = normalizeRequiredText(req.body.country);
+        const normalizedPincode = normalizeRequiredText(req.body.pincode);
+        const parsedLatitude = parseCoordinate(req.body.latitude);
+        const parsedLongitude = parseCoordinate(req.body.longitude);
+        const normalizedCreditCycle = normalizeRequiredText(req.body.creditCycle);
+        const parsedMinCommission = req.body.minimumCommissionPercentage ? parseInt(req.body.minimumCommissionPercentage) : null;
+        const parsedMaxCommission = req.body.maximumCommissionPercentage ? parseInt(req.body.maximumCommissionPercentage) : null;
 
-            const shouldPersistVendorSetup = [
-                normalizedCompanyName,
-                normalizedBusinessType,
-                normalizedGstNumber,
-                normalizedPhone,
-                normalizedDesignation,
-                normalizedBusinessDescription,
-                normalizedAddress,
-                normalizedCity,
-                normalizedState,
-                normalizedCountry,
-                normalizedPincode,
-                normalizedCompanyWebsite,
-                normalizedGstCertificateLink,
-                normalizedAlternativeNumber,
-                normalizedCreditCycle,
-            ].some((value) => value.length > 0) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
+        const shouldPersistVendorSetup = [
+            normalizedCompanyName,
+            normalizedBusinessType,
+            normalizedGstNumber,
+            normalizedPhone,
+            normalizedDesignation,
+            normalizedBusinessDescription,
+            normalizedAddress,
+            normalizedCity,
+            normalizedState,
+            normalizedCountry,
+            normalizedPincode,
+            normalizedCompanyWebsite,
+            normalizedGstCertificateLink,
+            normalizedAlternativeNumber,
+            normalizedCreditCycle,
+        ].some((value) => value.length > 0) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
 
-            if (shouldPersistVendorSetup) {
-                if (
-                    !normalizedCompanyName ||
-                    !normalizedBusinessType ||
-                    !normalizedGstNumber ||
-                    !normalizedPhone ||
-                    !normalizedDesignation ||
-                    !normalizedBusinessDescription ||
-                    !normalizedAddress ||
-                    !normalizedCity ||
-                    !normalizedState ||
-                    !normalizedCountry ||
-                    !normalizedPincode ||
-                    !normalizedCreditCycle ||
-                    parsedMinCommission === null ||
-                    parsedMaxCommission === null ||
-                    parsedLatitude === null ||
-                    parsedLongitude === null
-                ) {
-                    return res.status(400).json({ message: "Missing vendor setup fields. All fields including commission details are required." });
-                }
-
-                if (!/^\d{6}$/.test(normalizedPincode)) {
-                    return res.status(400).json({ message: "Pincode must be 6 digits." });
-                }
-
-                if (parsedLatitude < -90 || parsedLatitude > 90 || parsedLongitude < -180 || parsedLongitude > 180) {
-                    return res.status(400).json({ message: "Latitude/longitude out of range." });
-                }
-
-                if (parsedMinCommission < 0 || parsedMinCommission > 100) {
-                    return res.status(400).json({ message: "Minimum commission percentage must be between 0 and 100." });
-                }
-
-                if (parsedMaxCommission < 0 || parsedMaxCommission > 100) {
-                    return res.status(400).json({ message: "Maximum commission percentage must be between 0 and 100." });
-                }
-
-                if (parsedMinCommission > parsedMaxCommission) {
-                    return res.status(400).json({ message: "Minimum commission cannot be greater than maximum commission." });
-                }
+        if (shouldPersistVendorSetup) {
+            if (
+                !normalizedCompanyName ||
+                !normalizedBusinessType ||
+                !normalizedGstNumber ||
+                !normalizedPhone ||
+                !normalizedDesignation ||
+                !normalizedBusinessDescription ||
+                !normalizedAddress ||
+                !normalizedCity ||
+                !normalizedState ||
+                !normalizedCountry ||
+                !normalizedPincode ||
+                !normalizedCreditCycle ||
+                parsedMinCommission === null ||
+                parsedMaxCommission === null ||
+                parsedLatitude === null ||
+                parsedLongitude === null
+            ) {
+                return res.status(400).json({ message: "Missing vendor setup fields. All fields including commission details are required." });
             }
 
+            if (!/^\d{6}$/.test(normalizedPincode)) {
+                return res.status(400).json({ message: "Pincode must be 6 digits." });
+            }
 
-                    const selectedCategoryCodes = normalizeCategoryCodes(req.body.vendorCategories);
+            if (parsedLatitude < -90 || parsedLatitude > 90 || parsedLongitude < -180 || parsedLongitude > 180) {
+                return res.status(400).json({ message: "Latitude/longitude out of range." });
+            }
 
-                    // Validate that at least one category is selected if vendor setup is being completed
-                    if (shouldPersistVendorSetup && selectedCategoryCodes.length === 0) {
-                        return res.status(400).json({ message: "Please select at least one vendor category." });
-                    }
+            if (parsedMinCommission < 0 || parsedMinCommission > 100) {
+                return res.status(400).json({ message: "Minimum commission percentage must be between 0 and 100." });
+            }
 
-                    if (selectedCategoryCodes.length > 3) {
-                        return res.status(400).json({ message: "You can select up to 3 vendor categories." });
-                    }
+            if (parsedMaxCommission < 0 || parsedMaxCommission > 100) {
+                return res.status(400).json({ message: "Maximum commission percentage must be between 0 and 100." });
+            }
 
-            const client = await pool.connect();
-            let userRole = user.role;
+            if (parsedMinCommission > parsedMaxCommission) {
+                return res.status(400).json({ message: "Minimum commission cannot be greater than maximum commission." });
+            }
+        }
 
-            try {
-                await client.query("BEGIN");
 
-                await client.query(
-                    'UPDATE users SET is_verified = TRUE, OTP = NULL, OTP_Expiry = NULL WHERE id = $1',
-                    [user.id]
-                );
+        const selectedCategoryCodes = normalizeCategoryCodes(req.body.vendorCategories);
 
-                if (shouldPersistVendorSetup) {
-                    const appNumber = `APP-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`;
-                    const duplicateGst = await client.query(
-                        `
+        // Validate that at least one category is selected if vendor setup is being completed
+        if (shouldPersistVendorSetup && selectedCategoryCodes.length === 0) {
+            return res.status(400).json({ message: "Please select at least one vendor category." });
+        }
+
+        if (selectedCategoryCodes.length > 3) {
+            return res.status(400).json({ message: "You can select up to 3 vendor categories." });
+        }
+
+        const client = await pool.connect();
+        let userRole = user.role;
+
+        try {
+            await client.query("BEGIN");
+
+            await client.query(
+                'UPDATE users SET is_verified = TRUE, OTP = NULL, OTP_Expiry = NULL WHERE id = $1',
+                [user.id]
+            );
+
+            if (shouldPersistVendorSetup) {
+                const appNumber = `APP-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`;
+                const duplicateGst = await client.query(
+                    `
                             SELECT user_id
                             FROM vendors
                             WHERE gst_number = $1 AND user_id <> $2
                         `,
-                        [normalizedGstNumber, user.id]
-                    );
+                    [normalizedGstNumber, user.id]
+                );
 
-                    if (duplicateGst.rows.length > 0) {
-                        await client.query("ROLLBACK");
-                        return res.status(409).json({ message: "This GST number is already registered with another vendor." });
-                    }
+                if (duplicateGst.rows.length > 0) {
+                    await client.query("ROLLBACK");
+                    return res.status(409).json({ message: "This GST number is already registered with another vendor." });
+                }
 
-                    await client.query(
-                        `
+                await client.query(
+                    `
                             INSERT INTO vendors (
                                 user_id,
                                 company_name,
@@ -555,108 +556,108 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 application_number = COALESCE(vendors.application_number, EXCLUDED.application_number),
                                 updated_at = NOW()
                         `,
-                        [
-                            user.id,
-                            normalizedCompanyName,
-                            normalizedGstNumber,
-                            normalizedGstCertificateLink,
-                            normalizedBusinessType,
-                            normalizedCompanyWebsite,
-                            normalizedPhone,
-                            normalizedAlternativeNumber,
-                            normalizedDesignation,
-                            normalizedBusinessDescription,
-                            normalizedCreditCycle,
-                            parsedMinCommission,
-                            parsedMaxCommission,
-                            appNumber
-                        ]
-                    );
+                    [
+                        user.id,
+                        normalizedCompanyName,
+                        normalizedGstNumber,
+                        normalizedGstCertificateLink,
+                        normalizedBusinessType,
+                        normalizedCompanyWebsite,
+                        normalizedPhone,
+                        normalizedAlternativeNumber,
+                        normalizedDesignation,
+                        normalizedBusinessDescription,
+                        normalizedCreditCycle,
+                        parsedMinCommission,
+                        parsedMaxCommission,
+                        appNumber
+                    ]
+                );
 
-                    await client.query(
-                        `
+                await client.query(
+                    `
                             INSERT INTO addresses (user_id, address, city, state, country, pincode, latitude, longitude, updated_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                         `,
-                        [
-                            user.id,
-                            normalizedAddress,
-                            normalizedCity,
-                            normalizedState,
-                            normalizedCountry,
-                            normalizedPincode,
-                            parsedLatitude,
-                            parsedLongitude
-                        ]
+                    [
+                        user.id,
+                        normalizedAddress,
+                        normalizedCity,
+                        normalizedState,
+                        normalizedCountry,
+                        normalizedPincode,
+                        parsedLatitude,
+                        parsedLongitude
+                    ]
+                );
+
+                // Get the vendor record to link categories
+                const vendorResult = await client.query(
+                    `SELECT id FROM vendors WHERE user_id = $1`,
+                    [user.id]
+                );
+
+                if (vendorResult.rows.length > 0) {
+                    const vendorId = vendorResult.rows[0].id;
+
+                    // Delete existing vendor categories first (for updates)
+                    await client.query(
+                        `DELETE FROM vendor_categories WHERE vendor_id = $1`,
+                        [vendorId]
                     );
 
-                    // Get the vendor record to link categories
-                    const vendorResult = await client.query(
-                        `SELECT id FROM vendors WHERE user_id = $1`,
-                        [user.id]
-                    );
+                    // Insert selected categories
+                    if (selectedCategoryCodes.length > 0) {
+                        for (const categoryCode of selectedCategoryCodes) {
+                            const categoryResult = await client.query(
+                                `SELECT id FROM product_category WHERE code = $1 AND is_active = TRUE`,
+                                [categoryCode]
+                            );
 
-                    if (vendorResult.rows.length > 0) {
-                        const vendorId = vendorResult.rows[0].id;
-
-                        // Delete existing vendor categories first (for updates)
-                        await client.query(
-                            `DELETE FROM vendor_categories WHERE vendor_id = $1`,
-                            [vendorId]
-                        );
-
-                        // Insert selected categories
-                        if (selectedCategoryCodes.length > 0) {
-                            for (const categoryCode of selectedCategoryCodes) {
-                                const categoryResult = await client.query(
-                                    `SELECT id FROM product_category WHERE code = $1 AND is_active = TRUE`,
-                                    [categoryCode]
-                                );
-
-                                if (categoryResult.rows.length > 0) {
-                                    const categoryId = categoryResult.rows[0].id;
-                                    await client.query(
-                                        `
+                            if (categoryResult.rows.length > 0) {
+                                const categoryId = categoryResult.rows[0].id;
+                                await client.query(
+                                    `
                                             INSERT INTO vendor_categories (vendor_id, category_id)
                                             VALUES ($1, $2)
                                             ON CONFLICT (vendor_id, category_id) DO NOTHING
                                         `,
-                                        [vendorId, categoryId]
-                                    );
-                                }
+                                    [vendorId, categoryId]
+                                );
                             }
                         }
                     }
                 }
-
-                const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
-                const accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
-
-                const tokenResult = await client.query('UPDATE users SET refresh_token = $1 WHERE id = $2 RETURNING role', [refreshToken, user.id]);
-                userRole = tokenResult.rows[0]?.role || userRole;
-
-                await client.query("COMMIT");
-
-                res.cookie(`${userRole}RefreshToken`, refreshToken, {
-                    ...COOKIE_OPTIONS,
-                    maxAge: 45 * 24 * 60 * 60 * 1000,
-                });
-
-                res.cookie(`${userRole}AccessToken`, accessToken, {
-                    ...COOKIE_OPTIONS,
-                    maxAge: 30 * 60 * 1000,
-                });
-            } catch (transactionError) {
-                await client.query("ROLLBACK");
-                throw transactionError;
-            } finally {
-                client.release();
             }
+
+            const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
+            const accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+
+            const tokenResult = await client.query('UPDATE users SET refresh_token = $1 WHERE id = $2 RETURNING role', [refreshToken, user.id]);
+            userRole = tokenResult.rows[0]?.role || userRole;
+
+            await client.query("COMMIT");
+
+            res.cookie(`${userRole}RefreshToken`, refreshToken, {
+                ...COOKIE_OPTIONS,
+                maxAge: 45 * 24 * 60 * 60 * 1000,
+            });
+
+            res.cookie(`${userRole}AccessToken`, accessToken, {
+                ...COOKIE_OPTIONS,
+                maxAge: 30 * 60 * 1000,
+            });
+        } catch (transactionError) {
+            await client.query("ROLLBACK");
+            throw transactionError;
+        } finally {
+            client.release();
+        }
 
         return res.status(200).json({
             message: 'Email verified successfully. Registration complete.',
-                user: { userId: user.id, username: user.name, email: user.email, role: user.role },
-                vendorSetupComplete: shouldPersistVendorSetup
+            user: { userId: user.id, username: user.name, email: user.email, role: user.role },
+            vendorSetupComplete: shouldPersistVendorSetup
         });
     } catch (e) {
         console.error("Error while verifying registered user: ", e);

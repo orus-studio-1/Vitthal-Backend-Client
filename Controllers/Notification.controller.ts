@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { sendNotificationToUser } from "../socket";
 
 export const getNotificationsController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
@@ -7,8 +8,8 @@ export const getNotificationsController = async (req: Request, res: Response): P
         return res.status(403).json({ message: "Authentication required" });
     }
 
-    const limit = Math.min(Number(req.query.limit) || 50, 100);
-    const offset = Number(req.query.offset) || 0;
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const cursor = req.query.cursor as string | undefined; // ISO timestamp cursor
 
     try {
         const countResult = await pool.query(
@@ -16,20 +17,40 @@ export const getNotificationsController = async (req: Request, res: Response): P
             [authUser.userId]
         );
 
-        const result = await pool.query(
-            `SELECT id, type, title, body, reference_type, reference_id, is_read, created_at
-             FROM notifications
-             WHERE user_id = $1
-             ORDER BY created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [authUser.userId, limit, offset]
-        );
+        let result;
+        if (cursor) {
+            // Cursor-based: fetch notifications older than the cursor
+            result = await pool.query(
+                `SELECT id, type, title, body, reference_type, reference_id, is_read, created_at
+                 FROM notifications
+                 WHERE user_id = $1 AND created_at < $2
+                 ORDER BY created_at DESC
+                 LIMIT $3`,
+                [authUser.userId, cursor, limit]
+            );
+        } else {
+            // First page: no cursor
+            result = await pool.query(
+                `SELECT id, type, title, body, reference_type, reference_id, is_read, created_at
+                 FROM notifications
+                 WHERE user_id = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2`,
+                [authUser.userId, limit]
+            );
+        }
+
+        const rows = result.rows;
+        const hasMore = rows.length === limit;
+        const nextCursor = hasMore && rows.length > 0 ? rows[rows.length - 1].created_at : null;
 
         return res.status(200).json({
             data: {
-                notifications: result.rows,
+                notifications: rows,
                 total: Number(countResult.rows[0].total),
                 unread: Number(countResult.rows[0].unread),
+                hasMore,
+                nextCursor,
             },
         });
     } catch (error) {
@@ -110,11 +131,16 @@ export async function createNotification(params: {
     referenceId?: string;
 }): Promise<void> {
     try {
-        await pool.query(
+        const result = await pool.query(
             `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
             [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
         );
+        
+        if (result.rows.length > 0) {
+            sendNotificationToUser(params.userId, result.rows[0]);
+        }
     } catch (error) {
         console.error("Error creating notification:", error);
     }

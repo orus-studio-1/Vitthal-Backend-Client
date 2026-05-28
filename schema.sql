@@ -253,10 +253,10 @@ CREATE TABLE IF NOT EXISTS products (
     grade TEXT,
     application TEXT,
     standard TEXT,
-    approval_status TEXT NOT NULL DEFAULT 'approved',
+    approval_status TEXT NOT NULL DEFAULT 'pending',
     approval_notes TEXT,
     created_by_user_id UUID,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
     quotation_limit INTEGER CHECK (quotation_limit > 0),
     vendor_can_set_quotation_limit BOOLEAN NOT NULL DEFAULT FALSE,
     rating NUMERIC(2,1) NOT NULL DEFAULT 0 CHECK (rating >= 0 AND rating <= 5),
@@ -312,8 +312,8 @@ CREATE TABLE IF NOT EXISTS vendor_products (
     quotation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     quotation_min_qty INTEGER CHECK (quotation_min_qty > 0),
     commision_percentage INTEGER DEFAULT 0 CHECK (commision_percentage >= 0 AND commision_percentage <= 100),
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    status vendor_product_status NOT NULL DEFAULT 'active',
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    status vendor_product_status NOT NULL DEFAULT 'waiting',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -985,10 +985,16 @@ CREATE TABLE IF NOT EXISTS notifications (
             'admin_confirmation_sent',
             'admin_confirmation_accepted',
             'admin_confirmation_rejected',
+            'product_approved',
+            'product_rejected',
+            'image_approved',
+            'image_rejected',
+            'vendor_product_approved',
+            'vendor_product_rejected',
             'general'
         )),
     CONSTRAINT chk_notification_reference_type
-        CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order'))
+        CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);

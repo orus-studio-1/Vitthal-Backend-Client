@@ -41,3 +41,11 @@ ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_s3_key T
 CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
 
 COMMIT;
+
+
+-- 1. Alter the default column values for any future insertions
+ALTER TABLE products ALTER COLUMN approval_status SET DEFAULT 'pending';
+ALTER TABLE products ALTER COLUMN is_active SET DEFAULT FALSE;
+
+-- 2. Update any existing pending products to be inactive so they are hidden from storefront
+UPDATE products SET is_active = FALSE WHERE approval_status = 'pending';

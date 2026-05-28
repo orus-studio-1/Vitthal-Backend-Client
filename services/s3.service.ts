@@ -58,4 +58,23 @@ export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<st
     return getSignedUrl(s3Client, command, { expiresIn });
 }
 
+export async function getPresignedUrlOrOriginal(url: string | null | undefined): Promise<string> {
+    if (!url || typeof url !== "string") {
+        return url || "";
+    }
+    if (url.includes("amazonaws.com/")) {
+        const parts = url.split("amazonaws.com/");
+        if (parts.length > 1) {
+            const key = parts[1];
+            try {
+                return await getPresignedUrl(key);
+            } catch (err) {
+                console.error("Failed to generate presigned URL for", key, err);
+                return url;
+            }
+        }
+    }
+    return url;
+}
+
 export { s3Client, BUCKET_NAME };

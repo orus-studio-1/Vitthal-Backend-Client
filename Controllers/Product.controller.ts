@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
 
 const s3Client = new S3Client({
     region: (process.env.AWS_REGION || "ap-south-1").trim(),
@@ -198,8 +199,8 @@ export const addProductController = async (req: Request, res: Response): Promise
     const { name, description, category, productType, specifications, quotationLimit } = req.body;
 
     const { role, userId } = (req as any).user;
-    if (!name || !description || !category || !productType) {
-        return res.status(400).json({ message: "Name, description, category, and productType are required" });
+    if (!name || !category || !productType) {
+        return res.status(400).json({ message: "Name, category, and productType are required" });
     }
 
     const vendorProfile = userId ? await getVendorProfileIfExists(userId) : undefined;
@@ -536,24 +537,8 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
 
         baseQuery += ` ORDER BY p.created_at DESC, p.id ASC LIMIT $${paramCount + 1} OFFSET $${paramCount}`;
 
-        // Add category filter join if needed
-        let countQueryWithJoin = countQuery;
-        if (category && typeof category === 'string' && category.trim() !== '') {
-            countQueryWithJoin = `
-                SELECT COUNT(*)::int AS total_count
-                FROM products p
-                WHERE p.approval_status = 'approved' AND p.is_active = TRUE
-                AND EXISTS (
-                    SELECT 1
-                    FROM product_category pc_filter
-                    WHERE pc_filter.is_active = TRUE
-                      AND LOWER(pc_filter.code) = LOWER($1)
-                      AND (p.category::text = pc_filter.id::text OR p.category::text = pc_filter.code)
-                )
-            `;
-            values.splice(values.length - 1, 1); // Remove and re-add category param
-        }
-
+        // Snapshot count values (without offset/limit) BEFORE appending pagination params
+        const countValues = [...values];
         const queryValues = [...values, offsetValue, limitValue];
 
         const query = `
@@ -588,6 +573,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             LEFT JOIN products_images pImg 
                 ON p.id = pImg.product_id 
                 AND pImg.is_primary = true
+                AND pImg.approval_status = 'approved'
 
             -- Vendor count (lightweight aggregation)
             LEFT JOIN LATERAL (
@@ -622,7 +608,10 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         `;
 
         const result = await pool.query(query, queryValues);
-        const countResult = await pool.query(countQuery, values);
+        for (const row of result.rows) {
+            row.primary_image = await getPresignedUrlOrOriginal(row.primary_image);
+        }
+        const countResult = await pool.query(countQuery, countValues);
         const totalCount = countResult.rows[0].total_count;
         return res.status(200).json({ message: "Products fetched successfully", totalCount, data: result.rows });
     }
@@ -688,7 +677,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             FROM products p
             ${approvedSpecificationsJoin}
             LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
-            LEFT JOIN products_images pImg ON p.id = pImg.product_id
+            LEFT JOIN products_images pImg ON p.id = pImg.product_id AND pImg.approval_status = 'approved'
             LEFT JOIN vendor_products vp ON p.id = vp.product_id
             LEFT JOIN vendors v ON vp.vendor_id = v.id
             LEFT JOIN users u ON v.user_id = u.id
@@ -708,8 +697,14 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             GROUP BY p.id, pc.code, specAgg.specifications;
         `;
         const result = await pool.query(query, [productId]);
+        const product = result.rows[0];
+        if (product && Array.isArray(product.images)) {
+            for (const img of product.images) {
+                img.image_url = await getPresignedUrlOrOriginal(img.image_url);
+            }
+        }
 
-        return res.status(200).json({ message: "Product fetched successfully", data: result.rows[0] });
+        return res.status(200).json({ message: "Product fetched successfully", data: product });
     }
     catch (e) {
         console.error("Error while fetching Product by Id : ", e);
@@ -819,6 +814,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
             LEFT JOIN products_images pImg 
                 ON p.id = pImg.product_id 
                 AND pImg.is_primary = true
+                AND pImg.approval_status = 'approved'
 
             -- Vendor count (ONLY for selected products)
             LEFT JOIN LATERAL (
@@ -853,6 +849,9 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
         `;
 
         const result = await pool.query(query, queryValues);
+        for (const row of result.rows) {
+            row.primary_image = await getPresignedUrlOrOriginal(row.primary_image);
+        }
         const countResult = await pool.query(
             `SELECT COUNT(*)::int AS total_count FROM products WHERE ${filterConditions}`,
             filterValues
@@ -909,6 +908,7 @@ export const getProductByName = async (req: Request, res: Response): Promise<Res
             LEFT JOIN products_images pImg 
                 ON p.id = pImg.product_id 
                 AND pImg.is_primary = true
+                AND pImg.approval_status = 'approved'
 
             LEFT JOIN LATERAL (
                 SELECT COUNT(DISTINCT vendor_id)::int AS vendor_count
@@ -924,6 +924,9 @@ export const getProductByName = async (req: Request, res: Response): Promise<Res
             ) vc ON true;
         `;
         const result = await pool.query(query, [`%${name}%`, offsetValue, limitValue]);
+        for (const row of result.rows) {
+            row.primary_image = await getPresignedUrlOrOriginal(row.primary_image);
+        }
         const countResult = await pool.query(
             `SELECT COUNT(*)::int AS total_count FROM products WHERE name ILIKE $1 AND approval_status = 'approved' AND is_active = TRUE`,
             [`%${name}%`]
@@ -1017,14 +1020,20 @@ export const getVendorProductsController = async (req: Request, res: Response): 
         }
 
         if (status && typeof status === 'string' && status.trim() !== '') {
-            query += ` AND vp.is_active = $${paramCount}`;
-            values.push(status.trim() === 'active');
-            paramCount++;
+            const isActiveFilter = status.trim() === 'active';
+            if (isActiveFilter) {
+                query += ` AND vp.is_active = TRUE AND p.approval_status = 'approved'`;
+            } else {
+                query += ` AND (vp.is_active = FALSE OR p.approval_status != 'approved')`;
+            }
         }
 
         query += ` ORDER BY vp.created_at DESC`;
 
         const result = await pool.query(query, values);
+        for (const row of result.rows) {
+            row.primary_image = await getPresignedUrlOrOriginal(row.primary_image);
+        }
         return res.status(200).json({ message: "Vendor products fetched successfully", data: result.rows });
     } catch (error) {
         console.error("Error while fetching vendor products : ", error);
@@ -1235,9 +1244,16 @@ export const getVendorProductByIdController = async (req: Request, res: Response
             return res.status(404).json({ message: "Product not found or you don't have access to this product." });
         }
 
+        const product = result.rows[0];
+        if (product && Array.isArray(product.images)) {
+            for (const img of product.images) {
+                img.image_url = await getPresignedUrlOrOriginal(img.image_url);
+            }
+        }
+
         return res.status(200).json({
             message: "Vendor product fetched successfully",
-            data: result.rows[0]
+            data: product
         });
     } catch (error) {
         console.error("Error while fetching vendor product:", error);
@@ -1294,12 +1310,22 @@ export const updateVendorProductController = async (req: Request, res: Response)
 
         // Check if the vendor product exists
         const existingProductResult = await pool.query(
-            `SELECT id FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
+            `SELECT id, status, is_active FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
             [vendorId, productId]
         );
 
         if (existingProductResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not found or you don't have access to this product." });
+        }
+
+        const existingVP = existingProductResult.rows[0];
+        const requestedIsActive = Boolean(isActive);
+
+        // Supreme control: vendor cannot set is_active = true if the catalog mapping status is not active (i.e. not approved by admin)
+        if (requestedIsActive && existingVP.status !== 'active') {
+            return res.status(403).json({
+                message: "Cannot activate product listing. Admin approval is required before this product can be listed."
+            });
         }
 
         // Update the vendor product
@@ -1319,7 +1345,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
             Number(price),
             Number(moq),
             Number(stockQuantity),
-            Boolean(isActive),
+            requestedIsActive,
             Boolean(quotationEnabled),
             quotationMinQty ?? null,
             vendorId,
@@ -1679,7 +1705,7 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
                 COALESCE(pr.min_moq, 1)::int AS min_moq
             FROM products p
             LEFT JOIN products_images pImg
-                ON p.id = pImg.product_id AND pImg.is_primary = true
+                ON p.id = pImg.product_id AND pImg.is_primary = true AND pImg.approval_status = 'approved'
             LEFT JOIN LATERAL (
                 SELECT COUNT(DISTINCT vendor_id)::int AS vendor_count
                 FROM vendor_products vp
@@ -1749,6 +1775,12 @@ export const uploadProductImagesController = async (req: Request, res: Response)
         try {
             await client.query("BEGIN");
 
+            const targetPrimaryIndex = req.body.primaryImageIndex !== undefined ? Number(req.body.primaryImageIndex) : -1;
+
+            if (targetPrimaryIndex >= 0 && targetPrimaryIndex < files.length) {
+                await client.query(`UPDATE products_images SET is_primary = false WHERE product_id = $1`, [productId]);
+            }
+
             // Check if product already has a primary image
             const existingImages = await client.query(`SELECT id FROM products_images WHERE product_id = $1 AND is_primary = true`, [productId]);
             let hasPrimary = existingImages.rows.length > 0;
@@ -1769,8 +1801,13 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
                 await s3Client.send(command);
 
-                const isPrimary = !hasPrimary && i === 0;
-                if (isPrimary) hasPrimary = true;
+                let isPrimary = false;
+                if (targetPrimaryIndex >= 0) {
+                    isPrimary = (i === targetPrimaryIndex);
+                } else {
+                    isPrimary = !hasPrimary && i === 0;
+                    if (isPrimary) hasPrimary = true;
+                }
 
                 const isApproved = !isVendor;
 

@@ -795,6 +795,32 @@ export const respondClientQuotationController = async (req: Request, res: Respon
         }
 
         await client.query("COMMIT");
+
+        // Generate updated vendor-specific document on client counter (non-blocking)
+        if (action === "counter" && quotation.quotation_group_id) {
+            const vendorNameResult = await pool.query(
+                `SELECT company_name FROM vendors WHERE id = $1`, [quotation.vendor_id]
+            );
+            const vendorName = vendorNameResult.rows[0]?.company_name || "Vendor";
+
+            generateVendorQuotationDocument({
+                quotationGroupId: quotation.quotation_group_id,
+                vendorId: quotation.vendor_id,
+                vendorName,
+                offerPrice: Number(offerPrice),
+                offerQuantity: Number(offerQuantity),
+                deliveryDays: quotation.delivery_days || 1,
+                tokenPercentage: Number(quotation.token_percentage) || 0,
+            }).then(async (result) => {
+                await pool.query(
+                    `UPDATE quotation_requests SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+                    [result.documentUrl, result.s3Key, id]
+                );
+            }).catch((err) => {
+                console.error(`[QuotationDocument] Failed to generate vendor document on client counter for quotation ${id}:`, err);
+            });
+        }
+
         return res.status(200).json({ message: "Quotation response saved" });
     } catch (error) {
         await client.query("ROLLBACK");
@@ -1054,6 +1080,124 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
                 `,
                 [id, authUser.userId, action, offerPrice, offerQuantity, note || null, reason || null]
             );
+        } else if (action === "accept") {
+            if (quotation.current_offer_by !== "client" || !quotation.current_offer_price || !quotation.current_offer_quantity) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ message: "Client counter offer is required before accepting" });
+            }
+
+            const addressResult = await client.query(
+                `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+                [quotation.user_id]
+            );
+            if (addressResult.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ message: "No shipping address found for client" });
+            }
+
+            const address = addressResult.rows[0];
+
+            const orderResult = await client.query(
+                `
+                    INSERT INTO orders (
+                        user_id, vendor_id, status, payment_status, total_amount,
+                        address_line, city, state, country, pincode, latitude, langitude,
+                        source, order_type
+                    ) VALUES ($1, $2, 'pending', 'pending', $3, $4, $5, $6, $7, $8, $9, $10, 'vendor', 'quotation')
+                    RETURNING id
+                `,
+                [
+                    quotation.user_id,
+                    quotation.vendor_id,
+                    Number(quotation.current_offer_price) * Number(quotation.current_offer_quantity),
+                    address.address,
+                    address.city,
+                    address.state,
+                    address.country,
+                    address.pincode,
+                    address.latitude,
+                    address.longitude || address.latitude,
+                ]
+            );
+
+            const orderId = orderResult.rows[0].id as string;
+
+            await client.query(
+                `
+                    INSERT INTO order_items (order_id, product_id, vendor_id, quantity, price)
+                    VALUES ($1, $2, $3, $4, $5)
+                `,
+                [orderId, quotation.product_id, quotation.vendor_id, quotation.current_offer_quantity, quotation.current_offer_price]
+            );
+
+            await client.query(
+                `
+                    INSERT INTO order_status_history (order_id, status, note, created_at)
+                    VALUES ($1, 'pending', 'Client counter offer accepted by vendor', CURRENT_TIMESTAMP)
+                `,
+                [orderId]
+            );
+
+            await client.query(
+                `
+                    UPDATE quotation_requests
+                    SET status = 'client_accepted',
+                        accepted_price = $1,
+                        accepted_quantity = $2,
+                        order_id = $3,
+                        updated_at = NOW()
+                    WHERE id = $4
+                `,
+                [quotation.current_offer_price, quotation.current_offer_quantity, orderId, id]
+            );
+
+            if (quotation.quotation_group_id) {
+                const otherVendorQuotations = await client.query(
+                    `SELECT id, vendor_id FROM quotation_requests
+                     WHERE quotation_group_id = $1 AND id != $2
+                       AND status NOT IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired')`,
+                    [quotation.quotation_group_id, id]
+                );
+
+                for (const otherQ of otherVendorQuotations.rows) {
+                    await client.query(
+                        `UPDATE quotation_requests
+                         SET status = 'client_rejected',
+                             rejection_reason = 'Another vendor was selected for this quotation',
+                             updated_at = NOW()
+                         WHERE id = $1`,
+                        [otherQ.id]
+                    );
+
+                    await client.query(
+                        `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, reason, note)
+                         VALUES ($1, $2, 'vendor', 'reject', 'Another vendor was selected', 'Auto-rejected: another vendor counter offer accepted')`,
+                        [otherQ.id, authUser.userId]
+                    );
+
+                    const rejectedVendorUser = await client.query(
+                        `SELECT user_id FROM vendors WHERE id = $1`, [otherQ.vendor_id]
+                    );
+                    if (rejectedVendorUser.rows.length) {
+                        await createNotification({
+                            userId: rejectedVendorUser.rows[0].user_id,
+                            type: "quotation_rejected",
+                            title: "Quotation closed — another vendor selected",
+                            body: `The client selected a different vendor for this quotation.`,
+                            referenceType: "quotation",
+                            referenceId: otherQ.id,
+                        });
+                    }
+                }
+            }
+
+            await client.query(
+                `
+                    INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
+                    VALUES ($1, $2, 'vendor', 'accept', $3)
+                `,
+                [id, authUser.userId, note || null]
+            );
         } else if (action === "reject") {
             await client.query(
                 `
@@ -1085,7 +1229,7 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
                 recipientEmail: clientResult.rows[0].client_email,
                 recipientName: clientResult.rows[0].client_name || "Client",
                 quotationId: id as string,
-                status: action === "offer" ? "vendor_offered" : action === "counter" ? "vendor_countered" : "vendor_rejected",
+                status: action === "offer" ? "vendor_offered" : action === "counter" ? "vendor_countered" : action === "accept" ? "client_accepted" : "vendor_rejected",
                 note: note || undefined,
                 reason: reason || undefined,
             });
@@ -1098,6 +1242,22 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
                 type: action === "offer" ? "quotation_offer_received" : "quotation_counter_received",
                 title: action === "offer" ? "Vendor sent an offer" : "Vendor sent a counter offer",
                 body: `Vendor offered ₹${offerPrice} × ${offerQuantity}`,
+                referenceType: "quotation",
+                referenceId: id as string,
+            });
+        } else if (action === "accept") {
+            await createNotification({
+                userId: quotation.user_id,
+                type: "quotation_accepted",
+                title: "Vendor accepted your counter offer!",
+                body: `Vendor accepted your counter offer of ₹${quotation.current_offer_price} × ${quotation.current_offer_quantity}`,
+                referenceType: "quotation",
+                referenceId: id as string,
+            });
+            await notifyAllAdmins({
+                type: "quotation_accepted",
+                title: "Vendor accepted client counter offer",
+                body: `A vendor accepted a client's counter offer for ₹${quotation.current_offer_price} × ${quotation.current_offer_quantity}. Admin confirmation is required.`,
                 referenceType: "quotation",
                 referenceId: id as string,
             });
@@ -1114,8 +1274,11 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
 
         await client.query("COMMIT");
 
-        // Generate vendor-specific document on first offer (non-blocking)
-        if ((action === "offer") && quotation.quotation_group_id && deliveryDays && tokenPercentage != null) {
+        // Generate vendor-specific document on offer or counter (non-blocking)
+        const finalDeliveryDays = deliveryDays !== null ? deliveryDays : quotation.delivery_days;
+        const finalTokenPercentage = tokenPercentage !== null ? tokenPercentage : quotation.token_percentage;
+
+        if ((action === "offer" || action === "counter") && quotation.quotation_group_id && finalDeliveryDays != null && finalTokenPercentage != null) {
             const vendorNameResult = await pool.query(
                 `SELECT company_name FROM vendors WHERE id = $1`, [vendorId]
             );
@@ -1127,8 +1290,8 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
                 vendorName,
                 offerPrice: Number(offerPrice),
                 offerQuantity: Number(offerQuantity),
-                deliveryDays,
-                tokenPercentage,
+                deliveryDays: finalDeliveryDays,
+                tokenPercentage: Number(finalTokenPercentage),
             }).then(async (result) => {
                 // Save vendor document URL to quotation_requests
                 await pool.query(
@@ -1152,6 +1315,7 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
 
 export const respondToAdminConfirmationController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
+    console.log("hello`")
     if (!authUser?.userId || authUser.role !== "client") {
         return res.status(403).json({ message: "Only clients can respond to admin confirmations" });
     }

@@ -21,7 +21,8 @@ quotationRouter.post("/", createQuotationFromCartController);
 quotationRouter.get("/", getClientQuotationsController);
 quotationRouter.get("/:id", getClientQuotationByIdController);
 quotationRouter.post("/:id/respond", respondClientQuotationController);
-quotationRouter.post("/:id/admin-confirm-respond", respondToAdminConfirmationController);
+quotationRouter.post("/:id/admin-respond", respondToAdminConfirmationController);
+quotationRouter.post("/:id/admin-response", respondToAdminConfirmationController);
 
 // Vendor routes
 quotationRouter.get("/vendor/list", requireApprovedVendor, getVendorQuotationsController);

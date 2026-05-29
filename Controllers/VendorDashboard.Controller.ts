@@ -32,36 +32,72 @@ export const getVendorDashboardController = async (req: Request, res: Response):
         const statsResult = await pool.query(statsQuery, [vendorId]);
         const stats = statsResult.rows[0];
 
-        // 2. Revenue chart - last 7 days
-        const revenueChartQuery = `
-            SELECT
-                DATE(o.created_at)::text AS day_date,
-                COALESCE(SUM(o.total_amount), 0) AS revenue
-            FROM orders o
-            WHERE o.vendor_id = $1
-                AND o.created_at >= NOW() - INTERVAL '6 days'
-            GROUP BY DATE(o.created_at)
-            ORDER BY DATE(o.created_at) ASC
-        `;
-        const revenueChartResult = await pool.query(revenueChartQuery, [vendorId]);
-
-        // Build chart data for last 7 days (fill missing days with 0)
-        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        // 2. Revenue chart - dynamic timeframe
+        const timeframe = (req.query.timeframe as string) || '7';
         const chartLabels: string[] = [];
         const chartData: number[] = [];
-        const revenueMap = new Map<string, number>();
 
-        for (const row of revenueChartResult.rows) {
-            revenueMap.set(row.day_date, parseFloat(row.revenue));
-        }
+        if (timeframe === '365') {
+            // Group by month for this year
+            const revenueChartQuery = `
+                SELECT
+                    TO_CHAR(o.created_at, 'Mon') AS month_name,
+                    EXTRACT(MONTH FROM o.created_at)::integer AS month_num,
+                    COALESCE(SUM(o.total_amount), 0) AS revenue
+                FROM orders o
+                WHERE o.vendor_id = $1
+                    AND o.created_at >= DATE_TRUNC('year', NOW())
+                GROUP BY TO_CHAR(o.created_at, 'Mon'), EXTRACT(MONTH FROM o.created_at)
+                ORDER BY month_num ASC
+            `;
+            const revenueChartResult = await pool.query(revenueChartQuery, [vendorId]);
+            
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const revenueMap = new Map<string, number>();
 
-        for (let i = 6; i >= 0; i--) {
-            const date = new Date();
-            date.setDate(date.getDate() - i);
-            const dateStr = date.toISOString().split('T')[0];
-            const dayName = dayNames[date.getDay()];
-            chartLabels.push(dayName);
-            chartData.push(revenueMap.get(dateStr) || 0);
+            for (const row of revenueChartResult.rows) {
+                revenueMap.set(row.month_name, parseFloat(row.revenue));
+            }
+
+            for (let i = 0; i < 12; i++) {
+                chartLabels.push(monthNames[i]);
+                chartData.push(revenueMap.get(monthNames[i]) || 0);
+            }
+        } else {
+            // last 7 or 30 days
+            const intervalDays = timeframe === '30' ? 29 : 6;
+            const revenueChartQuery = `
+                SELECT
+                    DATE(o.created_at)::text AS day_date,
+                    COALESCE(SUM(o.total_amount), 0) AS revenue
+                FROM orders o
+                WHERE o.vendor_id = $1
+                    AND o.created_at >= NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY DATE(o.created_at)
+                ORDER BY DATE(o.created_at) ASC
+            `;
+            const revenueChartResult = await pool.query(revenueChartQuery, [vendorId, intervalDays]);
+
+            const revenueMap = new Map<string, number>();
+            for (const row of revenueChartResult.rows) {
+                revenueMap.set(row.day_date, parseFloat(row.revenue));
+            }
+
+            for (let i = intervalDays; i >= 0; i--) {
+                const date = new Date();
+                date.setDate(date.getDate() - i);
+                const dateStr = date.toISOString().split('T')[0];
+                
+                if (timeframe === '30') {
+                    const label = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    chartLabels.push(label);
+                } else {
+                    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                    const dayName = dayNames[date.getDay()];
+                    chartLabels.push(dayName);
+                }
+                chartData.push(revenueMap.get(dateStr) || 0);
+            }
         }
 
         // 3. Recent orders (last 5)

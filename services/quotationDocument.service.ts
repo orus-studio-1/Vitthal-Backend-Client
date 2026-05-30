@@ -68,6 +68,7 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
 
     const qty = data.vendorOfferQuantity || data.product.quantity;
     const price = data.vendorOfferPrice || data.product.unitPrice;
+    const isVendorVersion = Boolean(data.vendorName);
 
     // Build specifications rows
     const specRows = data.product.specifications
@@ -76,13 +77,11 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
                   ([key, value]) => `
             <tr>
                 <td style="padding:4px 12px;color:#6b7280;font-size:11px;border-bottom:1px solid #f3f4f6;">${key.replace(/_/g, " ").toUpperCase()}</td>
-                <td style="padding:4px 12px;color:#374151;font-size:11px;border-bottom:1px solid #f3f4f6;" colspan="3">${value}</td>
+                <td style="padding:4px 12px;color:#374151;font-size:11px;border-bottom:1px solid #f3f4f6;" colspan="${isVendorVersion ? 3 : 1}">${value}</td>
             </tr>`
               )
               .join("")
         : "";
-
-    const isVendorVersion = Boolean(data.vendorName);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -533,8 +532,10 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
             <tr>
                 <th>Description</th>
                 <th>Quantity</th>
+                ${isVendorVersion ? `
                 <th>Unit Price</th>
                 <th>Total</th>
+                ` : ""}
             </tr>
         </thead>
         <tbody>
@@ -545,14 +546,17 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
                     ${data.product.description ? `<div class="product-desc">${data.product.description.substring(0, 120)}${data.product.description.length > 120 ? "..." : ""}</div>` : ""}
                 </td>
                 <td>${qty.toLocaleString("en-IN")}</td>
+                ${isVendorVersion ? `
                 <td>${formatINR(price)}</td>
                 <td>${formatINR(price * qty)}</td>
+                ` : ""}
             </tr>
             ${specRows}
         </tbody>
     </table>
 
     <!-- Totals -->
+    ${isVendorVersion ? `
     <div class="totals-section">
         <div class="totals-table">
             <div class="totals-row">
@@ -575,6 +579,7 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
             ` : ""}
         </div>
     </div>
+    ` : ""}
 
     ${isVendorVersion ? `
     <!-- Vendor Terms -->

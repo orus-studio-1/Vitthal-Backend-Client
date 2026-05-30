@@ -309,6 +309,7 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'pending',
             ADD COLUMN IF NOT EXISTS approval_notes TEXT,
+            ADD COLUMN IF NOT EXISTS reconsideration_notes TEXT,
             ADD COLUMN IF NOT EXISTS review_count INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS gst_certificate_link TEXT,
             ADD COLUMN IF NOT EXISTS business_type TEXT,

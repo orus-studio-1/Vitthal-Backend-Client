@@ -361,15 +361,17 @@ export const addVendorProductController = async (req: Request, res: Response): P
         const vendorId = vendor.id;
 
         const query = `
-            INSERT INTO vendor_products (product_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO vendor_products (product_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, 'waiting')
             ON CONFLICT (vendor_id, product_id)
             DO UPDATE SET
                 price = EXCLUDED.price,
                 moq = EXCLUDED.moq,
                 stock_quantity = EXCLUDED.stock_quantity,
                 quotation_enabled = EXCLUDED.quotation_enabled,
-                quotation_min_qty = EXCLUDED.quotation_min_qty
+                quotation_min_qty = EXCLUDED.quotation_min_qty,
+                is_active = FALSE,
+                status = 'waiting'
             RETURNING *`;
         const values = [productId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null];
         const result = await pool.query(query, values);

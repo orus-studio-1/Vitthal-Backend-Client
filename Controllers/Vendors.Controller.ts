@@ -1,5 +1,17 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
+
+async function resolveVendorGstLink(vendor: any) {
+    if (vendor && vendor.gst_certificate_link) {
+        vendor.gst_certificate_link = await getPresignedUrlOrOriginal(vendor.gst_certificate_link);
+    }
+    if (vendor && vendor.vendor_gst_certificate_link) {
+        vendor.vendor_gst_certificate_link = await getPresignedUrlOrOriginal(vendor.vendor_gst_certificate_link);
+    }
+    return vendor;
+}
+
 
 function normalizeRequiredText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
@@ -441,7 +453,10 @@ export const completeVendorSetupController = async (req: Request, res: Response)
         country,
         pincode,
         latitude,
-        longitude
+        longitude,
+        creditCycle,
+        minimumCommissionPercentage,
+        maximumCommissionPercentage
     } = req.body;
 
     const { userId, role } = (req as any).user;
@@ -461,9 +476,12 @@ export const completeVendorSetupController = async (req: Request, res: Response)
     const normalizedState = normalizeRequiredText(state);
     const normalizedCountry = normalizeRequiredText(country);
     const normalizedPincode = normalizeRequiredText(pincode);
+    const normalizedCreditCycle = normalizeRequiredText(creditCycle);
 
     const parsedLatitude = parseCoordinate(latitude);
     const parsedLongitude = parseCoordinate(longitude);
+    const parsedMinCommission = minimumCommissionPercentage !== undefined && minimumCommissionPercentage !== null ? parseInt(minimumCommissionPercentage) : null;
+    const parsedMaxCommission = maximumCommissionPercentage !== undefined && maximumCommissionPercentage !== null ? parseInt(maximumCommissionPercentage) : null;
 
     if (
         !userId ||
@@ -480,7 +498,10 @@ export const completeVendorSetupController = async (req: Request, res: Response)
         !normalizedCountry ||
         !normalizedPincode ||
         parsedLatitude === null ||
-        parsedLongitude === null
+        parsedLongitude === null ||
+        !normalizedCreditCycle ||
+        parsedMinCommission === null ||
+        parsedMaxCommission === null
     ) {
         return res.status(400).json({ message: "Missing or invalid required fields." });
     }
@@ -499,6 +520,18 @@ export const completeVendorSetupController = async (req: Request, res: Response)
 
     if (parsedLatitude < -90 || parsedLatitude > 90 || parsedLongitude < -180 || parsedLongitude > 180) {
         return res.status(400).json({ message: "Latitude/longitude out of range." });
+    }
+
+    if (parsedMinCommission < 0 || parsedMinCommission > 100) {
+        return res.status(400).json({ message: "Minimum commission percentage must be between 0 and 100." });
+    }
+
+    if (parsedMaxCommission < 0 || parsedMaxCommission > 100) {
+        return res.status(400).json({ message: "Maximum commission percentage must be between 0 and 100." });
+    }
+
+    if (parsedMinCommission > parsedMaxCommission) {
+        return res.status(400).json({ message: "Minimum commission cannot be greater than maximum commission." });
     }
 
     const client = await pool.connect();
@@ -539,12 +572,16 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                     alternative_number,
                     designation,
                     business_description,
+                    credit_cycle,
+                    minimum_commision_percentage,
+                    maximum_commision_percentage,
                     approval_status,
                     approval_notes,
+                    reconsideration_notes,
                     application_number,
                     updated_at
                 )
-                VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, 'pending', 'Awaiting admin approval', $11, NOW())
+                VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', NULL, $14, NOW())
                 ON CONFLICT (user_id)
                 DO UPDATE SET
                     company_name = EXCLUDED.company_name,
@@ -556,9 +593,15 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                     alternative_number = EXCLUDED.alternative_number,
                     designation = EXCLUDED.designation,
                     business_description = EXCLUDED.business_description,
+                    credit_cycle = EXCLUDED.credit_cycle,
+                    minimum_commision_percentage = EXCLUDED.minimum_commision_percentage,
+                    maximum_commision_percentage = EXCLUDED.maximum_commision_percentage,
+                    approval_status = 'pending',
+                    approval_notes = 'Awaiting admin approval',
+                    reconsideration_notes = NULL,
                     application_number = COALESCE(vendors.application_number, EXCLUDED.application_number),
                     updated_at = NOW()
-                RETURNING id, user_id, company_name, gst_number, gst_certificate_link, business_type, company_website, phone, alternative_number, designation, business_description, approval_status, application_number
+                RETURNING id, user_id, company_name, gst_number, gst_certificate_link, business_type, company_website, phone, alternative_number, designation, business_description, credit_cycle, minimum_commision_percentage, maximum_commision_percentage, approval_status, application_number
             `,
             [
                 userId,
@@ -571,6 +614,9 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                 normalizedAlternativeNumber,
                 normalizedDesignation,
                 normalizedBusinessDescription,
+                normalizedCreditCycle,
+                parsedMinCommission,
+                parsedMaxCommission,
                 appNumber
             ]
         );
@@ -599,6 +645,11 @@ export const completeVendorSetupController = async (req: Request, res: Response)
             }
 
             await client.query(
+                `DELETE FROM vendor_categories WHERE vendor_id = $1`,
+                [vendorId]
+            );
+
+            await client.query(
                 `
                     INSERT INTO vendor_categories (vendor_id, category_id)
                     SELECT $1, c.id
@@ -610,39 +661,57 @@ export const completeVendorSetupController = async (req: Request, res: Response)
             );
         }
 
-        const addressResult = await client.query(
-            `
-                INSERT INTO addresses (user_id, address, city, state, country, pincode, latitude, longitude, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                ON CONFLICT (user_id)
-                DO UPDATE SET
-                    address = EXCLUDED.address,
-                    city = EXCLUDED.city,
-                    state = EXCLUDED.state,
-                    country = EXCLUDED.country,
-                    pincode = EXCLUDED.pincode,
-                    latitude = EXCLUDED.latitude,
-                    longitude = EXCLUDED.longitude,
-                    updated_at = NOW()
-                RETURNING id, user_id, address, city, state, country, pincode, latitude, longitude
-            `,
-            [
-                userId,
-                normalizedAddress,
-                normalizedCity,
-                normalizedState,
-                normalizedCountry,
-                normalizedPincode,
-                parsedLatitude,
-                parsedLongitude
-            ]
+        const addressCheck = await client.query(
+            `SELECT id FROM addresses WHERE user_id = $1`,
+            [userId]
         );
+
+        let addressResult;
+        if (addressCheck.rows.length > 0) {
+            addressResult = await client.query(
+                `
+                    UPDATE addresses
+                    SET address = $1, city = $2, state = $3, country = $4, pincode = $5, latitude = $6, longitude = $7, updated_at = NOW()
+                    WHERE user_id = $8
+                    RETURNING id, user_id, address, city, state, country, pincode, latitude, longitude
+                `,
+                [
+                    normalizedAddress,
+                    normalizedCity,
+                    normalizedState,
+                    normalizedCountry,
+                    normalizedPincode,
+                    parsedLatitude,
+                    parsedLongitude,
+                    userId
+                ]
+            );
+        } else {
+            addressResult = await client.query(
+                `
+                    INSERT INTO addresses (user_id, address, city, state, country, pincode, latitude, longitude, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                    RETURNING id, user_id, address, city, state, country, pincode, latitude, longitude
+                `,
+                [
+                    userId,
+                    normalizedAddress,
+                    normalizedCity,
+                    normalizedState,
+                    normalizedCountry,
+                    normalizedPincode,
+                    parsedLatitude,
+                    parsedLongitude
+                ]
+            );
+        }
 
         await client.query("COMMIT");
 
+        const resolvedVendor = await resolveVendorGstLink(vendorResult.rows[0]);
         return res.status(200).json({
             message: "Vendor setup completed successfully!",
-            vendor: vendorResult.rows[0],
+            vendor: resolvedVendor,
             address: addressResult.rows[0]
         });
     }
@@ -690,6 +759,10 @@ export const getVendorDetailsController = async (req: Request, res: Response): P
                 v.approval_notes as vendor_approval_notes,
                 v.application_number as vendor_application_number,
                 v.is_blocked as vendor_is_blocked,
+                v.credit_cycle as vendor_credit_cycle,
+                v.minimum_commision_percentage as vendor_minimum_commision_percentage,
+                v.maximum_commision_percentage as vendor_maximum_commision_percentage,
+                v.reconsideration_notes as vendor_reconsideration_notes,
                 a.address as vendor_address,
                 a.city as vendor_city,
                 a.state as vendor_state,
@@ -713,9 +786,10 @@ export const getVendorDetailsController = async (req: Request, res: Response): P
             return res.status(404).json({ message: "Vendor not found." });
         }
 
+        const resolvedVendor = await resolveVendorGstLink(result.rows[0]);
         return res.status(200).json({
             message: "Vendor details fetched successfully",
-            data: result.rows[0]
+            data: resolvedVendor
         });
     }
     catch (e) {
@@ -843,7 +917,8 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
                     v.approval_status,
                     v.application_number,
                     v.is_active,
-                    v.is_blocked
+                    v.is_blocked,
+                    v.reconsideration_notes
                 FROM users u
                 LEFT JOIN vendors v ON v.user_id = u.id
                 WHERE u.id = $1
@@ -866,6 +941,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
                 approval_status: null,
                 is_active: row.is_active ?? true,
                 is_blocked: row.is_blocked ?? false,
+                reconsideration_notes: null,
             });
         }
 
@@ -877,6 +953,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
             application_number: row.application_number ?? null,
             is_active: row.is_active ?? true,
             is_blocked: row.is_blocked ?? false,
+            reconsideration_notes: row.reconsideration_notes ?? null,
         });
     }
     catch (e) {

@@ -1,4 +1,4 @@
-// puppeteer is imported dynamically below (ESM module)
+// pdfmake is used for PDF generation
 import pool from "../DbConnect";
 import { uploadBufferToS3 } from "./s3.service";
 
@@ -50,15 +50,45 @@ export async function generateQuotationNumber(): Promise<string> {
 
 // ─── Format Currency ─────────────────────────────────────────────────
 function formatINR(amount: number): string {
-    return new Intl.NumberFormat("en-IN", {
-        style: "currency",
-        currency: "INR",
+    const formatted = new Intl.NumberFormat("en-IN", {
+        minimumFractionDigits: 2,
         maximumFractionDigits: 2,
     }).format(amount);
+    return `Rs. ${formatted}`;
 }
 
-// ─── Build the HTML Template ─────────────────────────────────────────
-function buildQuotationHTML(data: QuotationDocumentData): string {
+// Cache for Logo Base64
+let logoBase64 = "";
+async function getLogoBase64(): Promise<string> {
+    if (logoBase64) return logoBase64;
+    try {
+        const response = await fetch(COMPANY_LOGO_URL);
+        const arrayBuffer = await response.arrayBuffer();
+        logoBase64 = `data:image/jpeg;base64,${Buffer.from(arrayBuffer).toString("base64")}`;
+        return logoBase64;
+    } catch (err) {
+        console.error("Failed to fetch company logo:", err);
+        return "";
+    }
+}
+
+// ─── Generate PDF using pdfmake ───────────────────────────────────────
+export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Buffer> {
+    const PdfPrinter = (await import("pdfmake/js/Printer" as any)).default;
+    const virtualFs = (await import("pdfmake/js/virtual-fs" as any)).default;
+    const URLResolver = (await import("pdfmake/js/URLResolver" as any)).default;
+    const urlResolver = new URLResolver(virtualFs);
+    const fonts = {
+        Helvetica: {
+            normal: "Helvetica",
+            bold: "Helvetica-Bold",
+            italics: "Helvetica-Oblique",
+            bolditalics: "Helvetica-BoldOblique",
+        },
+    };
+    const printer = new PdfPrinter(fonts, virtualFs, urlResolver);
+
+    const isVendorVersion = Boolean(data.vendorName);
     const subtotal = data.vendorOfferPrice
         ? data.vendorOfferPrice * (data.vendorOfferQuantity || data.product.quantity)
         : data.product.unitPrice * data.product.quantity;
@@ -68,605 +98,413 @@ function buildQuotationHTML(data: QuotationDocumentData): string {
 
     const qty = data.vendorOfferQuantity || data.product.quantity;
     const price = data.vendorOfferPrice || data.product.unitPrice;
-    const isVendorVersion = Boolean(data.vendorName);
 
-    // Build specifications rows
-    const specRows = data.product.specifications
-        ? Object.entries(data.product.specifications)
-              .map(
-                  ([key, value]) => `
-            <tr>
-                <td style="padding:4px 12px;color:#6b7280;font-size:11px;border-bottom:1px solid #f3f4f6;">${key.replace(/_/g, " ").toUpperCase()}</td>
-                <td style="padding:4px 12px;color:#374151;font-size:11px;border-bottom:1px solid #f3f4f6;" colspan="${isVendorVersion ? 3 : 1}">${value}</td>
-            </tr>`
-              )
-              .join("")
-        : "";
+    const logo = await getLogoBase64();
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-    
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    
-    body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-        color: #1f2937;
-        background: #fff;
-        font-size: 13px;
-        line-height: 1.5;
+    const tableBody: any[] = [];
+    if (isVendorVersion) {
+        tableBody.push([
+            { text: "Description", style: "tableHeader" },
+            { text: "Quantity", style: "tableHeader", alignment: "center" },
+            { text: "Unit Price", style: "tableHeader", alignment: "right" },
+            { text: "Total", style: "tableHeader", alignment: "right" }
+        ]);
+    } else {
+        tableBody.push([
+            { text: "Description", style: "tableHeader" },
+            { text: "Quantity", style: "tableHeader", alignment: "center" }
+        ]);
     }
-    
-    .page {
-        max-width: 800px;
-        margin: 0 auto;
-        padding: 40px 48px;
-    }
-    
-    .header {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        padding-bottom: 24px;
-        border-bottom: 3px solid #166534;
-    }
-    
-    .company-block {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-    }
-    
-    .company-logo {
-        width: 56px;
-        height: 56px;
-        border-radius: 10px;
-        object-fit: contain;
-    }
-    
-    .company-name {
-        font-size: 22px;
-        font-weight: 800;
-        color: #166534;
-        letter-spacing: -0.5px;
-    }
-    
-    .company-tagline {
-        font-size: 10px;
-        color: #6b7280;
-        text-transform: uppercase;
-        letter-spacing: 1.5px;
-        margin-top: 2px;
-    }
-    
-    .company-contact {
-        text-align: right;
-        font-size: 11px;
-        color: #4b5563;
-        line-height: 1.7;
-    }
-    
-    .company-contact strong {
-        color: #1f2937;
-    }
-    
-    .title-bar {
-        text-align: center;
-        margin: 28px 0 24px;
-    }
-    
-    .title-bar h1 {
-        font-size: 28px;
-        font-weight: 800;
-        color: #166534;
-        letter-spacing: 4px;
-        text-transform: uppercase;
-    }
-    
-    .title-bar .subtitle {
-        font-size: 11px;
-        color: #9ca3af;
-        margin-top: 4px;
-        letter-spacing: 1px;
-    }
-    
-    .info-grid {
-        display: flex;
-        justify-content: space-between;
-        gap: 24px;
-        margin-bottom: 28px;
-        padding: 20px;
-        background: #f9fafb;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-    }
-    
-    .info-col {
-        flex: 1;
-    }
-    
-    .info-col h3 {
-        font-size: 10px;
-        font-weight: 700;
-        color: #166534;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 10px;
-        padding-bottom: 6px;
-        border-bottom: 2px solid #bbf7d0;
-    }
-    
-    .info-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 3px 0;
-        font-size: 12px;
-    }
-    
-    .info-label {
-        font-weight: 600;
-        color: #6b7280;
-    }
-    
-    .info-value {
-        font-weight: 500;
-        color: #1f2937;
-    }
-    
-    .product-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-bottom: 24px;
-    }
-    
-    .product-table thead th {
-        background: #166534;
-        color: #fff;
-        padding: 10px 12px;
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        text-align: left;
-    }
-    
-    .product-table thead th:first-child {
-        border-radius: 6px 0 0 0;
-    }
-    
-    .product-table thead th:last-child {
-        border-radius: 0 6px 0 0;
-        text-align: right;
-    }
-    
-    .product-table thead th:nth-child(2),
-    .product-table thead th:nth-child(3) {
-        text-align: center;
-    }
-    
-    .product-table tbody td {
-        padding: 12px;
-        border-bottom: 1px solid #e5e7eb;
-        font-size: 12px;
-    }
-    
-    .product-table tbody td:nth-child(2),
-    .product-table tbody td:nth-child(3) {
-        text-align: center;
-    }
-    
-    .product-table tbody td:last-child {
-        text-align: right;
-        font-weight: 600;
-    }
-    
-    .product-desc {
-        font-size: 11px;
-        color: #6b7280;
-        margin-top: 4px;
-    }
-    
-    .totals-section {
-        display: flex;
-        justify-content: flex-end;
-        margin-bottom: 28px;
-    }
-    
-    .totals-table {
-        width: 280px;
-    }
-    
-    .totals-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 6px 0;
-        font-size: 12px;
-        border-bottom: 1px solid #f3f4f6;
-    }
-    
-    .totals-row.grand-total {
-        border-top: 2px solid #166534;
-        border-bottom: 2px solid #166534;
-        padding: 10px 0;
-        margin-top: 4px;
-        font-size: 14px;
-        font-weight: 700;
-        color: #166534;
-    }
-    
-    .totals-label {
-        color: #6b7280;
-    }
-    
-    .totals-value {
-        font-weight: 600;
-        color: #1f2937;
-    }
-    
-    .terms-section {
-        background: #f9fafb;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 20px 24px;
-        margin-bottom: 28px;
-    }
-    
-    .terms-section h3 {
-        font-size: 13px;
-        font-weight: 700;
-        color: #166534;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #bbf7d0;
-    }
-    
-    .terms-section ol {
-        padding-left: 20px;
-    }
-    
-    .terms-section li {
-        font-size: 11px;
-        color: #4b5563;
-        padding: 4px 0;
-        line-height: 1.6;
-    }
-    
-    .terms-section li strong {
-        color: #1f2937;
-    }
-    
-    .vendor-terms {
-        background: #eff6ff;
-        border: 1px solid #bfdbfe;
-        border-radius: 8px;
-        padding: 20px 24px;
-        margin-bottom: 28px;
-    }
-    
-    .vendor-terms h3 {
-        font-size: 13px;
-        font-weight: 700;
-        color: #1e40af;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 12px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #93c5fd;
-    }
-    
-    .vendor-terms-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-    }
-    
-    .vendor-term-card {
-        background: #fff;
-        border: 1px solid #dbeafe;
-        border-radius: 6px;
-        padding: 12px;
-    }
-    
-    .vendor-term-label {
-        font-size: 10px;
-        font-weight: 600;
-        color: #6b7280;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    
-    .vendor-term-value {
-        font-size: 16px;
-        font-weight: 700;
-        color: #1e40af;
-        margin-top: 2px;
-    }
-    
-    .acceptance-section {
-        text-align: center;
-        padding: 24px 0;
-        border-top: 1px solid #e5e7eb;
-    }
-    
-    .acceptance-title {
-        font-size: 11px;
-        font-weight: 700;
-        color: #166534;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        margin-bottom: 24px;
-    }
-    
-    .signature-block {
-        display: flex;
-        justify-content: center;
-        gap: 80px;
-        margin-top: 16px;
-    }
-    
-    .signature-item {
-        text-align: center;
-    }
-    
-    .signature-line {
-        width: 160px;
-        border-bottom: 1px solid #9ca3af;
-        margin-bottom: 6px;
-        height: 40px;
-    }
-    
-    .signature-label {
-        font-size: 10px;
-        color: #6b7280;
-    }
-    
-    .watermark {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) rotate(-30deg);
-        font-size: 80px;
-        font-weight: 800;
-        color: rgba(22, 101, 52, 0.04);
-        text-transform: uppercase;
-        letter-spacing: 10px;
-        pointer-events: none;
-        z-index: 0;
-    }
-    
-    .footer {
-        text-align: center;
-        padding-top: 16px;
-        border-top: 3px solid #166534;
-        font-size: 10px;
-        color: #9ca3af;
-    }
-    
-    .badge {
-        display: inline-block;
-        background: #dcfce7;
-        color: #166534;
-        font-size: 10px;
-        font-weight: 600;
-        padding: 2px 8px;
-        border-radius: 4px;
-        margin-left: 4px;
-    }
-    
-    .badge-blue {
-        background: #dbeafe;
-        color: #1e40af;
-    }
-</style>
-</head>
-<body>
-<div class="watermark">${COMPANY_NAME}</div>
-<div class="page">
-    <!-- Header -->
-    <div class="header">
-        <div class="company-block">
-            <img src="${COMPANY_LOGO_URL}" alt="Logo" class="company-logo" />
-            <div>
-                <div class="company-name">${COMPANY_NAME}</div>
-                <div class="company-tagline">B2B Industrial Marketplace</div>
-            </div>
-        </div>
-        <div class="company-contact">
-            <strong>${COMPANY_ADDRESS_LINE1}</strong><br/>
-            ${COMPANY_ADDRESS_LINE2}<br/>
-            ${COMPANY_PHONE}<br/>
-            ${COMPANY_EMAIL}<br/>
-            <strong>${COMPANY_WEBSITE}</strong>
-        </div>
-    </div>
 
-    <!-- Title -->
-    <div class="title-bar">
-        <h1>Quotation</h1>
-        <div class="subtitle">${isVendorVersion ? `Vendor Offer — ${data.vendorName}` : "Request for Quotation"}</div>
-    </div>
-
-    <!-- Info Grid -->
-    <div class="info-grid">
-        <div class="info-col">
-            <h3>Quotation Information</h3>
-            <div class="info-row">
-                <span class="info-label">Quotation No.</span>
-                <span class="info-value">${data.quotationNumber}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Date</span>
-                <span class="info-value">${data.date}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Valid Until</span>
-                <span class="info-value">${data.validUntil}</span>
-            </div>
-        </div>
-        <div class="info-col">
-            <h3>Client Details</h3>
-            <div class="info-row">
-                <span class="info-label">Client ID</span>
-                <span class="info-value">${data.clientId}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Location</span>
-                <span class="info-value">${data.clientCity}, ${data.clientState}</span>
-            </div>
-            <div class="info-row">
-                <span class="info-label">Pincode</span>
-                <span class="info-value">${data.clientPincode}</span>
-            </div>
-        </div>
-    </div>
-
-    <!-- Product Table -->
-    <table class="product-table">
-        <thead>
-            <tr>
-                <th>Description</th>
-                <th>Quantity</th>
-                ${isVendorVersion ? `
-                <th>Unit Price</th>
-                <th>Total</th>
-                ` : ""}
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>
-                    <strong>${data.product.name}</strong>
-                    ${data.product.category ? `<span class="badge">${data.product.category}</span>` : ""}
-                    ${data.product.description ? `<div class="product-desc">${data.product.description.substring(0, 120)}${data.product.description.length > 120 ? "..." : ""}</div>` : ""}
-                </td>
-                <td>${qty.toLocaleString("en-IN")}</td>
-                ${isVendorVersion ? `
-                <td>${formatINR(price)}</td>
-                <td>${formatINR(price * qty)}</td>
-                ` : ""}
-            </tr>
-            ${specRows}
-        </tbody>
-    </table>
-
-    <!-- Totals -->
-    ${isVendorVersion ? `
-    <div class="totals-section">
-        <div class="totals-table">
-            <div class="totals-row">
-                <span class="totals-label">Subtotal</span>
-                <span class="totals-value">${formatINR(subtotal)}</span>
-            </div>
-            <div class="totals-row">
-                <span class="totals-label">GST (${GST_RATE}%)</span>
-                <span class="totals-value">${formatINR(gstAmount)}</span>
-            </div>
-            <div class="totals-row grand-total">
-                <span>Total</span>
-                <span>${formatINR(total)}</span>
-            </div>
-            ${tokenAmount !== null ? `
-            <div class="totals-row" style="margin-top:8px;">
-                <span class="totals-label">Token Amount (${data.tokenPercentage}%)</span>
-                <span class="totals-value" style="color:#dc2626;font-weight:700;">${formatINR(tokenAmount)}</span>
-            </div>
-            ` : ""}
-        </div>
-    </div>
-    ` : ""}
-
-    ${isVendorVersion ? `
-    <!-- Vendor Terms -->
-    <div class="vendor-terms">
-        <h3>Vendor Offer Terms</h3>
-        <div class="vendor-terms-grid">
-            <div class="vendor-term-card">
-                <div class="vendor-term-label">Offered by</div>
-                <div class="vendor-term-value">${data.vendorName}</div>
-            </div>
-            <div class="vendor-term-card">
-                <div class="vendor-term-label">Delivery Timeline</div>
-                <div class="vendor-term-value">${data.deliveryDays} Days</div>
-            </div>
-            <div class="vendor-term-card">
-                <div class="vendor-term-label">Token Money</div>
-                <div class="vendor-term-value">${data.tokenPercentage}%</div>
-            </div>
-            <div class="vendor-term-card">
-                <div class="vendor-term-label">Token Amount</div>
-                <div class="vendor-term-value">${formatINR(tokenAmount || 0)}</div>
-            </div>
-        </div>
-    </div>
-    ` : ""}
-
-    <!-- Terms and Conditions -->
-    <div class="terms-section">
-        <h3>Terms & Conditions</h3>
-        <ol>
-            <li><strong>Token Money:</strong> ${data.tokenPercentage ? `${data.tokenPercentage}% of the total amount (${formatINR(tokenAmount || 0)})` : "A percentage of the total amount"} shall be paid at the time of accepting this quotation as advance token money.</li>
-            <li><strong>Delivery:</strong> ${data.deliveryDays ? `Delivery will be completed within <strong>${data.deliveryDays} business days</strong>` : "Delivery timeline will be confirmed by the vendor"} from the date of order confirmation at the buyer's specified address.</li>
-            <li><strong>Validity:</strong> This quotation is valid until <strong>${data.validUntil}</strong>. After this date, prices and availability may change.</li>
-            <li><strong>Pricing:</strong> All prices are subject to vendor confirmation. The final agreed price will be binding upon acceptance by both parties.</li>
-            <li><strong>Payment:</strong> Full payment (minus token money) is due upon delivery or as per mutually agreed payment terms.</li>
-            <li><strong>Platform:</strong> All dealings are facilitated through ${COMPANY_NAME}. Both parties agree to abide by the platform's terms of service.</li>
-            <li><strong>Disputes:</strong> Any disputes arising from this quotation shall be resolved under the jurisdiction of Pune, Maharashtra.</li>
-        </ol>
-    </div>
-
-    <!-- Acceptance -->
-    <div class="acceptance-section">
-        <div class="acceptance-title">Please confirm your acceptance of this quote</div>
-        <div class="signature-block">
-            <div class="signature-item">
-                <div class="signature-line"></div>
-                <div class="signature-label">Authorized Signature</div>
-            </div>
-            <div class="signature-item">
-                <div class="signature-line"></div>
-                <div class="signature-label">Date</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Footer -->
-    <div class="footer">
-        ${COMPANY_NAME} — ${COMPANY_ADDRESS_LINE1}, ${COMPANY_ADDRESS_LINE2} | GSTIN: ${COMPANY_GST}<br/>
-        This is a computer-generated document. No signature is required for the digital version.
-    </div>
-</div>
-</body>
-</html>`;
-}
-
-// ─── Generate PDF from HTML ─────────────────────────────────────────
-async function generatePDFBuffer(html: string): Promise<Buffer> {
-    const puppeteer = await import("puppeteer");
-    const browser = await puppeteer.default.launch({
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    });
-
-    try {
-        const page = await browser.newPage();
-        await page.setContent(html, { waitUntil: "load" });
-
-        const pdfBuffer = await page.pdf({
-            format: "A4",
-            printBackground: true,
-            margin: { top: "20px", right: "20px", bottom: "20px", left: "20px" },
+    const descStack: any[] = [
+        { text: data.product.name, bold: true, fontSize: 10, color: "#1f2937" }
+    ];
+    if (data.product.category) {
+        descStack.push({
+            margin: [0, 4, 0, 2],
+            table: {
+                widths: ["auto"],
+                body: [
+                    [
+                        {
+                            text: data.product.category.toUpperCase(),
+                            fontSize: 7.5,
+                            bold: true,
+                            color: "#166534",
+                            margin: [6, 2, 6, 2]
+                        }
+                    ]
+                ]
+            },
+            layout: {
+                hLineWidth: function () { return 0; },
+                vLineWidth: function () { return 0; },
+                hLineColor: function () { return "transparent"; },
+                vLineColor: function () { return "transparent"; },
+                paddingLeft: function() { return 0; },
+                paddingRight: function() { return 0; },
+                paddingTop: function() { return 0; },
+                paddingBottom: function() { return 0; },
+                fillColor: function () { return "#dcfce7"; }
+            }
         });
-
-        return Buffer.from(pdfBuffer);
-    } finally {
-        await browser.close();
     }
+    if (data.product.description) {
+        descStack.push({ text: data.product.description.substring(0, 120), fontSize: 8, color: "#6b7280", margin: [0, 4, 0, 0] });
+    }
+
+    if (isVendorVersion) {
+        tableBody.push([
+            { stack: descStack, style: "tableCell" },
+            { text: qty.toLocaleString("en-IN"), style: "tableCell", alignment: "center" },
+            { text: formatINR(price), style: "tableCell", alignment: "right" },
+            { text: formatINR(price * qty), style: "tableCell", alignment: "right", bold: true }
+        ]);
+    } else {
+        tableBody.push([
+            { stack: descStack, style: "tableCell" },
+            { text: qty.toLocaleString("en-IN"), style: "tableCell", alignment: "center" }
+        ]);
+    }
+
+    if (data.product.specifications) {
+        Object.entries(data.product.specifications).forEach(([key, value]) => {
+            const specKey = key.replace(/_/g, " ").toUpperCase();
+            if (isVendorVersion) {
+                tableBody.push([
+                    { text: specKey, fontSize: 9, color: "#6b7280", style: "tableCell" },
+                    { text: value, colSpan: 3, fontSize: 9, color: "#374151", style: "tableCell" },
+                    {},
+                    {}
+                ]);
+            } else {
+                tableBody.push([
+                    { text: specKey, fontSize: 9, color: "#6b7280", style: "tableCell" },
+                    { text: value, fontSize: 9, color: "#374151", style: "tableCell" }
+                ]);
+            }
+        });
+    }
+
+    const docDefinition: any = {
+        defaultStyle: {
+            font: "Helvetica",
+            fontSize: 10,
+            lineHeight: 1.45,
+            color: "#1f2937"
+        },
+        pageMargins: [50, 50, 50, 50],
+        watermark: { text: COMPANY_NAME, color: "#166534", opacity: 0.04, bold: true, angle: -30 },
+        content: [
+            {
+                columns: [
+                    {
+                        width: "50%",
+                        stack: [
+                            logo ? { image: logo, width: 45, margin: [0, 0, 0, 5] } : {},
+                            { text: COMPANY_NAME, fontSize: 18, bold: true, color: "#166534" },
+                            { text: "B2B Industrial Marketplace", fontSize: 8, color: "#6b7280", characterSpacing: 1, margin: [0, 2, 0, 0] }
+                        ]
+                    },
+                    {
+                        width: "50%",
+                        alignment: "right",
+                        stack: [
+                            { text: COMPANY_ADDRESS_LINE1, fontSize: 9, bold: true, color: "#1f2937" },
+                            { text: COMPANY_ADDRESS_LINE2, fontSize: 9, color: "#4b5563" },
+                            { text: `Phone: ${COMPANY_PHONE}`, fontSize: 9, color: "#4b5563" },
+                            { text: `Email: ${COMPANY_EMAIL}`, fontSize: 9, color: "#4b5563" },
+                            { text: COMPANY_WEBSITE, fontSize: 9, bold: true, color: "#1f2937" }
+                        ]
+                    }
+                ],
+                margin: [0, 0, 0, 5]
+            },
+            { canvas: [{ type: "line", x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 3, lineColor: "#166534" }], margin: [0, 0, 0, 15] },
+
+            { text: "QUOTATION", fontSize: 24, bold: true, color: "#166534", alignment: "center", characterSpacing: 2 },
+            { 
+                text: isVendorVersion ? `Vendor Offer — ${data.vendorName}` : "Request for Quotation", 
+                fontSize: 10, 
+                color: "#9ca3af", 
+                alignment: "center", 
+                margin: [0, 4, 0, 20] 
+            },
+
+            {
+                table: {
+                    widths: ["50%", "50%"],
+                    body: [
+                        [
+                            {
+                                stack: [
+                                    { text: "QUOTATION INFORMATION", fontSize: 9, bold: true, color: "#166534", margin: [0, 0, 0, 8] },
+                                    {
+                                        columns: [
+                                            { text: "Quotation No.", fontSize: 9, color: "#6b7280", bold: true, width: "40%" },
+                                            { text: data.quotationNumber, fontSize: 9, bold: true, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    },
+                                    {
+                                        columns: [
+                                            { text: "Date", fontSize: 9, color: "#6b7280", width: "40%" },
+                                            { text: data.date, fontSize: 9, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    },
+                                    {
+                                        columns: [
+                                            { text: "Valid Until", fontSize: 9, color: "#6b7280", width: "40%" },
+                                            { text: data.validUntil, fontSize: 9, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    }
+                                ],
+                                fillColor: "#f9fafb",
+                                margin: [10, 10, 10, 10]
+                            },
+                            {
+                                stack: [
+                                    { text: "CLIENT DETAILS", fontSize: 9, bold: true, color: "#166534", margin: [0, 0, 0, 8] },
+                                    {
+                                        columns: [
+                                            { text: "Client ID", fontSize: 9, color: "#6b7280", bold: true, width: "40%" },
+                                            { text: data.clientId, fontSize: 9, bold: true, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    },
+                                    {
+                                        columns: [
+                                            { text: "Location", fontSize: 9, color: "#6b7280", width: "40%" },
+                                            { text: `${data.clientCity}, ${data.clientState}`, fontSize: 9, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    },
+                                    {
+                                        columns: [
+                                            { text: "Pincode", fontSize: 9, color: "#6b7280", width: "40%" },
+                                            { text: data.clientPincode, fontSize: 9, width: "60%" }
+                                        ],
+                                        margin: [0, 2]
+                                    }
+                                ],
+                                fillColor: "#f9fafb",
+                                margin: [10, 10, 10, 10]
+                            }
+                        ]
+                    ]
+                },
+                layout: {
+                    hLineWidth: function () { return 1; },
+                    vLineWidth: function () { return 1; },
+                    hLineColor: function () { return "#e5e7eb"; },
+                    vLineColor: function () { return "#e5e7eb"; }
+                },
+                margin: [0, 0, 0, 20]
+            },
+
+            {
+                table: {
+                    headerRows: 1,
+                    widths: isVendorVersion ? ["*", "auto", "auto", "auto"] : ["*", "auto"],
+                    body: tableBody
+                },
+                layout: {
+                    hLineWidth: function () { return 1; },
+                    vLineWidth: function () { return 1; },
+                    hLineColor: function () { return "#e5e7eb"; },
+                    vLineColor: function () { return "#e5e7eb"; },
+                    paddingLeft: function() { return 12; },
+                    paddingRight: function() { return 12; },
+                    paddingTop: function() { return 8; },
+                    paddingBottom: function() { return 8; }
+                },
+                margin: [0, 0, 0, 20]
+            },
+
+            isVendorVersion ? {
+                columns: [
+                    { text: "", width: "*" },
+                    {
+                        width: 250,
+                        table: {
+                            widths: ["*", "auto"],
+                            body: [
+                                [
+                                    { text: "Subtotal", color: "#6b7280", fontSize: 9 },
+                                    { text: formatINR(subtotal), alignment: "right", bold: true, fontSize: 9 }
+                                ],
+                                [
+                                    { text: `GST (${GST_RATE}%)`, color: "#6b7280", fontSize: 9 },
+                                    { text: formatINR(gstAmount), alignment: "right", bold: true, fontSize: 9 }
+                                ],
+                                [
+                                    { text: "Total", color: "#166534", bold: true, fontSize: 11 },
+                                    { text: formatINR(total), alignment: "right", bold: true, color: "#166534", fontSize: 11 }
+                                ],
+                                ...(tokenAmount !== null ? [[
+                                    { text: `Token Amount (${data.tokenPercentage}%)`, color: "#dc2626", bold: true, fontSize: 9 },
+                                    { text: formatINR(tokenAmount), alignment: "right", bold: true, color: "#dc2626", fontSize: 9 }
+                                ]] : [])
+                            ]
+                        },
+                        layout: {
+                            hLineWidth: function (i: number, node: any) { return (i === 2 || i === 3) ? 1 : 0; },
+                            vLineWidth: function () { return 0; },
+                            hLineColor: function () { return "#166534"; }
+                        },
+                        margin: [0, 0, 0, 20]
+                    }
+                ]
+            } : null,
+
+            isVendorVersion ? {
+                table: {
+                    widths: ["50%", "50%"],
+                    body: [
+                        [
+                            {
+                                text: "VENDOR OFFER TERMS",
+                                fontSize: 10,
+                                bold: true,
+                                color: "#1e40af",
+                                margin: [12, 8, 12, 8],
+                                colSpan: 2,
+                                fillColor: "#eff6ff"
+                            },
+                            {}
+                        ],
+                        [
+                            {
+                                stack: [
+                                    { text: "OFFERED BY", fontSize: 8, color: "#6b7280", bold: true },
+                                    { text: data.vendorName || "", fontSize: 12, bold: true, color: "#1e40af", margin: [0, 3, 0, 0] }
+                                ],
+                                fillColor: "#ffffff",
+                                margin: [12, 10, 12, 10]
+                            },
+                            {
+                                stack: [
+                                    { text: "DELIVERY TIMELINE", fontSize: 8, color: "#6b7280", bold: true },
+                                    { text: `${data.deliveryDays} Days`, fontSize: 12, bold: true, color: "#1e40af", margin: [0, 3, 0, 0] }
+                                ],
+                                fillColor: "#ffffff",
+                                margin: [12, 10, 12, 10]
+                            }
+                        ],
+                        [
+                            {
+                                stack: [
+                                    { text: "TOKEN MONEY", fontSize: 8, color: "#6b7280", bold: true },
+                                    { text: `${data.tokenPercentage}%`, fontSize: 12, bold: true, color: "#1e40af", margin: [0, 3, 0, 0] }
+                                ],
+                                fillColor: "#ffffff",
+                                margin: [12, 10, 12, 10]
+                            },
+                            {
+                                stack: [
+                                    { text: "TOKEN AMOUNT", fontSize: 8, color: "#6b7280", bold: true },
+                                    { text: formatINR(tokenAmount || 0), fontSize: 12, bold: true, color: "#1e40af", margin: [0, 3, 0, 0] }
+                                ],
+                                fillColor: "#ffffff",
+                                margin: [12, 10, 12, 10]
+                            }
+                        ]
+                    ]
+                },
+                layout: {
+                    hLineWidth: function () { return 1; },
+                    vLineWidth: function () { return 1; },
+                    hLineColor: function () { return "#bfdbfe"; },
+                    vLineColor: function () { return "#bfdbfe"; }
+                },
+                margin: [0, 0, 0, 20]
+            } : null,
+
+            { text: "TERMS & CONDITIONS", fontSize: 11, bold: true, color: "#166534", margin: [0, 0, 0, 4] },
+            { canvas: [{ type: "line", x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 1, lineColor: "#166534" }], margin: [0, 0, 0, 10] },
+            {
+                table: {
+                    widths: ["*"],
+                    body: [
+                        [
+                            {
+                                ol: [
+                                    { text: `Token Money: ${data.tokenPercentage ? `${data.tokenPercentage}% of the total amount (${formatINR(tokenAmount || 0)})` : "A percentage of the total amount"} shall be paid at the time of accepting this quotation as advance token money.`, fontSize: 9, margin: [0, 3] },
+                                    { text: `Delivery: ${data.deliveryDays ? `Delivery will be completed within ${data.deliveryDays} business days` : "Delivery timeline will be confirmed by the vendor"} from the date of order confirmation at the buyer's specified address.`, fontSize: 9, margin: [0, 3] },
+                                    { text: `Validity: This quotation is valid until ${data.validUntil}. After this date, prices and availability may change.`, fontSize: 9, margin: [0, 3] },
+                                    { text: "Pricing: All prices are subject to vendor confirmation. The final agreed price will be binding upon acceptance by both parties.", fontSize: 9, margin: [0, 3] },
+                                    { text: "Payment: Full payment (minus token money) is due upon delivery or as per mutually agreed payment terms.", fontSize: 9, margin: [0, 3] },
+                                    { text: `Platform: All dealings are facilitated through ${COMPANY_NAME}. Both parties agree to abide by the platform's terms of service.`, fontSize: 9, margin: [0, 3] },
+                                    { text: "Disputes: Any disputes arising from this quotation shall be resolved under the jurisdiction of Pune, Maharashtra.", fontSize: 9, margin: [0, 3] }
+                                ],
+                                fillColor: "#f9fafb",
+                                margin: [12, 12, 12, 12]
+                            }
+                        ]
+                    ]
+                },
+                layout: {
+                    hLineWidth: function () { return 1; },
+                    vLineWidth: function () { return 1; },
+                    hLineColor: function () { return "#e5e7eb"; },
+                    vLineColor: function () { return "#e5e7eb"; }
+                },
+                margin: [0, 0, 0, 20]
+            },
+
+            {
+                stack: [
+                    { text: "PLEASE CONFIRM YOUR ACCEPTANCE OF THIS QUOTE", fontSize: 10, bold: true, color: "#166534", alignment: "center", margin: [0, 15, 0, 15], characterSpacing: 1.5 },
+                    {
+                        columns: [
+                            {
+                                width: "45%",
+                                alignment: "center",
+                                stack: [
+                                    { canvas: [{ type: "line", x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 1, lineColor: "#9ca3af" }], margin: [0, 40, 0, 5] },
+                                    { text: "Authorized Signature", fontSize: 9, color: "#6b7280" }
+                                ]
+                            },
+                            { text: "", width: "10%" },
+                            {
+                                width: "45%",
+                                alignment: "center",
+                                stack: [
+                                    { canvas: [{ type: "line", x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 1, lineColor: "#9ca3af" }], margin: [0, 40, 0, 5] },
+                                    { text: "Date", fontSize: 9, color: "#6b7280" }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                margin: [0, 0, 0, 30]
+            },
+
+            {
+                stack: [
+                    { canvas: [{ type: "line", x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 2, lineColor: "#166534" }], margin: [0, 5] },
+                    { text: `${COMPANY_NAME} — ${COMPANY_ADDRESS_LINE1}, ${COMPANY_ADDRESS_LINE2} | GSTIN: ${COMPANY_GST}`, fontSize: 8, color: "#9ca3af", alignment: "center" },
+                    { text: "This is a computer-generated document. No signature is required for the digital version.", fontSize: 8, color: "#9ca3af", alignment: "center", margin: [0, 2] }
+                ]
+            }
+        ],
+        styles: {
+            tableHeader: { bold: true, color: "white", fillColor: "#166534", fontSize: 9, margin: [0, 2] },
+            tableCell: { fontSize: 9, margin: [0, 2] }
+        }
+    };
+
+    const pdfDoc = await printer.createPdfKitDocument(docDefinition);
+    
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        pdfDoc.on("data", (chunk: any) => chunks.push(chunk));
+        pdfDoc.on("end", () => resolve(Buffer.concat(chunks)));
+        pdfDoc.on("error", (err: any) => reject(err));
+        pdfDoc.end();
+    });
 }
 
 // ─── Public API ──────────────────────────────────────────────────────
@@ -720,8 +558,7 @@ export async function generateBaseQuotationDocument(params: {
         },
     };
 
-    const html = buildQuotationHTML(docData);
-    const pdfBuffer = await generatePDFBuffer(html);
+    const pdfBuffer = await generatePDFBuffer(docData);
 
     const s3Key = `quotation-documents/${quotationNumber}.pdf`;
     const { url } = await uploadBufferToS3(pdfBuffer, s3Key, "application/pdf");
@@ -808,8 +645,7 @@ export async function generateVendorQuotationDocument(params: {
         tokenPercentage: params.tokenPercentage,
     };
 
-    const html = buildQuotationHTML(docData);
-    const pdfBuffer = await generatePDFBuffer(html);
+    const pdfBuffer = await generatePDFBuffer(docData);
 
     const vendorIdShort = params.vendorId.split("-")[0];
     const s3Key = `quotation-documents/${baseDoc.quotation_number}_vendor_${vendorIdShort}.pdf`;

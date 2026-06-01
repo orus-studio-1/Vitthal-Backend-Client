@@ -82,7 +82,6 @@ export async function registerUser(req: Request, res: Response): Promise<Respons
                 [hashedOTP, expiryTime, existingUser.id]
             );
 
-            console.log(`Generated OTP for ${email}: ${plainOTP} (expires at ${expiryTime.toISOString()})`);
             if (process.env.Production !== 'true') {
                 console.log(`Generated OTP for ${email}: ${plainOTP} (expires at ${expiryTime.toISOString()})`);
             }
@@ -234,7 +233,6 @@ export async function logoutUser(req: Request, res: Response): Promise<Response>
 export const OTPSendingController = async (req: Request, res: Response): Promise<Response> => {
     const { email } = req.body;
 
-    console.log("OTPSendingController invoked", { email });
 
     if (!email) {
         return res.status(400).json({ message: 'Email is required' });
@@ -263,7 +261,6 @@ export const OTPSendingController = async (req: Request, res: Response): Promise
             [hashedOTP, expiryTime, email]
         );
 
-        console.log(`Generated OTP for ${email}: ${plainOTP} (expires at ${expiryTime.toISOString()})`);
         const emailResult = await sendOTPEmail(user.name, email, plainOTP, 10);
         if (!emailResult.success) {
             console.error(`Failed to send OTP email to ${email}:`, emailResult.error);

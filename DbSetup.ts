@@ -295,6 +295,7 @@ export async function ensureMarketplaceSchema() {
 
         ALTER TABLE products
             ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved',
+            ADD COLUMN IF NOT EXISTS item_code TEXT,
             ADD COLUMN IF NOT EXISTS approval_notes TEXT,
             ADD COLUMN IF NOT EXISTS created_by_user_id UUID,
             ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -365,45 +366,80 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'plastic', 'Plastic', 'Polymers, granules, and molded plastic goods', 1, TRUE, NOW(), NOW()
+        ALTER TABLE product_category
+            ADD COLUMN IF NOT EXISTS image TEXT NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS min_commision_percentage INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS max_commision_percentage INTEGER NOT NULL DEFAULT 10;
+
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'plastic', 'Plastic', 'Polymers, granules, and molded plastic goods', '/Landing/PlasticManufacturing.webp', 2, 5, 1, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'plastic');
+        UPDATE product_category 
+        SET image = '/Landing/PlasticManufacturing.webp', min_commision_percentage = 2, max_commision_percentage = 5
+        WHERE code = 'plastic' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'metal', 'Metal', 'Steel, aluminium, copper, and alloy products', 2, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'metal', 'Metal', 'Steel, aluminium, copper, and alloy products', '/Landing/MetalManufacturing.jpg', 1, 3, 2, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'metal');
+        UPDATE product_category 
+        SET image = '/Landing/MetalManufacturing.jpg', min_commision_percentage = 1, max_commision_percentage = 3
+        WHERE code = 'metal' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'chemicals', 'Chemicals', 'Industrial chemicals, additives, and solvents', 3, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'chemicals', 'Chemicals', 'Industrial chemicals, additives, and solvents', 'https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?w=600&auto=format&fit=crop&q=80', 3, 7, 3, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'chemicals');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1603126857599-f6e157fa2fe6?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 3, max_commision_percentage = 7
+        WHERE code = 'chemicals' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'construction', 'Construction', 'Cement, tiles, bricks, and building materials', 4, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'construction', 'Construction', 'Cement, tiles, bricks, and building materials', 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?w=600&auto=format&fit=crop&q=80', 2, 6, 4, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'construction');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1541888946425-d81bb19240f5?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 2, max_commision_percentage = 6
+        WHERE code = 'construction' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'machinery', 'Machinery', 'Industrial equipment, tools, and machine parts', 5, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'machinery', 'Machinery', 'Industrial equipment, tools, and machine parts', 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=600&auto=format&fit=crop&q=80', 2, 8, 5, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'machinery');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 2, max_commision_percentage = 8
+        WHERE code = 'machinery' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'packaging', 'Packaging', 'Boxes, containers, films, and packing supplies', 6, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'packaging', 'Packaging', 'Boxes, containers, films, and packing supplies', 'https://images.unsplash.com/photo-1589939705384-5185137a7f0f?w=600&auto=format&fit=crop&q=80', 2, 4, 6, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'packaging');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1589939705384-5185137a7f0f?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 2, max_commision_percentage = 4
+        WHERE code = 'packaging' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'textiles', 'Textiles', 'Fabrics, yarns, and textile supplies', 7, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'textiles', 'Textiles', 'Fabrics, yarns, and textile supplies', 'https://images.unsplash.com/photo-1558271821-39729b8f2204?w=600&auto=format&fit=crop&q=80', 3, 8, 7, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'textiles');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1558271821-39729b8f2204?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 3, max_commision_percentage = 8
+        WHERE code = 'textiles' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'automotive', 'Automotive', 'Vehicle parts and transport components', 8, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'automotive', 'Automotive', 'Vehicle parts and transport components', 'https://images.unsplash.com/photo-1617814076367-b759c7d7e738?w=600&auto=format&fit=crop&q=80', 2, 5, 8, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'automotive');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1617814076367-b759c7d7e738?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 2, max_commision_percentage = 5
+        WHERE code = 'automotive' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'agriculture', 'Agriculture', 'Seeds, fertilizers, and farm inputs', 9, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'agriculture', 'Agriculture', 'Seeds, fertilizers, and farm inputs', 'https://images.unsplash.com/photo-1625246333195-78d9c38ad449?w=600&auto=format&fit=crop&q=80', 1, 4, 9, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'agriculture');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1625246333195-78d9c38ad449?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 1, max_commision_percentage = 4
+        WHERE code = 'agriculture' AND (image = '' OR min_commision_percentage = 0);
 
-        INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-        SELECT 'electrical', 'Electrical', 'Cables, switches, wiring, and fittings', 10, TRUE, NOW(), NOW()
+        INSERT INTO product_category (code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, is_active, created_at, updated_at)
+        SELECT 'electrical', 'Electrical', 'Cables, switches, wiring, and fittings', 'https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?w=600&auto=format&fit=crop&q=80', 2, 6, 10, TRUE, NOW(), NOW()
         WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'electrical');
+        UPDATE product_category 
+        SET image = 'https://images.unsplash.com/photo-1473341304170-971dccb5ac1e?w=600&auto=format&fit=crop&q=80', min_commision_percentage = 2, max_commision_percentage = 6
+        WHERE code = 'electrical' AND (image = '' OR min_commision_percentage = 0);
 
         DO $$
         BEGIN

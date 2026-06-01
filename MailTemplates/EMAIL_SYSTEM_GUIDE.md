@@ -375,9 +375,7 @@ interface EmailResult {
 const result = await sendOTPEmail('John', 'john@example.com', '123456');
 if (!result.success) {
     console.error(`Failed to send email: ${result.error}`);
-} else {
-    console.log(`Email sent with ID: ${result.messageId}`);
-}
+} 
 ```
 
 ## Customization

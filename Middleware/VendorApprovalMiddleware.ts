@@ -1,13 +1,14 @@
 import type { NextFunction, Request, Response } from "express";
 import pool from "../DbConnect";
 
-type VendorApprovalStatus = "pending" | "agreement_sent" | "approved" | "rejected";
+type VendorApprovalStatus = "pending" | "agreement_sent" | "approved" | "rejected" | "reconsideration";
 
 const ALLOWED_VENDOR_STATUSES = new Set<VendorApprovalStatus>([
     "pending",
     "agreement_sent",
     "approved",
     "rejected",
+    "reconsideration",
 ]);
 
 export const getVendorApprovalStatusByUserId = async (userId: string): Promise<VendorApprovalStatus | null> => {

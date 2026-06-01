@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS product_category (
     code TEXT NOT NULL UNIQUE,
     label TEXT NOT NULL,
     description TEXT,
+    image TEXT NOT NULL,
+    min_commision_percentage INTEGER NOT NULL DEFAULT 0,
+    max_commision_percentage INTEGER NOT NULL DEFAULT 10,
     sort_order INTEGER NOT NULL DEFAULT 0,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -156,45 +159,21 @@ CREATE TABLE IF NOT EXISTS product_category (
 -- These inserts are guarded by WHERE NOT EXISTS so running the script
 -- multiple times will not create duplicates.
 -- ================================
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'plastic', 'Plastic', 'Polymers, granules, and molded plastic goods', 1, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'plastic');
+INSERT INTO product_category (code, label, description, image, sort_order, is_active) VALUES
+('metal_fabrication_parts', 'Metal & Fabrication Products', 'Sheet metal, structural parts, and custom fabricated components.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780292933/Metal_Fabricated_n51kin.jpg', 1, true),
+('electrical_automation_components', 'Electrical & Electronics Manufacturing', 'Industrial panels, sensors, and automation hardware.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780293409/Electrical_Electronics_twuwgm.jpg', 2, true),
+('industrial_machinery_equipment', 'Machinery & Industrial Equipment', 'Pumps, compressors, conveyor systems, and packaging machines.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780293705/Industrial_Machinery_jubodl.jpg', 3, true),
+('construction_building_materials', 'Construction & Building Material', 'Hardware, roofing, flooring, and structural materials.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294255/Construction_zozolo.jpg', 4, true),
+('automotive_spare_parts', 'Automobile & Auto Parts', 'Engine parts, braking systems, and EV components.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294268/Automative_part_tusmob.jpg', 5, true),
+('plastic_polymer_components', 'Plastic & Polymer Products', 'Injection molded parts and industrial plastic components.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294480/Plastic_polymer_ysm22x.jpg', 6, true),
+('food_agriculture_supplies', 'Food & Agriculture Processing', 'Agro-equipment, processing inputs, and organic supplies.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294555/Food_Agriculture_heawd4.jpg', 7, true),
+('laboratory_pharma_consumables', 'Chemical & Pharma Manufacturing', 'Chemicals, additives, and medical consumables.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294629/Pharamas_labs_nigahy.jpg', 8, true),
+('modular_furniture_wood', 'Furniture & Wood Products', 'Office, kitchen, and interior decorative products.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294735/Furniture_uig7s6.jpg', 9, true),
+('renewable_energy_systems', 'Renewable Energy Products', 'Solar panels, inverters, and energy storage solutions.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294829/Renewable_Energy_piev0o.jpg', 10, true),
+('packaging_logistics_supplies', 'Packaging Industry', 'Corrugated boxes, labels, and industrial pallets.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780294984/Packaging_boxes_mivqtz.jpg', 11, true),
+('textile_garment_materials', 'Textile & Garments', 'Fabrics, yarns, and industrial safety apparel.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780295062/Textile_gqybcg.jpg', 12, true),
+('cnc_industrial_tooling', 'CNC & VMC Tooling Product Categories', 'Precision cutting tools, holders, and inserts for CNC machines.', 'https://res.cloudinary.com/djolzxgct/image/upload/v1780295138/CNCC_Industrial_Tooling_vqipnh.jpg', 13, true);
 
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'metal', 'Metal', 'Steel, aluminium, copper, and alloy products', 2, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'metal');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'chemicals', 'Chemicals', 'Industrial chemicals, additives, and solvents', 3, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'chemicals');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'construction', 'Construction', 'Cement, tiles, bricks, and building materials', 4, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'construction');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'machinery', 'Machinery', 'Industrial equipment, tools, and machine parts', 5, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'machinery');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'packaging', 'Packaging', 'Boxes, containers, films, and packing supplies', 6, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'packaging');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'textiles', 'Textiles', 'Fabrics, yarns, and textile supplies', 7, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'textiles');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'automotive', 'Automotive', 'Vehicle parts and transport components', 8, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'automotive');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'agriculture', 'Agriculture', 'Seeds, fertilizers, and farm inputs', 9, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'agriculture');
-
-INSERT INTO product_category (code, label, description, sort_order, is_active, created_at, updated_at)
-SELECT 'electrical', 'Electrical', 'Cables, switches, wiring, and fittings', 10, TRUE, NOW(), NOW()
-WHERE NOT EXISTS (SELECT 1 FROM product_category WHERE code = 'electrical');
 
 CREATE TABLE IF NOT EXISTS vendor_categories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -249,6 +228,7 @@ CREATE TABLE IF NOT EXISTS products (
     description TEXT,
     category UUID NOT NULL,
     product_type TEXT,
+    item_code TEXT,
     material TEXT,
     grade TEXT,
     application TEXT,

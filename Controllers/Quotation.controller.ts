@@ -1315,7 +1315,6 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
 
 export const respondToAdminConfirmationController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
-    console.log("hello`")
     if (!authUser?.userId || authUser.role !== "client") {
         return res.status(403).json({ message: "Only clients can respond to admin confirmations" });
     }

@@ -1,5 +1,5 @@
 export const COOKIE_OPTIONS = {
     httpOnly: true,
     secure: true,
-    sameSite: 'none' as const,
+    sameSite: 'lax' as const,
 };

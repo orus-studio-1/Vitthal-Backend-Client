@@ -19,31 +19,26 @@ export function initSocket(server: HttpServer) {
     notificationNamespace = io.of("/notifications");
 
     notificationNamespace.on("connection", (socket) => {
-        console.log(`[Socket.io] Client connected to /notifications namespace: ${socket.id}`);
 
         socket.on("join", (userId: string) => {
             if (userId) {
                 socket.join(userId);
-                console.log(`[Socket.io] Socket ${socket.id} joined notification room: ${userId}`);
             }
         });
 
         // Admin Backend connects as an emitter to forward notifications to vendors
         socket.on("join_as_admin_emitter", () => {
-            console.log(`[Socket.io] Admin emitter connected: ${socket.id}`);
             socket.join("__admin_emitters__");
         });
 
         // Handle forwarded notifications from the Admin Backend
         socket.on("forward_notification", (payload: { targetUserId: string; notification: any }) => {
             if (payload?.targetUserId && payload?.notification) {
-                console.log(`[Socket.io] Forwarding notification to user ${payload.targetUserId}: ${payload.notification.title}`);
                 notificationNamespace!.to(payload.targetUserId).emit("notification", payload.notification);
             }
         });
 
         socket.on("disconnect", () => {
-            console.log(`[Socket.io] Socket disconnected from /notifications namespace: ${socket.id}`);
         });
     });
 
@@ -59,9 +54,7 @@ export function getIO(): Server {
 
 export function sendNotificationToUser(userId: string, notification: any) {
     if (notificationNamespace) {
-        console.log(`[Socket.io] Emitting real-time notification to user ${userId}:`, notification.title);
         notificationNamespace.to(userId).emit("notification", notification);
     } else {
-        console.warn("[Socket.io] Cannot send notification. /notifications namespace is not initialized.");
     }
 }

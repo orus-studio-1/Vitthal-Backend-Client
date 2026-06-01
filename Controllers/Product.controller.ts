@@ -197,6 +197,7 @@ async function getVendorProfileIfExists(userId: string) {
 
 export const addProductController = async (req: Request, res: Response): Promise<Response> => {
     const { name, description, category, productType, specifications, quotationLimit } = req.body;
+    const itemCode = req.body.itemCode || req.body.item_code || null;
 
     const { role, userId } = (req as any).user;
     if (!name || !category || !productType) {
@@ -256,9 +257,10 @@ export const addProductController = async (req: Request, res: Response): Promise
                 approval_status,
                 created_by_user_id,
                 is_active,
-                quotation_limit
+                quotation_limit,
+                item_code
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             returning *
         `;
         const values = [
@@ -269,7 +271,8 @@ export const addProductController = async (req: Request, res: Response): Promise
             approvalStatus,
             userId,
             !actsAsVendor,
-            parsedQuotationLimit
+            parsedQuotationLimit,
+            itemCode
         ];
         const result = await client.query(query, values);
 
@@ -717,7 +720,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
 export const getCategories = async (_req: Request, res: Response): Promise<Response> => {
     try {
         const result = await pool.query(
-            `SELECT id, code, label, description, sort_order
+            `SELECT id, code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order
              FROM product_category
              WHERE is_active = TRUE
              ORDER BY sort_order ASC, label ASC`

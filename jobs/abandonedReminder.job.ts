@@ -199,15 +199,15 @@ async function processReminderBatch(): Promise<number> {
 
             if (process.env.Production !== 'true' && process.env.NODE_ENV !== 'production') {
                 console.log("[abandoned-reminder] mock email ready", {
-                userId,
-                email: group.userEmail,
-                itemCount: group.items.length,
-                items: group.items.map((item) => ({
-                    sourceType: item.sourceType,
-                    productId: item.productId,
-                    productName: item.productName,
-                })),
-            });
+                    userId,
+                    email: group.userEmail,
+                    itemCount: group.items.length,
+                    items: group.items.map((item) => ({
+                        sourceType: item.sourceType,
+                        productId: item.productId,
+                        productName: item.productName,
+                    })),
+                });
                 console.log("[abandoned-reminder] html preview", html.slice(0, 1200));
             }
 

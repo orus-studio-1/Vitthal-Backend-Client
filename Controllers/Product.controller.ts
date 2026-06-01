@@ -980,6 +980,7 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                 vp.moq,
                 vp.stock_quantity,
                 vp.is_active AS status,
+                vp.status AS vendor_product_status,
                 vp.created_at AS created_date,
                 pImg.image_url AS primary_image,
                 p.approval_status,

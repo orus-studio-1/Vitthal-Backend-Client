@@ -15,10 +15,21 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         await pool.query('BEGIN');
 
         // 1. Fetch user's address
-        const addressQuery = await pool.query(
-            `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-            [userId]
-        );
+        const addressId = req.body.addressId || req.body.address_id || null;
+        let addressQuery;
+        
+        if (addressId) {
+            addressQuery = await pool.query(
+                `SELECT * FROM addresses WHERE id = $1 AND user_id = $2`,
+                [addressId, userId]
+            );
+        } else {
+            addressQuery = await pool.query(
+                `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+                [userId]
+            );
+        }
+
         if (addressQuery.rows.length === 0) {
             await pool.query('ROLLBACK');
             return res.status(400).json({ message: "No address found for client. Please add an address before checkout." });

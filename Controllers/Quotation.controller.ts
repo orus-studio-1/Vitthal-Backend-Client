@@ -4,6 +4,8 @@ import { sendQuotationRequestEmail, sendQuotationUpdateEmail } from "../helpers/
 import { createNotification, notifyAllAdmins } from "./Notification.controller";
 import { generateBaseQuotationDocument, generateVendorQuotationDocument } from "../services/quotationDocument.service";
 import { getPresignedUrl } from "../services/s3.service";
+import Razorpay from "razorpay";
+import crypto from "crypto";
 
 type QuotationAction = "offer" | "counter" | "accept" | "reject";
 
@@ -622,6 +624,15 @@ export const respondClientQuotationController = async (req: Request, res: Respon
             );
 
             const orderId = orderResult.rows[0].id as string;
+
+            await client.query(
+                `
+                    INSERT INTO vendor_payouts (order_id, vendor_id, status)
+                    VALUES ($1, $2, 'pending')
+                    ON CONFLICT (order_id) DO NOTHING
+                `,
+                [orderId, quotation.vendor_id]
+            );
 
             await client.query(
                 `
@@ -1326,6 +1337,12 @@ export const respondToAdminConfirmationController = async (req: Request, res: Re
         return res.status(400).json({ message: "Quotation ID and action (accept/reject) are required" });
     }
 
+    if (action === "accept") {
+        return res.status(400).json({
+            message: "Direct acceptance is disabled. You must pay the token money to confirm this quotation."
+        });
+    }
+
     const client = await pool.connect();
 
     try {
@@ -1348,7 +1365,226 @@ export const respondToAdminConfirmationController = async (req: Request, res: Re
             return res.status(400).json({ message: "No pending admin confirmation to respond to" });
         }
 
-        if (action === "accept") {
+        // reject
+        await client.query(
+            `UPDATE quotation_requests
+             SET admin_confirmation_status = 'rejected',
+                 status = 'admin_confirmation_rejected',
+                 updated_at = NOW()
+             WHERE id = $1`,
+            [id]
+        );
+
+        await client.query(
+            `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
+             VALUES ($1, $2, 'client', 'admin_rejected', $3)`,
+            [id, authUser.userId, note || null]
+        );
+
+        // Notify admin
+        if (quotation.admin_user_id) {
+            await createNotification({
+                userId: quotation.admin_user_id,
+                type: "admin_confirmation_rejected",
+                title: "Client rejected the confirmation",
+                body: `Client rejected the admin confirmation for the quotation.`,
+                referenceType: "quotation",
+                referenceId: id as string,
+            });
+        }
+        await notifyAllAdmins({
+            type: "admin_confirmation_rejected",
+            title: "Quotation confirmation rejected",
+            body: `Client rejected the admin confirmation.`,
+            referenceType: "quotation",
+            referenceId: id as string,
+        });
+
+        await client.query("COMMIT");
+        return res.status(200).json({ message: `Admin confirmation ${action}ed successfully` });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Error responding to admin confirmation:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
+    }
+};
+
+export const createTokenPaymentController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser.role !== "client") {
+        return res.status(403).json({ message: "Only clients can make payments" });
+    }
+    const { userId } = authUser;
+    const id = req.params.id as string;
+
+    if (!id) {
+        return res.status(400).json({ message: "Quotation ID is required" });
+    }
+
+    try {
+        // Fetch quotation request
+        const quotationResult = await pool.query(
+            `SELECT * FROM quotation_requests WHERE id = $1 AND user_id = $2 LIMIT 1`,
+            [id, userId]
+        );
+
+        if (quotationResult.rows.length === 0) {
+            return res.status(404).json({ message: "Quotation request not found" });
+        }
+
+        const quotation = quotationResult.rows[0];
+
+        if (quotation.status !== "admin_confirmation_pending" || quotation.admin_confirmation_status !== "pending") {
+            return res.status(400).json({ message: "Quotation is not pending admin confirmation response" });
+        }
+
+        // Fetch token details
+        let tokenAmount = quotation.token_amount ? Number(quotation.token_amount) : null;
+        if (tokenAmount === null || tokenAmount <= 0) {
+            const acceptedPrice = quotation.accepted_price ? Number(quotation.accepted_price) : Number(quotation.current_offer_price);
+            const acceptedQty = quotation.accepted_quantity ? Number(quotation.accepted_quantity) : Number(quotation.current_offer_quantity);
+            const tokenPct = quotation.token_percentage ? Number(quotation.token_percentage) : 10;
+            if (!acceptedPrice || !acceptedQty) {
+                return res.status(400).json({ message: "Quotation pricing details are incomplete" });
+            }
+            const total = acceptedPrice * acceptedQty * 1.18;
+            tokenAmount = (tokenPct / 100) * total;
+        }
+
+        const keyId = process.env.RAZORPAY_KEY_ID;
+        const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+        if (!keyId || !keySecret) {
+            return res.status(400).json({
+                message: "Razorpay credentials (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET) are not configured in the backend .env file."
+            });
+        }
+
+        const razorpayInstance = new Razorpay({
+            key_id: keyId,
+            key_secret: keySecret,
+        });
+
+        const razorpayAmount = Math.round(tokenAmount * 100);
+
+        const razorpayOrder = await (razorpayInstance.orders.create({
+            amount: razorpayAmount,
+            currency: "INR",
+            receipt: `receipt_token_${Date.now()}`,
+            notes: {
+                userId,
+                quotationRequestId: id,
+            }
+        }) as any);
+
+        // Fetch user profile details
+        const userProfileQuery = await pool.query(
+            `SELECT u.name, u.email, c.phone FROM users u LEFT JOIN client c ON c.user_id = u.id WHERE u.id = $1`,
+            [userId]
+        );
+        const userProfile = userProfileQuery.rows[0];
+
+        // Store payment record as pending
+        const orderIds = quotation.order_id ? [quotation.order_id] : [];
+        await pool.query(
+            `INSERT INTO payments (
+                user_id, amount, status, payment_method, razorpay_order_id, order_ids, quotation_request_id, split_number, split_percentage
+            ) VALUES ($1, $2, 'pending', 'razorpay', $3, $4, $5, 1, $6)`,
+            [userId, tokenAmount, razorpayOrder.id, orderIds, id, quotation.token_percentage || 100.00]
+        );
+
+        return res.status(200).json({
+            keyId: keyId,
+            amount: razorpayOrder.amount,
+            currency: razorpayOrder.currency,
+            razorpayOrderId: razorpayOrder.id,
+            quotationRequestId: id,
+            tokenAmount: tokenAmount,
+            userProfile: {
+                name: userProfile?.name || "",
+                email: userProfile?.email || "",
+                phone: userProfile?.phone || ""
+            }
+        });
+
+    } catch (error) {
+        console.error("Create token payment order error:", error);
+        return res.status(500).json({ message: "Failed to initiate token payment." });
+    }
+};
+
+export const verifyTokenPaymentController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser.role !== "client") {
+        return res.status(403).json({ message: "Only clients can verify payments" });
+    }
+    const { userId } = authUser;
+    const id = req.params.id as string;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, note } = req.body;
+
+    if (!id || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return res.status(400).json({ message: "Missing required payment verification details." });
+    }
+
+    try {
+        const keySecret = process.env.RAZORPAY_KEY_SECRET;
+        if (!keySecret) {
+            return res.status(500).json({ message: "Razorpay credentials are not configured on the server." });
+        }
+
+        // 1. Verify signature
+        const hmac = crypto.createHmac("sha256", keySecret);
+        hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
+        const generatedSignature = hmac.digest("hex");
+
+        if (generatedSignature !== razorpay_signature) {
+            await pool.query(
+                `UPDATE payments SET status = 'failed', updated_at = NOW() WHERE razorpay_order_id = $1`,
+                [razorpay_order_id]
+            );
+            return res.status(400).json({ message: "Payment verification failed. Invalid signature." });
+        }
+
+        const client = await pool.connect();
+
+        try {
+            await client.query("BEGIN");
+
+            // 2. Fetch payment details to verify
+            const paymentQuery = await client.query(
+                `SELECT id, amount FROM payments WHERE razorpay_order_id = $1 AND quotation_request_id = $2`,
+                [razorpay_order_id, id]
+            );
+
+            if (paymentQuery.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Payment record not found for this quotation." });
+            }
+
+            // 3. Update payment record to successful
+            await client.query(
+                `UPDATE payments 
+                 SET status = 'successful', razorpay_payment_id = $2, razorpay_signature = $3, updated_at = NOW()
+                 WHERE razorpay_order_id = $1`,
+                [razorpay_order_id, razorpay_payment_id, razorpay_signature]
+            );
+
+            // 4. Fetch the quotation request to confirm it
+            const quotationResult = await client.query(
+                `SELECT * FROM quotation_requests WHERE id = $1 LIMIT 1`,
+                [id]
+            );
+
+            if (quotationResult.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Quotation request not found" });
+            }
+
+            const quotation = quotationResult.rows[0];
+
+            // 5. Update quotation request status
             await client.query(
                 `UPDATE quotation_requests
                  SET admin_confirmation_status = 'confirmed',
@@ -1359,88 +1595,76 @@ export const respondToAdminConfirmationController = async (req: Request, res: Re
                 [id]
             );
 
-            // Update the associated order to confirmed if it exists
+            // 6. Update associated order status to processing and payment_status to paid
             if (quotation.order_id) {
                 await client.query(
-                    `UPDATE orders SET status = 'processing', updated_at = NOW() WHERE id = $1`,
+                    `UPDATE orders 
+                     SET status = 'processing', payment_status = 'paid', updated_at = NOW() 
+                     WHERE id = $1`,
                     [quotation.order_id]
                 );
+
                 await client.query(
                     `INSERT INTO order_status_history (order_id, status, note, created_at)
-                     VALUES ($1, 'processing', 'Admin confirmation accepted by client', CURRENT_TIMESTAMP)`,
+                     VALUES ($1, 'processing', 'Admin confirmation accepted and token money paid by client.', CURRENT_TIMESTAMP)`,
                     [quotation.order_id]
                 );
+
+                // Deduct stock for order items
+                const orderItemsQuery = await client.query(
+                    `SELECT product_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
+                    [quotation.order_id]
+                );
+
+                for (const item of orderItemsQuery.rows) {
+                    await client.query(
+                        `UPDATE vendor_products     
+                         SET stock_quantity = GREATEST(0, stock_quantity - $1), updated_at = NOW()
+                         WHERE product_id = $2 AND vendor_id = $3`,
+                        [item.quantity, item.product_id, item.vendor_id]
+                    );
+                }
             }
 
+            // 7. Insert client confirm message in chat
             await client.query(
                 `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
                  VALUES ($1, $2, 'client', 'admin_confirmed', $3)`,
-                [id, authUser.userId, note || null]
+                [id, userId, note || "Token money paid via Razorpay."]
             );
 
-            // Notify admin
+            // 8. Notify admin
             if (quotation.admin_user_id) {
                 await createNotification({
                     userId: quotation.admin_user_id,
                     type: "admin_confirmation_accepted",
-                    title: "Client confirmed the quotation",
-                    body: `Client confirmed admin confirmation for the quotation. The order is now active.`,
+                    title: "Client confirmed the quotation & paid token money",
+                    body: `Client paid token money via Razorpay. Quotation confirmed and order is now active.`,
                     referenceType: "quotation",
-                    referenceId: id as string,
+                    referenceId: id,
                 });
             }
             await notifyAllAdmins({
                 type: "admin_confirmation_accepted",
                 title: "Quotation fully confirmed",
-                body: `Client confirmed admin confirmation. Order is now processing.`,
+                body: `Client confirmed quotation and paid token money. Order is now processing.`,
                 referenceType: "quotation",
-                referenceId: id as string,
+                referenceId: id,
             });
 
-        } else {
-            // reject
-            await client.query(
-                `UPDATE quotation_requests
-                 SET admin_confirmation_status = 'rejected',
-                     status = 'admin_confirmation_rejected',
-                     updated_at = NOW()
-                 WHERE id = $1`,
-                [id]
-            );
+            await client.query("COMMIT");
+            return res.status(200).json({ message: "Token payment verified and quotation fully confirmed!" });
 
-            await client.query(
-                `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
-                 VALUES ($1, $2, 'client', 'admin_rejected', $3)`,
-                [id, authUser.userId, note || null]
-            );
-
-            // Notify admin
-            if (quotation.admin_user_id) {
-                await createNotification({
-                    userId: quotation.admin_user_id,
-                    type: "admin_confirmation_rejected",
-                    title: "Client rejected the confirmation",
-                    body: `Client rejected the admin confirmation for the quotation.`,
-                    referenceType: "quotation",
-                    referenceId: id as string,
-                });
-            }
-            await notifyAllAdmins({
-                type: "admin_confirmation_rejected",
-                title: "Quotation confirmation rejected",
-                body: `Client rejected the admin confirmation.`,
-                referenceType: "quotation",
-                referenceId: id as string,
-            });
+        } catch (error) {
+            await client.query("ROLLBACK");
+            console.error("verifyTokenPayment transaction error:", error);
+            return res.status(500).json({ message: "Failed to complete verification transaction." });
+        } finally {
+            client.release();
         }
 
-        await client.query("COMMIT");
-        return res.status(200).json({ message: `Admin confirmation ${action}ed successfully` });
     } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error responding to admin confirmation:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+        console.error("Verify token payment error:", error);
+        return res.status(500).json({ message: "Internal server error during payment verification." });
     }
 };

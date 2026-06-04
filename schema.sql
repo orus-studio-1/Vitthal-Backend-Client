@@ -563,6 +563,52 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 -- ================================
+-- PAYMENTS
+-- ================================
+CREATE TABLE IF NOT EXISTS payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount NUMERIC(12, 2) NOT NULL,
+    currency VARCHAR(10) DEFAULT 'INR',
+    status VARCHAR(50) DEFAULT 'pending',
+    payment_method VARCHAR(50) DEFAULT 'razorpay',
+    razorpay_order_id VARCHAR(255) UNIQUE,
+    razorpay_payment_id VARCHAR(255),
+    razorpay_signature TEXT,
+    order_ids UUID[] DEFAULT '{}',
+    quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
+    split_number INTEGER DEFAULT 1,
+    split_percentage NUMERIC(5, 2) DEFAULT 100.00,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
+CREATE INDEX IF NOT EXISTS idx_payments_razorpay_order_id ON payments(razorpay_order_id);
+
+-- ================================
+-- VENDOR PAYOUTS
+-- ================================
+CREATE TABLE IF NOT EXISTS vendor_payouts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    payout_percentage NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
+    payout_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    delivered_at TIMESTAMPTZ,
+    due_date TIMESTAMPTZ,
+    last_paid_at TIMESTAMPTZ,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_payouts_order_id ON vendor_payouts(order_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_payouts_vendor_id ON vendor_payouts(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_payouts_status ON vendor_payouts(status);
+
+-- ================================
 -- QUOTATION REQUESTS (CLIENT <-> VENDOR)
 -- ================================
 CREATE TABLE IF NOT EXISTS quotation_requests (

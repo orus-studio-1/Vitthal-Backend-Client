@@ -204,29 +204,39 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
 
 export async function logoutUser(req: Request, res: Response): Promise<Response> {
     const isRequestFrom = req.headers['x-request-from'] || '';
-    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken`];
+    
+    // Always clear cookies for the requesting role so the client is guaranteed to be logged out
+    if (isRequestFrom === 'vendor' || isRequestFrom === 'client') {
+        res.clearCookie(`${isRequestFrom}RefreshToken`, COOKIE_OPTIONS);
+        res.clearCookie(`${isRequestFrom}AccessToken`, COOKIE_OPTIONS);
+    } else {
+        // Fallback: clear both to be safe
+        res.clearCookie('vendorRefreshToken', COOKIE_OPTIONS);
+        res.clearCookie('vendorAccessToken', COOKIE_OPTIONS);
+        res.clearCookie('clientRefreshToken', COOKIE_OPTIONS);
+        res.clearCookie('clientAccessToken', COOKIE_OPTIONS);
+    }
+
+    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken` || 'vendorRefreshToken'] || req.cookies['clientRefreshToken'];
 
     if (!refreshToken) {
-        return res.status(400).json({ message: 'Refresh token is required' });
+        return res.status(200).json({ message: 'Logout successful (cookies cleared)' });
     }
+
     try {
         const isVerified = verifyToken(refreshToken, 'refresh');
         if (!isVerified) {
-            return res.status(401).json({ message: 'Invalid refresh token' });
+            return res.status(200).json({ message: 'Logout successful (cookies cleared, token invalid)' });
         }
 
-        // Clear refresh token from database and get the role so that we can clear the correct cookies
-        const result = await pool.query('UPDATE users SET refresh_token = NULL WHERE refresh_token = $1 RETURNING role', [refreshToken]);
-        const userRole = result.rows[0]?.role;
-
-        res.clearCookie(`${userRole}RefreshToken`, COOKIE_OPTIONS);
-        res.clearCookie(`${userRole}AccessToken`, COOKIE_OPTIONS);
+        // Clear refresh token from database
+        await pool.query('UPDATE users SET refresh_token = NULL WHERE refresh_token = $1', [refreshToken]);
 
         return res.status(200).json({ message: 'Logout successful' });
     }
     catch (error) {
         console.error('Error logging out user:', error);
-        return res.status(500).json({ message: 'Internal server error' });
+        return res.status(200).json({ message: 'Logout completed with database warning' });
     }
 }
 

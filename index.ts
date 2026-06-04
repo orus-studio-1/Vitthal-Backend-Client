@@ -33,6 +33,7 @@ const PORT = 9000;
 const allowedOrigins = new Set([
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:8081',
     'http://localhost:4000',
     'http://localhost:4001',
     'http://192.168.29.150:4000',

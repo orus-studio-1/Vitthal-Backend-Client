@@ -422,6 +422,35 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
             );
         }
 
+        if (status.toLowerCase() === 'delivered') {
+            await pool.query(
+                `INSERT INTO vendor_payouts (order_id, vendor_id, status, delivered_at, due_date)
+                 SELECT 
+                     o.id,
+                     o.vendor_id,
+                     'pending',
+                     NOW(),
+                     NOW() + (
+                         COALESCE(
+                             CASE 
+                                 WHEN LOWER(v.credit_cycle) LIKE '%immediate%' THEN 0
+                                 WHEN substring(v.credit_cycle from '\\d+') IS NOT NULL THEN substring(v.credit_cycle from '\\d+')::integer
+                                 ELSE 15
+                             END, 
+                             15
+                         ) * INTERVAL '1 day'
+                     )
+                 FROM orders o
+                 JOIN vendors v ON o.vendor_id = v.id
+                 WHERE o.id = $1
+                 ON CONFLICT (order_id) DO UPDATE SET
+                     delivered_at = EXCLUDED.delivered_at,
+                     due_date = EXCLUDED.due_date,
+                     updated_at = NOW()`,
+                [id]
+            );
+        }
+
         // ── Route plan generation ─────────────────────────────────────────────
         // When vendor accepts (processing), compute the planned FC route.
         if (status.toLowerCase() === 'processing') {
@@ -639,3 +668,75 @@ export const getVendorOrderTrackingController = async (req: Request, res: Respon
         return res.status(500).json({ message: "Internal server error" });
     }
 }
+
+export const getVendorPayoutsController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || !authUser?.role) {
+        return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const { userId, role } = authUser;
+    if (role !== 'vendor') {
+        return res.status(403).json({ message: "Only vendors can view their payouts" });
+    }
+
+    try {
+        // Resolve vendor id
+        const vendorQ = await pool.query(`SELECT id FROM vendors WHERE user_id = $1`, [userId]);
+        if (vendorQ.rows.length === 0) {
+            return res.status(404).json({ message: "Vendor not found" });
+        }
+        const vendorId = vendorQ.rows[0].id;
+
+        const query = `
+            SELECT 
+                vp.id AS payout_id,
+                vp.order_id,
+                vp.vendor_id,
+                vp.payout_percentage,
+                vp.payout_amount,
+                vp.status AS payout_status,
+                vp.delivered_at,
+                vp.due_date,
+                vp.last_paid_at,
+                vp.notes AS payout_notes,
+                o.total_amount AS order_total_amount,
+                o.status AS order_status,
+                o.payment_status AS client_payment_status,
+                COALESCE(o.customer_name, u.name) AS customer_name,
+                v.company_name AS vendor_name,
+                v.credit_cycle AS vendor_credit_cycle,
+                -- Successful client payments total
+                COALESCE((
+                    SELECT SUM(p.amount)
+                    FROM payments p
+                    WHERE p.status = 'successful'
+                      AND (
+                          vp.order_id = ANY(p.order_ids) 
+                          OR p.quotation_request_id = (SELECT id FROM quotation_requests WHERE order_id = vp.order_id LIMIT 1)
+                      )
+                ), 0) AS client_paid_amount,
+                -- Successful client payments split percentage sum
+                COALESCE((
+                    SELECT SUM(p.split_percentage)
+                    FROM payments p
+                    WHERE p.status = 'successful'
+                      AND (
+                          vp.order_id = ANY(p.order_ids) 
+                          OR p.quotation_request_id = (SELECT id FROM quotation_requests WHERE order_id = vp.order_id LIMIT 1)
+                      )
+                ), 0) AS client_paid_percentage
+            FROM vendor_payouts vp
+            JOIN orders o ON o.id = vp.order_id
+            JOIN vendors v ON v.id = vp.vendor_id
+            LEFT JOIN users u ON u.id = o.user_id
+            WHERE vp.vendor_id = $1
+            ORDER BY vp.created_at DESC
+        `;
+        const result = await pool.query(query, [vendorId]);
+        return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: result.rows });
+    } catch (error) {
+        console.error("Error fetching vendor payouts:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};

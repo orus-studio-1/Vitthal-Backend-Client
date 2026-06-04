@@ -1,13 +1,24 @@
 import nodemailer from 'nodemailer';
 
-// Configure your email service here
-const transporter = nodemailer.createTransport({
-    service: process.env.EMAIL_SERVICE || 'gmail', // e.g., 'gmail', 'outlook', etc.
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD, // or app-specific password
-    },
-});
+const transporter = nodemailer.createTransport(
+    process.env.SMTP_HOST
+        ? {
+              host: process.env.SMTP_HOST.trim(),
+              port: Number(process.env.SMTP_PORT || 587),
+              secure: process.env.SMTP_SECURE === 'true' || Number(process.env.SMTP_PORT) === 465,
+              auth: {
+                  user: (process.env.SMTP_USER || process.env.EMAIL_USER)?.trim(),
+                  pass: (process.env.SMTP_PASS || process.env.EMAIL_PASSWORD)?.trim(),
+              },
+          }
+        : {
+              service: process.env.EMAIL_SERVICE || 'gmail', // e.g., 'gmail', 'outlook', etc.
+              auth: {
+                  user: process.env.EMAIL_USER,
+                  pass: process.env.EMAIL_PASSWORD, // or app-specific password
+              },
+          }
+);
 
 interface EmailPayload {
     to: string;
@@ -38,12 +49,12 @@ export async function sendEmail(payload: EmailPayload): Promise<EmailResult> {
         }
 
         const mailOptions = {
-            from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+            from: process.env.EMAIL_FROM || process.env.SMTP_USER || process.env.EMAIL_USER,
             to: payload.to,
             subject: payload.subject,
             html: payload.htmlContent,
             text: payload.textContent || stripHtml(payload.htmlContent),
-            replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_USER,
+            replyTo: process.env.EMAIL_REPLY_TO || process.env.SMTP_USER || process.env.EMAIL_USER,
         };
 
         const info = await transporter.sendMail(mailOptions);
@@ -130,7 +141,7 @@ function stripHtml(html: string): string {
 
 // Email service configuration export
 export const emailConfig = {
-    service: process.env.EMAIL_SERVICE || 'gmail',
-    from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
-    replyTo: process.env.EMAIL_REPLY_TO || process.env.EMAIL_USER,
+    service: process.env.EMAIL_SERVICE || (process.env.SMTP_HOST ? undefined : 'gmail'),
+    from: process.env.EMAIL_FROM || process.env.SMTP_USER || process.env.EMAIL_USER,
+    replyTo: process.env.EMAIL_REPLY_TO || process.env.SMTP_USER || process.env.EMAIL_USER,
 };

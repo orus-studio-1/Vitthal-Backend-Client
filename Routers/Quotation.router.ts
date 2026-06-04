@@ -8,7 +8,9 @@ import {
     getVendorQuotationsController,
     getVendorQuotationByIdController,
     respondVendorQuotationController,
-    respondToAdminConfirmationController
+    respondToAdminConfirmationController,
+    createTokenPaymentController,
+    verifyTokenPaymentController
 } from "../Controllers/Quotation.controller";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
 
@@ -23,6 +25,8 @@ quotationRouter.get("/:id", getClientQuotationByIdController);
 quotationRouter.post("/:id/respond", respondClientQuotationController);
 quotationRouter.post("/:id/admin-respond", respondToAdminConfirmationController);
 quotationRouter.post("/:id/admin-response", respondToAdminConfirmationController);
+quotationRouter.post("/:id/create-token-payment", createTokenPaymentController);
+quotationRouter.post("/:id/verify-token-payment", verifyTokenPaymentController);
 
 // Vendor routes
 quotationRouter.get("/vendor/list", requireApprovedVendor, getVendorQuotationsController);

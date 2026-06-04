@@ -1,5 +1,9 @@
 import { Router } from "express";
-import { placeOrderController } from "../Controllers/Checkout.controller";
+import { 
+    placeOrderController, 
+    createPaymentOrderController, 
+    verifyPaymentController 
+} from "../Controllers/Checkout.controller";
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 
 const checkoutRouter = Router();
@@ -7,5 +11,7 @@ const checkoutRouter = Router();
 checkoutRouter.use(authMiddleware);
 
 checkoutRouter.post("/placeOrder", placeOrderController);
+checkoutRouter.post("/create-payment-order", createPaymentOrderController);
+checkoutRouter.post("/verify-payment", verifyPaymentController);
 
 export default checkoutRouter;

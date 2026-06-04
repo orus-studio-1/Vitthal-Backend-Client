@@ -26,6 +26,7 @@
     "nodemailer": "^8.0.7",
     "pdfmake": "^0.3.9",
     "pg": "^8.20.0",
+    "razorpay": "^2.9.6",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

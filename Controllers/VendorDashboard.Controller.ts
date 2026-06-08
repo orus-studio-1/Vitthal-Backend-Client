@@ -25,9 +25,9 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                 COALESCE(SUM(o.total_amount), 0) AS total_revenue,
                 COUNT(o.id) AS total_orders,
                 (SELECT COUNT(*) FROM vendor_products vp WHERE vp.vendor_id = $1 AND vp.is_active = true) AS active_products,
-                (SELECT COUNT(DISTINCT o2.user_id) FROM orders o2 WHERE o2.vendor_id = $1) AS total_customers
+                (SELECT COUNT(DISTINCT o2.user_id) FROM orders o2 WHERE o2.vendor_id = $1 AND NOT (o2.status = 'pending' AND o2.payment_status = 'pending' AND o2.source IN ('client', 'quotation'))) AS total_customers
             FROM orders o
-            WHERE o.vendor_id = $1
+            WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
         `;
         const statsResult = await pool.query(statsQuery, [vendorId]);
         const stats = statsResult.rows[0];
@@ -46,6 +46,7 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                     COALESCE(SUM(o.total_amount), 0) AS revenue
                 FROM orders o
                 WHERE o.vendor_id = $1
+                    AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
                     AND o.created_at >= DATE_TRUNC('year', NOW())
                 GROUP BY TO_CHAR(o.created_at, 'Mon'), EXTRACT(MONTH FROM o.created_at)
                 ORDER BY month_num ASC
@@ -72,6 +73,7 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                     COALESCE(SUM(o.total_amount), 0) AS revenue
                 FROM orders o
                 WHERE o.vendor_id = $1
+                    AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
                     AND o.created_at >= NOW() - ($2 * INTERVAL '1 day')
                 GROUP BY DATE(o.created_at)
                 ORDER BY DATE(o.created_at) ASC
@@ -117,7 +119,7 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                 ) AS product_name
             FROM orders o
             JOIN users u ON o.user_id = u.id
-            WHERE o.vendor_id = $1
+            WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
             ORDER BY o.created_at DESC
             LIMIT 5
         `;
@@ -130,8 +132,9 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                 SUM(oi.quantity) AS total_sales,
                 SUM(oi.quantity * oi.price) AS total_revenue
             FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
             JOIN products p ON oi.product_id = p.id
-            WHERE oi.vendor_id = $1
+            WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
             GROUP BY p.name
             ORDER BY total_sales DESC
             LIMIT 3
@@ -214,7 +217,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             SELECT COALESCE(SUM(oi.quantity), 0) AS total_quantity
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
-            WHERE oi.vendor_id = $1 ${dateFilter}
+            WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
         `;
         const tonnageResult = await pool.query(tonnageQuery, [vendorId]);
         const totalQuantity = parseInt(tonnageResult.rows[0].total_quantity) || 0;
@@ -224,7 +227,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             SELECT COALESCE(SUM(oi.quantity), 0) AS total_quantity
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
-            WHERE oi.vendor_id = $1 ${previousDateFilter}
+            WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${previousDateFilter}
         `;
         const prevTonnageResult = await pool.query(prevTonnageQuery, [vendorId]);
         const prevTotalQuantity = parseInt(prevTonnageResult.rows[0].total_quantity) || 0;
@@ -236,7 +239,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                    COUNT(o.id) AS order_count,
                    COALESCE(SUM(o.total_amount), 0) AS total_revenue
             FROM orders o
-            WHERE o.vendor_id = $1 ${dateFilter}
+            WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
         `;
         const aovResult = await pool.query(aovQuery, [vendorId]);
         const avgOrderValue = parseFloat(aovResult.rows[0].avg_order_value) || 0;
@@ -247,7 +250,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             SELECT COALESCE(AVG(o.total_amount), 0) AS avg_order_value,
                    COALESCE(SUM(o.total_amount), 0) AS total_revenue
             FROM orders o
-            WHERE o.vendor_id = $1 ${previousDateFilter}
+            WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${previousDateFilter}
         `;
         const prevAovResult = await pool.query(prevAovQuery, [vendorId]);
         const prevAvgOrderValue = parseFloat(prevAovResult.rows[0].avg_order_value) || 0;
@@ -257,14 +260,15 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         // 3. Category/Segment Distribution (by product category)
         const categoryQuery = `
             SELECT 
-                p.category,
+                pc.label AS category,
                 COALESCE(SUM(oi.quantity), 0) AS total_quantity,
                 COALESCE(SUM(oi.quantity * oi.price), 0) AS total_revenue
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             JOIN products p ON oi.product_id = p.id
-            WHERE oi.vendor_id = $1 ${dateFilter}
-            GROUP BY p.category
+            JOIN product_category pc ON p.category = pc.id
+            WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
+            GROUP BY pc.label
             ORDER BY total_quantity DESC
         `;
         const categoryResult = await pool.query(categoryQuery, [vendorId]);
@@ -282,7 +286,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                     EXTRACT(DAY FROM o.created_at)::integer AS day_num,
                     COALESCE(SUM(o.total_amount), 0) AS revenue
                 FROM orders o
-                WHERE o.vendor_id = $1 ${dateFilter}
+                WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
                 GROUP BY EXTRACT(DAY FROM o.created_at)
                 ORDER BY day_num ASC
             `;
@@ -294,7 +298,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                     EXTRACT(MONTH FROM o.created_at)::integer AS month_num,
                     COALESCE(SUM(o.total_amount), 0) AS revenue
                 FROM orders o
-                WHERE o.vendor_id = $1 ${dateFilter}
+                WHERE o.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
                 GROUP BY TO_CHAR(o.created_at, 'Mon'), EXTRACT(MONTH FROM o.created_at)
                 ORDER BY month_num ASC
             `;
@@ -354,7 +358,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             JOIN products p ON oi.product_id = p.id
-            WHERE oi.vendor_id = $1 ${dateFilter}
+            WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
             GROUP BY p.id, p.name, p.category
             ORDER BY total_sales DESC
             LIMIT 5
@@ -368,7 +372,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                 SELECT COALESCE(SUM(oi.quantity), 0) AS prev_sales
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
-                WHERE oi.vendor_id = $1 AND oi.product_id = $2 ${previousDateFilter}
+                WHERE oi.vendor_id = $1 AND oi.product_id = $2 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${previousDateFilter}
             `;
             const prevProductResult = await pool.query(prevProductQuery, [vendorId, row.product_id]);
             const prevSales = parseInt(prevProductResult.rows[0]?.prev_sales) || 0;

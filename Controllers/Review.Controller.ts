@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import type { PoolClient } from "pg";
 import pool from "../DbConnect";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
 
 type ReviewPayload = {
     orderItemId?: unknown;
@@ -8,6 +9,7 @@ type ReviewPayload = {
     rating?: unknown;
     reviewTitle?: unknown;
     reviewText?: unknown;
+    images?: unknown;
 };
 
 function normalizeText(value: unknown): string | null {
@@ -32,8 +34,8 @@ async function updateProductAggregate(client: PoolClient, productId: string, rat
     return client.query(
         `
             UPDATE products
-            SET rating = ROUND((((rating * review_count) + $1)::numeric / (review_count + 1)), 1),
-                review_count = review_count + 1,
+            SET rating = ROUND((((COALESCE(rating, 0.0) * COALESCE(review_count, 0)) + $1)::numeric / (COALESCE(review_count, 0) + 1)), 1),
+                review_count = COALESCE(review_count, 0) + 1,
                 updated_at = NOW()
             WHERE id = $2
             RETURNING rating, review_count
@@ -46,8 +48,8 @@ async function updateVendorAggregate(client: PoolClient, vendorId: string, ratin
     return client.query(
         `
             UPDATE vendors
-            SET rating = ROUND((((rating * review_count) + $1)::numeric / (review_count + 1)), 1),
-                review_count = review_count + 1,
+            SET rating = ROUND((((COALESCE(rating, 0.0) * COALESCE(review_count, 0)) + $1)::numeric / (COALESCE(review_count, 0) + 1)), 1),
+                review_count = COALESCE(review_count, 0) + 1,
                 updated_at = NOW()
             WHERE id = $2
             RETURNING rating, review_count
@@ -121,6 +123,7 @@ export const getReviewableOrderController = async (req: Request, res: Response):
                     oir.rating AS product_rating,
                     oir.review_title AS product_review_title,
                     oir.review_text AS product_review_text,
+                    oir.images AS product_review_images,
                     oir.created_at AS product_reviewed_at,
                     vr.id AS vendor_review_id,
                     vr.rating AS vendor_rating,
@@ -141,10 +144,19 @@ export const getReviewableOrderController = async (req: Request, res: Response):
         const order = orderResult.rows[0];
         const canReview = order.status === "delivered";
 
+        const items = itemsResult.rows;
+        for (const item of items) {
+            if (item.product_review_images && Array.isArray(item.product_review_images)) {
+                item.product_review_images = await Promise.all(
+                    item.product_review_images.map((img: string) => getPresignedUrlOrOriginal(img))
+                );
+            }
+        }
+
         return res.status(200).json({
             data: {
                 order,
-                items: itemsResult.rows,
+                items,
                 canReview,
                 reviewLockReason: canReview ? null : "Reviews are available after the order is delivered.",
             },
@@ -224,6 +236,9 @@ export const submitOrderReviewsController = async (req: Request, res: Response):
 
             const reviewTitle = normalizeText(review.reviewTitle);
             const reviewText = normalizeText(review.reviewText);
+            const images = Array.isArray(review.images)
+                ? review.images.filter((img): img is string => typeof img === "string")
+                : [];
 
             await client.query(
                 `
@@ -235,10 +250,11 @@ export const submitOrderReviewsController = async (req: Request, res: Response):
                         vendor_id,
                         rating,
                         review_title,
-                        review_text
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        review_text,
+                        images
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 `,
-                [id, orderItemId, authUser.userId, item.product_id, item.vendor_id, rating, reviewTitle, reviewText]
+                [id, orderItemId, authUser.userId, item.product_id, item.vendor_id, rating, reviewTitle, reviewText, images]
             );
 
             await updateProductAggregate(client, item.product_id, rating);

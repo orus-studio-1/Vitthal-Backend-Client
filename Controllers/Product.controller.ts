@@ -196,7 +196,7 @@ async function getVendorProfileIfExists(userId: string) {
 }
 
 export const addProductController = async (req: Request, res: Response): Promise<Response> => {
-    const { name, description, category, productType, specifications, quotationLimit } = req.body;
+    const { name, description, category, productType, specifications, quotationLimit, material, grade, application, standard } = req.body;
     const itemCode = req.body.itemCode || req.body.item_code || null;
 
     const { role, userId } = (req as any).user;
@@ -235,6 +235,17 @@ export const addProductController = async (req: Request, res: Response): Promise
         actsAsVendor ? "pending" : "approved"
     );
 
+    const attributesObj: Record<string, string> = {};
+    if (req.body.attributes && typeof req.body.attributes === 'object') {
+        Object.entries(req.body.attributes).forEach(([key, val]) => {
+            attributesObj[key.trim()] = String(val).trim();
+        });
+    }
+    if (material) attributesObj.material = String(material).trim();
+    if (grade) attributesObj.grade = String(grade).trim();
+    if (application) attributesObj.application = String(application).trim();
+    if (standard) attributesObj.standard = String(standard).trim();
+
     const client = await pool.connect();
 
     try {
@@ -254,13 +265,14 @@ export const addProductController = async (req: Request, res: Response): Promise
                 description,
                 category,
                 product_type,
+                attributes,
                 approval_status,
                 created_by_user_id,
                 is_active,
                 quotation_limit,
                 item_code
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             returning *
         `;
         const values = [
@@ -268,6 +280,7 @@ export const addProductController = async (req: Request, res: Response): Promise
             description,
             resolvedCategoryId,
             productType,
+            JSON.stringify(attributesObj),
             approvalStatus,
             userId,
             !actsAsVendor,
@@ -461,7 +474,7 @@ export const deleteProduct = async (req: Request, res: Response): Promise<Respon
 }
 
 export const updateProduct = async (req: Request, res: Response): Promise<Response> => {
-    const { productId, name, description, category, productType } = req.body;
+    const { productId, name, description, category, productType, material, grade, application, standard, attributes } = req.body;
     const { role } = (req as any).user;
 
     if (!productId) {
@@ -473,8 +486,37 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
     }
 
     try {
-        const query = `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4 WHERE id = $5`;
-        const values = [name, description, category, productType, productId];
+        const existingResult = await pool.query(`SELECT attributes FROM products WHERE id = $1`, [productId]);
+        if (existingResult.rows.length === 0) {
+            return res.status(404).json({ message: "Product not found" });
+        }
+        const existingAttributes = existingResult.rows[0].attributes || {};
+        const newAttributes = { ...existingAttributes };
+
+        if (attributes && typeof attributes === 'object') {
+            Object.entries(attributes).forEach(([key, val]) => {
+                newAttributes[key.trim()] = String(val).trim();
+            });
+        }
+        if (material !== undefined) {
+            if (material === null || material === "") delete newAttributes.material;
+            else newAttributes.material = String(material).trim();
+        }
+        if (grade !== undefined) {
+            if (grade === null || grade === "") delete newAttributes.grade;
+            else newAttributes.grade = String(grade).trim();
+        }
+        if (application !== undefined) {
+            if (application === null || application === "") delete newAttributes.application;
+            else newAttributes.application = String(application).trim();
+        }
+        if (standard !== undefined) {
+            if (standard === null || standard === "") delete newAttributes.standard;
+            else newAttributes.standard = String(standard).trim();
+        }
+
+        const query = `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4, attributes = $5 WHERE id = $6`;
+        const values = [name, description, category, productType, JSON.stringify(newAttributes), productId];
         const result = await pool.query(query, values);
         return res.status(200).json({ message: "Product updated successfully", result });
     }
@@ -640,10 +682,11 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.description,
                 pc.code AS category,
                 p.product_type,
-                p.material,
-                p.grade,
-                p.application,
-                p.standard,
+                p.attributes,
+                p.attributes->>'material' AS material,
+                p.attributes->>'grade' AS grade,
+                p.attributes->>'application' AS application,
+                p.attributes->>'standard' AS standard,
                 p.rating,
                 p.review_count,
                 p.quotation_limit,
@@ -699,7 +742,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 AND u.is_active = true
               ))
 
-            GROUP BY p.id, pc.code, specAgg.specifications;
+            GROUP BY p.id, pc.code, specAgg.specifications, p.attributes;
         `;
         const result = await pool.query(query, [productId]);
         const product = result.rows[0];
@@ -1208,10 +1251,11 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.description,
                 p.category,
                 p.product_type,
-                p.material,
-                p.grade,
-                p.application,
-                p.standard,
+                p.attributes,
+                p.attributes->>'material' AS material,
+                p.attributes->>'grade' AS grade,
+                p.attributes->>'application' AS application,
+                p.attributes->>'standard' AS standard,
                 p.quotation_limit,
                 p.vendor_can_set_quotation_limit,
                 vp.price,
@@ -1241,7 +1285,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
             LEFT JOIN products_images pImg ON p.id = pImg.product_id
             WHERE vp.vendor_id = $1 AND vp.product_id = $2
             GROUP BY p.id, vp.price, vp.moq, vp.stock_quantity, vp.quotation_enabled, vp.quotation_min_qty, vp.is_active, vp.status,
-                     vp.created_at, vp.updated_at, specAgg.specifications
+                     vp.created_at, vp.updated_at, specAgg.specifications, p.attributes
         `;
 
         const result = await pool.query(query, [vendorId, productId]);
@@ -1613,6 +1657,9 @@ export const getProductReviewsController = async (req: Request, res: Response): 
                 oir.rating,
                 oir.review_title,
                 oir.review_text,
+                oir.images,
+                oir.is_verified_purchase AS verified_purchase,
+                0::int AS helpful_count,
                 oir.created_at AS review_date,
                 u.name AS customer_name,
                 u.email AS customer_email,
@@ -1639,6 +1686,15 @@ export const getProductReviewsController = async (req: Request, res: Response): 
 
         const reviewsResult = await pool.query(reviewsQuery, [productId, vendorId, limitValue, offsetValue]);
 
+        const reviews = reviewsResult.rows;
+        for (const r of reviews) {
+            if (r.images && Array.isArray(r.images)) {
+                r.images = await Promise.all(
+                    r.images.map((img: string) => getPresignedUrlOrOriginal(img))
+                );
+            }
+        }
+
         // Get review statistics
         const statsQuery = `
             SELECT 
@@ -1662,7 +1718,7 @@ export const getProductReviewsController = async (req: Request, res: Response): 
         return res.status(200).json({
             message: "Product reviews fetched successfully",
             data: {
-                reviews: reviewsResult.rows,
+                reviews,
                 stats: {
                     total_reviews: stats.total_reviews,
                     avg_rating: Number(stats.avg_rating).toFixed(1),
@@ -1677,12 +1733,113 @@ export const getProductReviewsController = async (req: Request, res: Response): 
                 pagination: {
                     current_page: Number(offset),
                     per_page: limitValue,
-                    has_more: reviewsResult.rows.length === limitValue
+                    has_more: reviews.length === limitValue
                 }
             }
         });
     } catch (error) {
         console.error("Error while fetching product reviews:", error);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
+export const getPublicProductReviewsController = async (req: Request, res: Response): Promise<Response> => {
+    const { productId } = req.params;
+    const { page = "0", limit = "10" } = req.query;
+
+    if (!productId) {
+        return res.status(400).json({ message: "Product ID is required" });
+    }
+
+    try {
+        const pageNumber = Number(page);
+        const limitValue = Math.min(Number(limit), 50); // Max 50 reviews per page
+        const offsetValue = pageNumber * limitValue;
+
+        // Get reviews with pagination (no vendor filtering, open to public)
+        const reviewsQuery = `
+            SELECT 
+                oir.id AS review_id,
+                oir.rating,
+                oir.review_title,
+                oir.review_text,
+                oir.images,
+                oir.is_verified_purchase AS verified_purchase,
+                0::int AS helpful_count,
+                oir.created_at AS review_date,
+                u.name AS customer_name,
+                v.id AS vendor_id,
+                CASE 
+                    WHEN oir.rating >= 5 THEN 'Excellent'
+                    WHEN oir.rating >= 4 THEN 'Good'
+                    WHEN oir.rating >= 3 THEN 'Average'
+                    WHEN oir.rating >= 2 THEN 'Poor'
+                    ELSE 'Very Poor'
+                END AS rating_label
+            FROM order_item_reviews oir
+            JOIN users u ON oir.user_id = u.id
+            JOIN vendors v ON oir.vendor_id = v.id
+            WHERE oir.product_id = $1 
+            ORDER BY oir.created_at DESC
+            LIMIT $2 OFFSET $3
+        `;
+
+        const reviewsResult = await pool.query(reviewsQuery, [productId, limitValue, offsetValue]);
+
+        const reviews = reviewsResult.rows;
+        for (const r of reviews) {
+            if (r.images && Array.isArray(r.images)) {
+                r.images = await Promise.all(
+                    r.images.map((img: string) => getPresignedUrlOrOriginal(img))
+                );
+            }
+        }
+
+        let stats = null;
+        // Optimization: only calculate stats on the first page load (page = 0)
+        if (pageNumber === 0) {
+            const statsQuery = `
+                SELECT 
+                    COUNT(*)::int AS total_reviews,
+                    COALESCE(AVG(rating), 0)::numeric AS avg_rating,
+                    COUNT(CASE WHEN rating = 5 THEN 1 END)::int AS five_star_count,
+                    COUNT(CASE WHEN rating = 4 THEN 1 END)::int AS four_star_count,
+                    COUNT(CASE WHEN rating = 3 THEN 1 END)::int AS three_star_count,
+                    COUNT(CASE WHEN rating = 2 THEN 1 END)::int AS two_star_count,
+                    COUNT(CASE WHEN rating = 1 THEN 1 END)::int AS one_star_count
+                FROM order_item_reviews oir
+                WHERE oir.product_id = $1
+            `;
+
+            const statsResult = await pool.query(statsQuery, [productId]);
+            const dbStats = statsResult.rows[0];
+            stats = {
+                total_reviews: dbStats.total_reviews,
+                avg_rating: Number(dbStats.avg_rating).toFixed(1),
+                rating_distribution: {
+                    5: dbStats.five_star_count,
+                    4: dbStats.four_star_count,
+                    3: dbStats.three_star_count,
+                    2: dbStats.two_star_count,
+                    1: dbStats.one_star_count
+                }
+            };
+        }
+
+        return res.status(200).json({
+            message: "Product reviews fetched successfully",
+            data: {
+                reviews,
+                stats,
+                pagination: {
+                    current_page: pageNumber,
+                    per_page: limitValue,
+                    has_more: reviews.length === limitValue
+                }
+            }
+        });
+    } catch (error) {
+        console.error("Error while fetching public product reviews:", error);
         return res.status(500).json({ message: "Internal Server Error" });
     }
 };
@@ -1700,8 +1857,6 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
                 p.name AS product_name,
                 p.category,
                 p.product_type,
-                p.material,
-                p.grade,
                 p.rating,
                 p.review_count,
                 pImg.image_url AS primary_image,

@@ -183,6 +183,7 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
             FROM orders o
             JOIN vendors v ON o.vendor_id = v.id
             WHERE o.user_id = $1
+              AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
             ORDER BY o.created_at DESC;
         `;
         
@@ -247,6 +248,7 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
             JOIN users u ON o.user_id = u.id
             LEFT JOIN client c ON u.id = c.user_id
             WHERE o.vendor_id = $1
+              AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
             ORDER BY o.created_at DESC;
         `;
         
@@ -325,6 +327,7 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
             JOIN users u ON o.user_id = u.id
             LEFT JOIN client c ON u.id = c.user_id
             WHERE o.id = $1 AND o.vendor_id = $2
+              AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation'))
             LIMIT 1;
         `;
         
@@ -374,11 +377,44 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
 
         const vendorId = vendorResult.rows[0].id;
 
-        const orderCheckQuery = `SELECT id FROM orders WHERE id = $1 AND vendor_id = $2;`;
+        const orderCheckQuery = `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2;`;
         const orderCheckResult = await pool.query(orderCheckQuery, [id, vendorId]);
         
         if (orderCheckResult.rows.length === 0) {
             return res.status(404).json({ message: "Order not found or access denied" });
+        }
+
+        const currentOrderStatus = orderCheckResult.rows[0].status;
+
+        // Verify and deduct stock on accepting order
+        if (status.toLowerCase() === 'processing' && currentOrderStatus === 'pending') {
+            const itemsStockQuery = await pool.query(
+                `SELECT oi.product_id, oi.quantity, vp.stock_quantity, p.name as product_name
+                 FROM order_items oi
+                 JOIN vendor_products vp ON vp.product_id = oi.product_id AND vp.vendor_id = oi.vendor_id
+                 JOIN products p ON p.id = oi.product_id
+                 WHERE oi.order_id = $1`,
+                [id]
+            );
+
+            // 1. Verify stock sufficiency for all items
+            for (const item of itemsStockQuery.rows) {
+                if (Number(item.quantity) > Number(item.stock_quantity)) {
+                    return res.status(400).json({
+                        message: `Insufficient stock to accept this order. Product "${item.product_name}" has only ${item.stock_quantity} units available, but the order requires ${item.quantity} units.`
+                    });
+                }
+            }
+
+            // 2. Deduct stock
+            for (const item of itemsStockQuery.rows) {
+                await pool.query(
+                    `UPDATE vendor_products 
+                     SET stock_quantity = stock_quantity - $1, updated_at = NOW()
+                     WHERE product_id = $2 AND vendor_id = $3`,
+                    [item.quantity, item.product_id, vendorId]
+                );
+            }
         }
 
         // Update order status
@@ -610,7 +646,7 @@ export const getOrderTrackingController = async (req: Request, res: Response): P
     try {
         // Verify ownership first
         const ownerQ = await pool.query(
-            `SELECT id FROM orders WHERE id = $1 AND user_id = $2`,
+            `SELECT id FROM orders WHERE id = $1 AND user_id = $2 AND NOT (status = 'pending' AND payment_status = 'pending' AND source IN ('client', 'quotation'))`,
             [id, userId]
         );
         if (ownerQ.rows.length === 0) {
@@ -652,7 +688,7 @@ export const getVendorOrderTrackingController = async (req: Request, res: Respon
 
         // Verify order belongs to this vendor
         const ownerQ = await pool.query(
-            `SELECT id FROM orders WHERE id = $1 AND vendor_id = $2`,
+            `SELECT id FROM orders WHERE id = $1 AND vendor_id = $2 AND NOT (status = 'pending' AND payment_status = 'pending' AND source IN ('client', 'quotation'))`,
             [id, vendorId]
         );
         if (ownerQ.rows.length === 0) {
@@ -731,6 +767,8 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
             JOIN vendors v ON v.id = vp.vendor_id
             LEFT JOIN users u ON u.id = o.user_id
             WHERE vp.vendor_id = $1
+              AND o.status NOT IN ('pending', 'cancelled')
+              AND (o.source = 'admin' OR o.payment_status = 'paid')
             ORDER BY vp.created_at DESC
         `;
         const result = await pool.query(query, [vendorId]);

@@ -323,10 +323,18 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         await pool.query('ROLLBACK');
         console.error("Create payment order error:", error);
-        return res.status(500).json({ message: "Failed to initiate payment." });
+        let message = "Failed to initiate payment.";
+        if (error?.error?.description) {
+            message = error.error.description;
+        } else if (error?.description) {
+            message = error.description;
+        } else if (error?.message) {
+            message = error.message;
+        }
+        return res.status(error?.statusCode || 500).json({ message });
     }
 };
 
@@ -382,10 +390,10 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
 
         // 4. Update orders status and deduct stock
         for (const orderId of order_ids) {
-            // Update order status to 'confirmed' and payment_status to 'paid'
+            // Update order status to 'pending' and payment_status to 'paid'
             await pool.query(
                 `UPDATE orders 
-                 SET status = 'confirmed', payment_status = 'paid', updated_at = NOW() 
+                 SET status = 'pending', payment_status = 'paid', updated_at = NOW() 
                  WHERE id = $1`,
                 [orderId]
             );
@@ -393,25 +401,11 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
             // Add history entry
             await pool.query(
                 `INSERT INTO order_status_history (order_id, status, note, created_at)
-                 VALUES ($1, 'confirmed', 'Payment verified successfully. Order confirmed.', CURRENT_TIMESTAMP)`,
+                 VALUES ($1, 'pending', 'Payment verified successfully. Awaiting vendor confirmation.', CURRENT_TIMESTAMP)`,
                 [orderId]
             );
 
-            // Get items of this order to deduct stock
-            const orderItemsQuery = await pool.query(
-                `SELECT product_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
-                [orderId]
-            );
-
-            for (const item of orderItemsQuery.rows) {
-                // Deduct stock safely (ensure it doesn't go below 0)
-                await pool.query(
-                    `UPDATE vendor_products 
-                     SET stock_quantity = GREATEST(0, stock_quantity - $1), updated_at = NOW()
-                     WHERE product_id = $2 AND vendor_id = $3`,
-                    [item.quantity, item.product_id, item.vendor_id]
-                );
-            }
+            // Stock deduction removed from here - it is now performed when vendor accepts the order
         }
 
         // 5. Clear user's active direct cart

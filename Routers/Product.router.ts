@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController } from "../Controllers/Product.controller";
+import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController, getPublicProductReviewsController } from "../Controllers/Product.controller";
 
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
@@ -22,6 +22,7 @@ productRouter.get("/getProductsByCategory/:category", getProductsByCategory);
 productRouter.get("/getProductByName", getProductByName);
 productRouter.get("/getRankedVendors/:productId", getRankedVendors);
 productRouter.get("/getRelatedProducts/:productId", getRelatedProducts);
+productRouter.get("/getProductReviews/:productId", getPublicProductReviewsController);
 
 // Secured routes
 productRouter.use(authMiddleware);

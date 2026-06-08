@@ -1509,9 +1509,17 @@ export const createTokenPaymentController = async (req: Request, res: Response):
             }
         });
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Create token payment order error:", error);
-        return res.status(500).json({ message: "Failed to initiate token payment." });
+        let message = "Failed to initiate token payment.";
+        if (error?.error?.description) {
+            message = error.error.description;
+        } else if (error?.description) {
+            message = error.description;
+        } else if (error?.message) {
+            message = error.message;
+        }
+        return res.status(error?.statusCode || 500).json({ message });
     }
 };
 

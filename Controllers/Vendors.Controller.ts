@@ -823,18 +823,9 @@ export const getVendorCategoriesController = async (req: Request, res: Response)
         const result = await pool.query(query, [userId]);
 
         if (result.rows.length === 0) {
-            const fallbackResult = await pool.query(
-                `
-                    SELECT code, label, sort_order
-                    FROM product_category
-                    WHERE is_active = TRUE
-                    ORDER BY sort_order ASC, label ASC
-                `
-            );
-
             return res.status(200).json({
-                message: "No vendor-specific categories found. Returning active categories instead.",
-                data: fallbackResult.rows,
+                message: "No vendor-specific categories found.",
+                data: [],
             });
         }
 

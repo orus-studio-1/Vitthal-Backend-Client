@@ -1,7 +1,7 @@
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import dotenv from 'dotenv';
-import cors from 'cors';
+import cors, { type CorsOptions } from 'cors';
 import pool from './DbConnect';
 import { ensureMarketplaceSchema } from './DbSetup';
 import productRouter from './Routers/Product.router';
@@ -44,7 +44,7 @@ const allowedOrigins = new Set([
     'https://admin.mtwo.in',
 ]);
 
-app.use("/", cors({
+const corsOptions: CorsOptions = {
     origin(origin, callback) {
         if (!origin) {
             callback(null, true);
@@ -66,7 +66,20 @@ app.use("/", cors({
         return callback(null, false);
     },
     credentials: true,
-}));
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+        'Accept',
+        'Authorization',
+        'Content-Type',
+        'x-request-from',
+        'x-refresh-token',
+    ],
+    exposedHeaders: ['x-access-token'],
+    optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 //using Middleware
 app.use(cookieParser());

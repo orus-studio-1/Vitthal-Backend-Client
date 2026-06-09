@@ -54,7 +54,7 @@ export function generateAccessToken(userId: string, username: string, email: str
     }
 }
 
-export function verifyToken(token: string, type: TokenType): { userId: string, username: string, email: string, role: string } {
+export function verifyToken(token: string, type: TokenType, options: { logErrors?: boolean } = {}): { userId: string, username: string, email: string, role: string } {
     try {
         const secretKey = type === 'access' ? process.env.ACCESS_TOKEN_SECRET : process.env.REFRESH_TOKEN_SECRET;
         if (!secretKey) {
@@ -73,7 +73,9 @@ export function verifyToken(token: string, type: TokenType): { userId: string, u
         return { userId: decoded.userId, username: decoded.username, email: decoded.email, role: decoded.role };
     }
     catch (error) {
-        console.error('Error verifying token:', error);
+        if (options.logErrors !== false) {
+            console.error('Error verifying token:', error);
+        }
         throw new Error('Failed to verify token');
     }
 }

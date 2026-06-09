@@ -710,6 +710,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 COALESCE(
                     JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
                         'vendor_id', v.id,
+                        'vendor_name', v.company_name,
                         'price', vp.price,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
@@ -717,7 +718,9 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                         'rating', v.rating,
                         'review_count', v.review_count,
                         'latitude', va.latitude,
-                        'longitude', va.longitude
+                        'longitude', va.longitude,
+                        'city', va.city,
+                        'state', va.state
                     )) FILTER (WHERE v.id IS NOT NULL),
                     '[]'
                 ) AS vendors
@@ -768,6 +771,21 @@ export const getCategories = async (_req: Request, res: Response): Promise<Respo
              WHERE is_active = TRUE
              ORDER BY sort_order ASC, label ASC`
         );
+        for (const row of result.rows) {
+            const originalImage = typeof row.image === "string" ? row.image.trim() : "";
+            if (
+                !originalImage
+                || /^[a-z]:[\\/]/i.test(originalImage)
+                || originalImage.startsWith("file:")
+            ) {
+                row.image = null;
+                continue;
+            }
+            const resolvedImage = await getPresignedUrlOrOriginal(row.image);
+            row.image = typeof resolvedImage === "string" && /^https?:\/\//i.test(resolvedImage)
+                ? resolvedImage
+                : null;
+        }
         return res.status(200).json({ message: "Categories fetched successfully", data: result.rows });
     } catch (e) {
         console.error("Error while fetching categories: ", e);
@@ -1121,6 +1139,7 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
         const query = `
             SELECT
                 v.id AS vendor_id,
+                v.company_name AS vendor_name,
                 vp.price,
                 vp.moq,
                 vp.stock_quantity,
@@ -1129,7 +1148,9 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                 v.rating,
                 v.review_count,
                 va.latitude,
-                va.longitude
+                va.longitude,
+                va.city,
+                va.state
             FROM vendor_products vp
             JOIN vendors v ON vp.vendor_id = v.id
             JOIN users u ON v.user_id = u.id
@@ -1157,6 +1178,7 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
 
             return {
                 vendor_id: row.vendor_id,
+                vendor_name: row.vendor_name,
                 price,
                 moq: row.moq,
                 stock_quantity: row.stock_quantity,
@@ -1166,6 +1188,8 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                 review_count: reviewCount,
                 latitude: vendorLat,
                 longitude: vendorLng,
+                city: row.city,
+                state: row.state,
                 distance,
             };
         });

@@ -13,7 +13,7 @@ notificationRouter.use(authMiddleware);
 
 notificationRouter.get("/", getNotificationsController);
 notificationRouter.get("/unread-count", getUnreadCountController);
-notificationRouter.put("/:id/read", markNotificationReadController);
 notificationRouter.put("/read-all", markAllNotificationsReadController);
+notificationRouter.put("/:id/read", markNotificationReadController);
 
 export default notificationRouter;

@@ -5,14 +5,23 @@ import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
 export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
     try {
         const requestFrom = req.headers["x-request-from"];
+        const authorization = req.headers.authorization;
+        const usesHeaderAuth = typeof authorization === "string";
+        const headerRefreshToken = typeof req.headers["x-refresh-token"] === "string"
+            ? req.headers["x-refresh-token"]
+            : undefined;
+        const bearerToken = authorization?.startsWith("Bearer ")
+            ? authorization.slice(7).trim()
+            : undefined;
+
         if (requestFrom === "client") {
-            const accessToken = req.cookies.clientAccessToken;
-            const refreshToken = req.cookies.clientRefreshToken;
+            const accessToken = usesHeaderAuth ? bearerToken : req.cookies.clientAccessToken;
+            const refreshToken = usesHeaderAuth ? headerRefreshToken : req.cookies.clientRefreshToken;
             return handleClientTokens(accessToken, refreshToken, req, res, next);
         }
         else if (requestFrom === "vendor") {
-            const accessToken = req.cookies.vendorAccessToken;
-            const refreshToken = req.cookies.vendorRefreshToken;
+            const accessToken = usesHeaderAuth ? bearerToken : req.cookies.vendorAccessToken;
+            const refreshToken = usesHeaderAuth ? headerRefreshToken : req.cookies.vendorRefreshToken;
             return handleVendorTokens(accessToken, refreshToken, req, res, next);
         }
         else {
@@ -28,7 +37,7 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
 //helpers : 
 const generateNewAccessToken = (refreshToken: string) => {
     try {
-        const decoded = verifyToken(refreshToken, "refresh");
+        const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
         const { userId, username, email, role } = decoded;
         const newAccessToken = generateAccessToken(userId, username, email, role);
         return newAccessToken;
@@ -40,18 +49,23 @@ const generateNewAccessToken = (refreshToken: string) => {
 }
 
 
-const handleClientTokens = (accessToken: string, refreshToken: string, req: Request, res: Response, next: NextFunction) => {
+const handleClientTokens = (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
     try {
         if (accessToken) {
-            const decoded = verifyToken(accessToken, "access");
-            (req as any).user = decoded;
-            return next();
+            try {
+                const decoded = verifyToken(accessToken, "access", { logErrors: false });
+                (req as any).user = decoded;
+                return next();
+            } catch (error) {
+                if (!refreshToken) throw error;
+            }
         }
 
         if (refreshToken) {
-            const decoded = verifyToken(refreshToken, "refresh");
+            const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
             const newAccessToken = generateNewAccessToken(refreshToken);
             res.cookie("clientAccessToken", newAccessToken, { ...COOKIE_OPTIONS, maxAge: 30 * 60 * 1000 });
+            res.setHeader("x-access-token", newAccessToken);
             (req as any).user = decoded;
             return next();
         }
@@ -63,26 +77,30 @@ const handleClientTokens = (accessToken: string, refreshToken: string, req: Requ
 
     }
     catch (error) {
-        console.error("Error handling client tokens:", error);
-        // Clear cookies when token verification fails (expired/invalid)
+        // Invalid or expired sessions are an expected authentication outcome.
         try { res.clearCookie("clientAccessToken", COOKIE_OPTIONS); } catch { };
         try { res.clearCookie("clientRefreshToken", COOKIE_OPTIONS); } catch { };
-        return res.status(401).json({ message: "Unauthorized! Failed to handle client tokens." });
+        return res.status(401).json({ message: "Session expired or invalid. Please sign in again." });
     }
 }
 
-const handleVendorTokens = (accessToken: string, refreshToken: string, req: Request, res: Response, next: NextFunction) => {
+const handleVendorTokens = (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
     try {
         if (accessToken) {
-            const decoded = verifyToken(accessToken, "access");
-            (req as any).user = decoded;
-            return next();
+            try {
+                const decoded = verifyToken(accessToken, "access", { logErrors: false });
+                (req as any).user = decoded;
+                return next();
+            } catch (error) {
+                if (!refreshToken) throw error;
+            }
         }
 
         if (refreshToken) {
-            const decoded = verifyToken(refreshToken, "refresh");
+            const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
             const newAccessToken = generateNewAccessToken(refreshToken);
             res.cookie("vendorAccessToken", newAccessToken, { ...COOKIE_OPTIONS, maxAge: 30 * 60 * 1000 });
+            res.setHeader("x-access-token", newAccessToken);
             (req as any).user = decoded;
             return next();
         }
@@ -94,10 +112,9 @@ const handleVendorTokens = (accessToken: string, refreshToken: string, req: Requ
 
     }
     catch (error) {
-        console.error("Error handling vendor tokens:", error);
-        // Clear cookies when token verification fails (expired/invalid)
+        // Invalid or expired sessions are an expected authentication outcome.
         try { res.clearCookie("vendorAccessToken", COOKIE_OPTIONS); } catch { };
         try { res.clearCookie("vendorRefreshToken", COOKIE_OPTIONS); } catch { };
-        return res.status(401).json({ message: "Unauthorized! Failed to handle vendor tokens." });
+        return res.status(401).json({ message: "Session expired or invalid. Please sign in again." });
     }
 }

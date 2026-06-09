@@ -185,7 +185,13 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
         });
 
 
-        return res.status(200).json({ message: 'Login successful', user: { userId: user.id, username: user.name, email: user.email, role: user.role } });
+        return res.status(200).json({
+            message: 'Login successful',
+            token: accessToken,
+            accessToken,
+            refreshToken,
+            user: { userId: user.id, username: user.name, email: user.email, role: user.role }
+        });
 
     }
     catch (error) {
@@ -217,7 +223,13 @@ export async function logoutUser(req: Request, res: Response): Promise<Response>
         res.clearCookie('clientAccessToken', COOKIE_OPTIONS);
     }
 
-    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken` || 'vendorRefreshToken'] || req.cookies['clientRefreshToken'];
+    const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
+        ? req.headers['x-refresh-token']
+        : undefined;
+    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken` || 'vendorRefreshToken']
+        || req.cookies['clientRefreshToken']
+        || req.body?.refreshToken
+        || headerRefreshToken;
 
     if (!refreshToken) {
         return res.status(200).json({ message: 'Logout successful (cookies cleared)' });
@@ -497,6 +509,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
         const client = await pool.connect();
         let userRole = user.role;
+        let refreshToken = "";
+        let accessToken = "";
 
         try {
             await client.query("BEGIN");
@@ -637,8 +651,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 }
             }
 
-            const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
-            const accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+            refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
+            accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
 
             const tokenResult = await client.query('UPDATE users SET refresh_token = $1 WHERE id = $2 RETURNING role', [refreshToken, user.id]);
             userRole = tokenResult.rows[0]?.role || userRole;
@@ -663,6 +677,9 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
         return res.status(200).json({
             message: 'Email verified successfully. Registration complete.',
+            token: accessToken,
+            accessToken,
+            refreshToken,
             user: { userId: user.id, username: user.name, email: user.email, role: user.role },
             vendorSetupComplete: shouldPersistVendorSetup
         });

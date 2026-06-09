@@ -300,13 +300,17 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                     MAX(qr.updated_at) AS updated_at,
                     COUNT(qr.id)::int AS total_vendors,
                     COUNT(qr.id) FILTER (WHERE qr.current_offer_by = 'vendor')::int AS vendors_responded,
-                    COUNT(qr.id) FILTER (WHERE qr.status = 'client_accepted')::int AS accepted_count,
+                    COUNT(qr.id) FILTER (
+                        WHERE qr.status IN ('client_accepted', 'admin_confirmation_pending', 'admin_confirmed')
+                    )::int AS accepted_count,
                     COUNT(qr.id) FILTER (WHERE qr.status IN ('client_rejected', 'vendor_rejected'))::int AS rejected_count,
                     -- Best offer from vendors
                     MIN(qr.current_offer_price) FILTER (WHERE qr.current_offer_by = 'vendor' AND qr.current_offer_price IS NOT NULL) AS best_offer_price,
                     -- Overall group status
                     CASE
-                        WHEN COUNT(qr.id) FILTER (WHERE qr.status = 'client_accepted') > 0 THEN 'accepted'
+                        WHEN COUNT(qr.id) FILTER (
+                            WHERE qr.status IN ('client_accepted', 'admin_confirmation_pending', 'admin_confirmed')
+                        ) > 0 THEN 'accepted'
                         WHEN COUNT(qr.id) FILTER (WHERE qr.status IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired')) = COUNT(qr.id) THEN 'closed'
                         WHEN COUNT(qr.id) FILTER (WHERE qr.current_offer_by = 'vendor') > 0 THEN 'offers_received'
                         ELSE 'pending'
@@ -335,11 +339,11 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                     qr.updated_at,
                     1 AS total_vendors,
                     CASE WHEN qr.current_offer_by = 'vendor' THEN 1 ELSE 0 END AS vendors_responded,
-                    CASE WHEN qr.status = 'client_accepted' THEN 1 ELSE 0 END AS accepted_count,
+                    CASE WHEN qr.status IN ('client_accepted', 'admin_confirmation_pending', 'admin_confirmed') THEN 1 ELSE 0 END AS accepted_count,
                     CASE WHEN qr.status IN ('client_rejected', 'vendor_rejected') THEN 1 ELSE 0 END AS rejected_count,
                     qr.current_offer_price AS best_offer_price,
                     CASE
-                        WHEN qr.status = 'client_accepted' THEN 'accepted'
+                        WHEN qr.status IN ('client_accepted', 'admin_confirmation_pending', 'admin_confirmed') THEN 'accepted'
                         WHEN qr.status IN ('client_rejected', 'vendor_rejected', 'cancelled', 'expired') THEN 'closed'
                         WHEN qr.current_offer_by = 'vendor' THEN 'offers_received'
                         ELSE 'pending'

@@ -42,7 +42,7 @@ async function fetchPincodeLookup(
     signal: AbortSignal,
 ) {
     const response = await fetch(
-        `https://api.zippopotam.us/in/${normalizedPincode}`,
+        `https://api.postalpincode.in/pincode/${normalizedPincode}`,
         {
             method: "GET",
             headers: {
@@ -51,25 +51,42 @@ async function fetchPincodeLookup(
             signal,
         },
     );
-
+    
     if (!response.ok) {
         throw new Error(`Postal lookup failed with status ${response.status}`);
     }
-
+    
     const data: unknown = await response.json();
     if (!data || typeof data !== "object") {
         return null;
     }
 
-    const places = (data as { places?: Array<{ [key: string]: unknown }> }).places;
-    if (!Array.isArray(places) || places.length === 0) {
+    const responseArray = Array.isArray(data) ? data : null;
+    const postalResult = responseArray?.[0];
+
+    const places = Array.isArray((postalResult as { PostOffice?: unknown } | null)?.PostOffice)
+        ? ((postalResult as { PostOffice: Array<{ [key: string]: unknown }> }).PostOffice)
+        : Array.isArray((data as { places?: Array<{ [key: string]: unknown }> }).places)
+            ? ((data as { places: Array<{ [key: string]: unknown }> }).places)
+            : null;
+
+    if (!places || places.length === 0) {
         return null;
     }
 
     const formattedPlaces = places
         .map((place) => {
-            const placeName = typeof place["place name"] === "string" ? place["place name"] : "";
-            const state = typeof place.state === "string" ? place.state : "";
+            const placeName = typeof place.Name === "string"
+                ? place.Name.trim()
+                : typeof place["place name"] === "string"
+                    ? place["place name"].trim()
+                    : "";
+            const district = typeof place.District === "string" ? place.District.trim() : "";
+            const state = typeof place.State === "string"
+                ? place.State.trim()
+                : typeof place.state === "string"
+                    ? place.state.trim()
+                    : "";
             const latitude = typeof place.latitude === "string" ? place.latitude : "";
             const longitude = typeof place.longitude === "string" ? place.longitude : "";
 
@@ -80,7 +97,7 @@ async function fetchPincodeLookup(
             return {
                 city: placeName,
                 state,
-                label: state ? `${placeName}, ${state}` : placeName,
+                label: district ? `${placeName}, ${district}` : state ? `${placeName}, ${state}` : placeName,
                 latitude,
                 longitude,
             };
@@ -95,7 +112,7 @@ async function fetchPincodeLookup(
         pincode: normalizedPincode,
         city: formattedPlaces[0].city,
         state: formattedPlaces[0].state,
-        postOfficeName: formattedPlaces[0].city,
+        postOfficeName: formattedPlaces[0].label,
         places: formattedPlaces,
     };
 }

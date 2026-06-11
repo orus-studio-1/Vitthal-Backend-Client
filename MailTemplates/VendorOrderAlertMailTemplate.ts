@@ -143,15 +143,15 @@ export function buildVendorOrderAlertEmailHtml(payload: VendorOrderAlertPayload)
                                         </div>
 
                                         <div style="text-align:center; margin-top:22px;">
-                                            <a href="https://vitthal-vendor-frontend.vercel.app/dashboard/orders" class="cta">Open vendor orders</a>
+                                            <a href="https://vendor.mtwo.in/dashboard/orders" class="cta">Open vendor orders</a>
                                         </div>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td class="footer">
-                                        Vendor support: <a class="link" href="mailto:vendors@vitthal.com">vendors@vitthal.com</a><br />
+                                        Vendor support: <a class="link" href="mailto:support@mtwo.in">support@mtwo.in</a><br />
                                         © ${new Date().getFullYear()} MTWO Group. All rights reserved.<br />
-                                        <a class="link" href="https://vitthal-vendor-frontend.vercel.app/dashboard">Dashboard</a> · <a class="link" href="https://vitthal-vendor-frontend.vercel.app/dashboard/orders">Orders</a>
+                                        <a class="link" href="https://vendor.mtwo.in/dashboard">Dashboard</a> · <a class="link" href="https://vendor.mtwo.in/dashboard/orders">Orders</a>
                                     </td>
                                 </tr>
                             </table>
@@ -212,13 +212,13 @@ ${payload.deliveryAddress}
 5. Upload tracking information when dispatched
 
 VIEW IN VENDOR DASHBOARD:
-https://vitthal-vendor-frontend.vercel.app/dashboard/orders
+https://vendor.mtwo.in/dashboard/orders
 
 💡 Tip:
 Confirming orders promptly and maintaining excellent delivery timelines helps improve your seller rating and attract more customers!
 
 Need Help?
-If you have any questions about this order or need technical support, please contact our vendor support team at vendors@vitthal.com
+If you have any questions about this order or need technical support, please contact our vendor support team at support@mtwo.in
 
 © ${new Date().getFullYear()} MTWO Group. All rights reserved.
     `;

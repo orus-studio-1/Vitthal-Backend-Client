@@ -329,15 +329,15 @@ export function buildAbandonedReminderEmailHtml(payload: AbandonedReminderPayloa
                                             </div>
 
                                             <div style="text-align:center; margin-top:24px;">
-                                                <a href="https://vitthal-frontend.vercel.app/cart" class="cta">Complete purchase</a>
+                                                <a href="https://mtwo.in/cart" class="cta">Complete purchase</a>
                                             </div>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td class="footer">
-                                            Questions? Contact <a class="link" href="mailto:support@MTWO.com">support@MTWO.com</a><br />
+                                            Questions? Contact <a class="link" href="mailto:support@mtwo.in">support@mtwo.in</a><br />
                                             © ${new Date().getFullYear()} MTWO Group. All rights reserved.<br />
-                                            <a class="link" href="https://vitthal-frontend.vercel.app">Website</a> · <a class="link" href="https://vitthal-frontend.vercel.app/aboutUs">About Us</a>
+                                            <a class="link" href="https://mtwo.in">Website</a> · <a class="link" href="https://mtwo.in/aboutUs">About Us</a>
                                         </td>
                                     </tr>
                                 </table>
@@ -352,5 +352,5 @@ export function buildAbandonedReminderEmailHtml(payload: AbandonedReminderPayloa
 
 export function buildAbandonedReminderEmailText(payload: AbandonedReminderPayload): string {
     const items = payload.items.map(item => `- ${item.productName} (Price: ${formatCurrency(item.price)})`).join("\n");
-    return `Hi ${payload.userName},\n\nYour saved items are still available:\n\n${items}\n\nComplete your purchase here: https://vitthal-frontend.vercel.app/cart\n\nQuestions? Contact support@vitthal.com\n\n© ${new Date().getFullYear()} MTWO Group. All rights reserved.`;
+    return `Hi ${payload.userName},\n\nYour saved items are still available:\n\n${items}\n\nComplete your purchase here: https://mtwo.in/cart\n\nQuestions? Contact support@mtwo.in\n\n© ${new Date().getFullYear()} MTWO Group. All rights reserved.`;
 }

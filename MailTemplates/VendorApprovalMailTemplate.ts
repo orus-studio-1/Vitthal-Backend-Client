@@ -92,7 +92,7 @@ export function buildVendorApprovalEmailHtml(payload: VendorApprovalEmailPayload
                                             </div>
 
                                             <div style="text-align:center; margin-top:18px;">
-                                                <a href="https://vitthal-vendor-frontend.vercel.app/dashboard" class="cta">Open vendor dashboard</a>
+                                                <a href="https://vendor.mtwo.in/dashboard" class="cta">Open vendor dashboard</a>
                                             </div>
                                         ` : `
                                             <div class="rejection">
@@ -100,7 +100,7 @@ export function buildVendorApprovalEmailHtml(payload: VendorApprovalEmailPayload
                                             </div>
 
                                             <div style="text-align:center; margin-top:18px;">
-                                                <a href="mailto:vendors@vitthal.com?subject=Reapplication%20-%20${encodeURIComponent(payload.companyName)}" class="cta">Contact vendor support</a>
+                                                <a href="mailto:support@mtwo.in?subject=Reapplication%20-%20${encodeURIComponent(payload.companyName)}" class="cta">Contact vendor support</a>
                                             </div>
                                         `}
 
@@ -112,9 +112,9 @@ export function buildVendorApprovalEmailHtml(payload: VendorApprovalEmailPayload
                                 </tr>
                                 <tr>
                                     <td class="footer">
-                                        Need help? Email <a class="link" href="mailto:vendors@MTWO.com">vendors@MTWO.com</a><br />
+                                        Need help? Email <a class="link" href="mailto:support@mtwo.in">support@mtwo.in</a><br />
                                         © ${new Date().getFullYear()} MTWO Group. All rights reserved.<br />
-                                        <a class="link" href="https://vitthal-frontend.vercel.app">Website</a> · <a class="link" href="https://vitthal-frontend.vercel.app/aboutUs">About Us</a>
+                                        <a class="link" href="https://mtwo.in">Website</a> · <a class="link" href="https://mtwo.in/aboutUs">About Us</a>
                                     </td>
                                 </tr>
                             </table>
@@ -148,19 +148,19 @@ ${isApproved
 You can now start selling on our B2B marketplace. Here's what you need to do next:
 
 🚀 GETTING STARTED AS A VENDOR
-1. Log in to your vendor dashboard at: https://vitthal-vendor-frontend.vercel.app/login
+1. Log in to your vendor dashboard at: https://vendor.mtwo.in/login
 2. Add your products with descriptions, images, and pricing
 3. Set up your payment preferences and banking details
 4. Configure shipping settings for your orders
 5. Start receiving orders! You'll get notifications for all new orders
 
 ACCESS YOUR VENDOR DASHBOARD:
-https://vitthal-vendor-frontend.vercel.app/dashboard
+https://vendor.mtwo.in/dashboard
 
 📚 Resources to Help You:
-• Vendor Guidelines: https://vitthal-frontend.vercel.app/aboutUs
-• FAQ & Help Center: https://vitthal-frontend.vercel.app/aboutUs
-• Contact Vendor Support: vendors@MTWO.com
+• Vendor Guidelines: https://mtwo.in/aboutUs
+• FAQ & Help Center: https://mtwo.in/aboutUs
+• Contact Vendor Support: support@mtwo.in
 `
             : `Thank you for applying to become a vendor on MTWO Group. After careful review, your application has not been approved at this time.
 
@@ -172,11 +172,11 @@ ${payload.approvalNotes}
 What Next?
 If you believe this is an error or would like to reapply, please contact our vendor support team with updated information or clarification. We'd love to work with you!
 
-Contact Vendor Support: vendors@MTWO.com
+Contact Vendor Support: support@mtwo.in
 `}
 
 Need Help?
-For any questions regarding your application status or to discuss your vendor account, please reach out to our vendor support team at vendors@MTWO.com
+For any questions regarding your application status or to discuss your vendor account, please reach out to our vendor support team at support@mtwo.in
 
 © ${new Date().getFullYear()} MTWO Group. All rights reserved.
     `;

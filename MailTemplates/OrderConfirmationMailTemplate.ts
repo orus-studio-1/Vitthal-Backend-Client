@@ -152,15 +152,15 @@ export function buildOrderConfirmationEmailHtml(payload: OrderConfirmationPayloa
                                         </div>
 
                                         <div style="text-align:center; margin-top:22px;">
-                                            <a href="https://vitthal-frontend.vercel.app/orders" class="cta">Track your order</a>
+                                            <a href="https://mtwo.in/orders" class="cta">Track your order</a>
                                         </div>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td class="footer">
-                                        Need help? Contact <a class="link" href="mailto:support@vitthal.com">support@MTWO.com</a><br />
+                                        Need help? Contact <a class="link" href="mailto:support@mtwo.in">support@mtwo.in</a><br />
                                         © ${new Date().getFullYear()} MTWO Group. All rights reserved.<br />
-                                        <a class="link" href="https://vitthal-frontend.vercel.app">Website</a> · <a class="link" href="https://vitthal-frontend.vercel.app/orders">My Orders</a>
+                                        <a class="link" href="https://mtwo.in">Website</a> · <a class="link" href="https://mtwo.in/orders">My Orders</a>
                                     </td>
                                 </tr>
                             </table>
@@ -228,10 +228,10 @@ ${payload.deliveryAddress}
 4. Track your order anytime from your MTWO Group account
 
 TRACK YOUR ORDER:
-https://vitthal-frontend.vercel.app/orders
+https://mtwo.in/orders
 
 Questions or Issues?
-If you have any questions about your order or need assistance, please contact our customer support team at support@MTWO.com
+If you have any questions about your order or need assistance, please contact our customer support team at support@mtwo.in
 
 © ${new Date().getFullYear()} MTWO Group. All rights reserved.
     `;

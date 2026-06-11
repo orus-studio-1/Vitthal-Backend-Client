@@ -172,9 +172,9 @@ export function buildOTPEmailHtml(payload: OTPEmailPayload): string {
                                 </tr>
                                 <tr>
                                     <td class="footer">
-                                        Need help? Contact <a class="link" href="mailto:support@MTWO.com">support@MTWO.com</a><br />
+                                        Need help? Contact <a class="link" href="mailto:support@mtwo.in">support@mtwo.in</a><br />
                                         © ${new Date().getFullYear()} MTWO Group. All rights reserved.<br />
-                                        <a class="link" href="https://vitthal-frontend.vercel.app">Website</a> · <a class="link" href="https://vitthal-frontend.vercel.app/aboutUs">About Us</a>
+                                        <a class="link" href="https://mtwo.in">Website</a> · <a class="link" href="https://mtwo.in/aboutUs">About Us</a>
                                     </td>
                                 </tr>
                             </table>
@@ -208,7 +208,7 @@ How to use this code:
 Never share this OTP with anyone. MTWO Group staff will never ask for your OTP. If you didn't request this verification, please ignore this email.
 
 Need Help?
-If you have any questions or didn't request this code, please contact our support team at support@vitthal.com
+If you have any questions or didn't request this code, please contact our support team at support@mtwo.in
 
 © ${new Date().getFullYear()} MTWO Group. All rights reserved.
     `;

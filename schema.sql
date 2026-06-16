@@ -240,8 +240,6 @@ CREATE TABLE IF NOT EXISTS products (
     review_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_products_product_type
-        CHECK (product_type IS NULL OR product_type IN ('plastic', 'metal')),
 
     CONSTRAINT fk_products_category
         FOREIGN KEY (category)
@@ -259,8 +257,11 @@ CREATE TABLE IF NOT EXISTS products_images (
     created_by_user_id UUID,
     reviewed_by_user_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    media_type TEXT DEFAULT 'image',
     CONSTRAINT chk_products_images_status
         CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+    CONSTRAINT chk_products_images_media_type
+        CHECK (media_type IN ('image', 'video')),
     CONSTRAINT fk_products_images_product
         FOREIGN KEY (product_id)
         REFERENCES products(id)
@@ -279,9 +280,42 @@ CREATE TABLE IF NOT EXISTS products_images (
 -- TRANSACTION LOGIC LAYER
 -- ================================
 
+CREATE TABLE IF NOT EXISTS product_variants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    product_id UUID NOT NULL,
+    sku TEXT,
+    properties JSONB NOT NULL DEFAULT '{}'::jsonb,
+    approval_status TEXT NOT NULL DEFAULT 'approved',
+    approval_notes TEXT,
+    created_by_user_id UUID,
+    reviewed_by_user_id UUID,
+    reviewed_at TIMESTAMPTZ,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_product_variants_product
+        FOREIGN KEY (product_id)
+        REFERENCES products(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_product_variants_created_by
+        FOREIGN KEY (created_by_user_id)
+        REFERENCES users(id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_product_variants_reviewed_by
+        FOREIGN KEY (reviewed_by_user_id)
+        REFERENCES users(id)
+        ON DELETE SET NULL,
+    CONSTRAINT chk_product_variants_approval_status
+        CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+    CONSTRAINT uq_product_id_properties
+        UNIQUE (product_id, properties)
+);
+
 CREATE TABLE IF NOT EXISTS vendor_products (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_id UUID NOT NULL,
+    product_variant_id UUID NOT NULL,
     vendor_id UUID NOT NULL,
     price NUMERIC(12,2) NOT NULL CHECK (price >= 0),
     moq INTEGER NOT NULL CHECK (moq > 0),
@@ -291,13 +325,19 @@ CREATE TABLE IF NOT EXISTS vendor_products (
     commision_percentage INTEGER DEFAULT 0 CHECK (commision_percentage >= 0 AND commision_percentage <= 100),
     is_active BOOLEAN NOT NULL DEFAULT FALSE,
     status vendor_product_status NOT NULL DEFAULT 'waiting',
+    gst_percentage NUMERIC(5,2) DEFAULT 0.00,
+    pending_price NUMERIC(12,2) DEFAULT NULL CHECK (pending_price >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT unique_vendor_product UNIQUE (vendor_id, product_id),
+    CONSTRAINT unique_vendor_product_variant UNIQUE (vendor_id, product_variant_id),
     CONSTRAINT fk_vendor_products_product
         FOREIGN KEY (product_id)
         REFERENCES products(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_vendor_products_variant
+        FOREIGN KEY (product_variant_id)
+        REFERENCES product_variants(id)
         ON DELETE CASCADE,
     CONSTRAINT fk_vendor_products_vendor
         FOREIGN KEY (vendor_id)
@@ -396,10 +436,11 @@ CREATE TABLE IF NOT EXISTS wishlist_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     wishlist_id UUID NOT NULL,
     product_id UUID NOT NULL,
+    product_variant_id UUID NOT NULL,
     vendor_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT unique_wishlist_product UNIQUE (wishlist_id, product_id),
+    CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id),
     CONSTRAINT fk_wishlist_items_wishlist
         FOREIGN KEY (wishlist_id)
         REFERENCES wishlists(id)
@@ -407,6 +448,10 @@ CREATE TABLE IF NOT EXISTS wishlist_items (
     CONSTRAINT fk_wishlist_items_product
         FOREIGN KEY (product_id)
         REFERENCES products(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_wishlist_items_variant
+        FOREIGN KEY (product_variant_id)
+        REFERENCES product_variants(id)
         ON DELETE CASCADE,
     CONSTRAINT fk_wishlist_items_vendor
         FOREIGN KEY (vendor_id)
@@ -477,7 +522,7 @@ CREATE TABLE IF NOT EXISTS carts (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_type_status
-    ON carts(user_id, cart_type, status);
+    ON carts(user_id, cart_type) WHERE status = 'active';
 
 --cart_items : 
 CREATE TABLE IF NOT EXISTS cart_items (
@@ -485,6 +530,7 @@ CREATE TABLE IF NOT EXISTS cart_items (
 
     cart_id UUID NOT NULL,
     product_id UUID NOT NULL,
+    product_variant_id UUID NOT NULL,
     vendor_id UUID NOT NULL,
 
     quantity INTEGER NOT NULL CHECK (quantity > 0),
@@ -504,13 +550,18 @@ CREATE TABLE IF NOT EXISTS cart_items (
         REFERENCES products(id)
         ON DELETE CASCADE,
 
+    CONSTRAINT fk_cart_items_variant
+        FOREIGN KEY (product_variant_id)
+        REFERENCES product_variants(id)
+        ON DELETE CASCADE,
+
     CONSTRAINT fk_cart_items_vendor
         FOREIGN KEY (vendor_id)
         REFERENCES vendors(id)
         ON DELETE CASCADE,
 
-    CONSTRAINT unique_cart_product_vendor
-        UNIQUE (cart_id, product_id, vendor_id)
+    CONSTRAINT unique_cart_product_variant_vendor
+        UNIQUE (cart_id, product_variant_id, vendor_id)
 );
 
 -- ================================
@@ -614,6 +665,7 @@ CREATE TABLE IF NOT EXISTS quotation_requests (
     user_id UUID NOT NULL,
     vendor_id UUID NOT NULL,
     product_id UUID NOT NULL,
+    product_variant_id UUID NOT NULL,
 
     requested_quantity INTEGER NOT NULL CHECK (requested_quantity > 0),
     requested_price NUMERIC(12,2) CHECK (requested_price >= 0),
@@ -658,6 +710,10 @@ CREATE TABLE IF NOT EXISTS quotation_requests (
     CONSTRAINT fk_quotation_requests_product
         FOREIGN KEY (product_id)
         REFERENCES products(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_quotation_requests_variant
+        FOREIGN KEY (product_variant_id)
+        REFERENCES product_variants(id)
         ON DELETE CASCADE,
     CONSTRAINT fk_quotation_requests_order
         FOREIGN KEY (order_id)
@@ -704,6 +760,7 @@ CREATE TABLE IF NOT EXISTS order_items (
     order_id UUID NOT NULL,
 
     product_id UUID NOT NULL,  -- keep FK (since we are not deleting products)
+    product_variant_id UUID NOT NULL,
     vendor_id UUID NOT NULL,
 
     quantity INTEGER NOT NULL CHECK (quantity > 0),
@@ -720,6 +777,11 @@ CREATE TABLE IF NOT EXISTS order_items (
     CONSTRAINT fk_order_items_product 
         FOREIGN KEY (product_id) 
         REFERENCES products(id),
+
+    CONSTRAINT fk_order_items_variant
+        FOREIGN KEY (product_variant_id) 
+        REFERENCES product_variants(id)
+        ON DELETE RESTRICT,
 
     CONSTRAINT fk_order_items_vendor 
         FOREIGN KEY (vendor_id) 

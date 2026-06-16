@@ -55,7 +55,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         const cartId = cartQuery.rows[0].id;
 
         const cartItemsQuery = await pool.query(
-            `SELECT product_id, vendor_id, quantity, price_at_added 
+            `SELECT product_id, product_variant_id, vendor_id, quantity, price_at_added 
              FROM cart_items WHERE cart_id = $1`,
             [cartId]
         );
@@ -122,9 +122,9 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             // Insert into order_items table
             for (const item of vendorItems) {
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, vendor_id, quantity, price) 
-                     VALUES ($1, $2, $3, $4, $5)`,
-                    [orderId, item.product_id, item.vendor_id, item.quantity, item.price_at_added]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price) 
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, item.price_at_added]
                 );
             }
         }
@@ -187,9 +187,9 @@ export const createPaymentOrderController = async (req: Request, res: Response):
 
         // 3. Fetch cart items joined with stock and product details
         const cartItemsQuery = await pool.query(
-            `SELECT ci.product_id, ci.vendor_id, ci.quantity, ci.price_at_added, vp.stock_quantity, p.name as product_name
+            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity, ci.price_at_added, vp.stock_quantity, p.name as product_name
              FROM cart_items ci
-             JOIN vendor_products vp ON vp.product_id = ci.product_id AND vp.vendor_id = ci.vendor_id
+             JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
              JOIN products p ON p.id = ci.product_id
              WHERE ci.cart_id = $1`,
             [cartId]
@@ -265,9 +265,9 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             // Insert into order_items table
             for (const item of vendorItems) {
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, vendor_id, quantity, price) 
-                     VALUES ($1, $2, $3, $4, $5)`,
-                    [orderId, item.product_id, item.vendor_id, item.quantity, item.price_at_added]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price) 
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, item.price_at_added]
                 );
             }
         }

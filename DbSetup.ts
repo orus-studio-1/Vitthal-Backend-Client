@@ -79,9 +79,27 @@ export async function ensureMarketplaceSchema() {
                 ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS product_variants (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            product_id UUID NOT NULL,
+            sku TEXT,
+            properties JSONB NOT NULL DEFAULT '{}'::jsonb,
+            approval_status TEXT NOT NULL DEFAULT 'approved',
+            approval_notes TEXT,
+            created_by_user_id UUID,
+            reviewed_by_user_id UUID,
+            reviewed_at TIMESTAMPTZ,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT fk_product_variants_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+            CONSTRAINT uq_product_id_properties UNIQUE (product_id, properties)
+        );
+
         CREATE TABLE IF NOT EXISTS vendor_products (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             product_id UUID NOT NULL,
+            product_variant_id UUID NOT NULL,
             vendor_id UUID NOT NULL,
             price NUMERIC(12,2) NOT NULL CHECK (price >= 0),
             moq INTEGER NOT NULL CHECK (moq > 0),
@@ -92,7 +110,7 @@ export async function ensureMarketplaceSchema() {
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            CONSTRAINT unique_vendor_product UNIQUE (vendor_id, product_id)
+            CONSTRAINT unique_vendor_product_variant UNIQUE (vendor_id, product_variant_id)
         );
 
         CREATE TABLE IF NOT EXISTS order_item_reviews (
@@ -184,6 +202,7 @@ export async function ensureMarketplaceSchema() {
             user_id UUID NOT NULL,
             vendor_id UUID NOT NULL,
             product_id UUID NOT NULL,
+            product_variant_id UUID NOT NULL,
             requested_quantity INTEGER NOT NULL CHECK (requested_quantity > 0),
             requested_price NUMERIC(12,2) CHECK (requested_price >= 0),
             status quotation_status NOT NULL DEFAULT 'pending_vendor',
@@ -212,6 +231,10 @@ export async function ensureMarketplaceSchema() {
             CONSTRAINT fk_quotation_requests_product
                 FOREIGN KEY (product_id)
                 REFERENCES products(id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_quotation_requests_variant
+                FOREIGN KEY (product_variant_id)
+                REFERENCES product_variants(id)
                 ON DELETE CASCADE,
             CONSTRAINT fk_quotation_requests_order
                 FOREIGN KEY (order_id)
@@ -260,10 +283,11 @@ export async function ensureMarketplaceSchema() {
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             wishlist_id UUID NOT NULL,
             product_id UUID NOT NULL,
+            product_variant_id UUID NOT NULL,
             vendor_id UUID,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            CONSTRAINT unique_wishlist_product UNIQUE (wishlist_id, product_id),
+            CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id),
             CONSTRAINT fk_wishlist_items_wishlist
                 FOREIGN KEY (wishlist_id)
                 REFERENCES wishlists(id)
@@ -271,6 +295,10 @@ export async function ensureMarketplaceSchema() {
             CONSTRAINT fk_wishlist_items_product
                 FOREIGN KEY (product_id)
                 REFERENCES products(id)
+                ON DELETE CASCADE,
+            CONSTRAINT fk_wishlist_items_variant
+                FOREIGN KEY (product_variant_id)
+                REFERENCES product_variants(id)
                 ON DELETE CASCADE,
             CONSTRAINT fk_wishlist_items_vendor
                 FOREIGN KEY (vendor_id)
@@ -351,6 +379,7 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
         ALTER TABLE vendor_products
+            ADD COLUMN IF NOT EXISTS product_variant_id UUID,
             ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS commision_percentage INTEGER DEFAULT 0,
             ADD COLUMN IF NOT EXISTS quotation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -468,8 +497,9 @@ export async function ensureMarketplaceSchema() {
         CREATE INDEX IF NOT EXISTS idx_vendor_products_product_id ON vendor_products(product_id);
         CREATE INDEX IF NOT EXISTS idx_vendor_categories_vendor_id ON vendor_categories(vendor_id);
         CREATE INDEX IF NOT EXISTS idx_vendor_categories_category_id ON vendor_categories(category_id);
+        DROP INDEX IF EXISTS idx_carts_user_type_status;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_type_status
-            ON carts(user_id, cart_type, status);
+            ON carts(user_id, cart_type) WHERE status = 'active';
         CREATE INDEX IF NOT EXISTS idx_products_images_product_id ON products_images(product_id);
         CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
         CREATE INDEX IF NOT EXISTS idx_products_product_type ON products(product_type);
@@ -503,5 +533,25 @@ export async function ensureMarketplaceSchema() {
         UPDATE orders
         SET source = 'client'
         WHERE source IS NULL OR source::TEXT = '';
+
+        -- V2 schema updates
+        ALTER TABLE products DROP CONSTRAINT IF EXISTS chk_products_product_type;
+        ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS gst_percentage NUMERIC(5,2) DEFAULT 0.00;
+        ALTER TABLE products_images ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'image';
+        ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS pending_price NUMERIC(12,2) DEFAULT NULL CHECK (pending_price >= 0);
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'chk_products_images_media_type'
+                  AND table_name = 'products_images'
+            ) THEN
+                ALTER TABLE products_images
+                    ADD CONSTRAINT chk_products_images_media_type
+                    CHECK (media_type IN ('image', 'video'));
+            END IF;
+        END $$;
     `);
 }

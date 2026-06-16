@@ -19,6 +19,8 @@ export const getCartDataController = async (req: Request, res: Response): Promis
             SELECT
                 ci.id as cart_item_id,
                 ci.product_id,
+                ci.product_variant_id,
+                pv.properties as variant_properties,
                 ci.vendor_id,
                 ci.quantity,
                 ci.price_at_added,
@@ -34,8 +36,9 @@ export const getCartDataController = async (req: Request, res: Response): Promis
             FROM carts c
             JOIN cart_items ci ON c.id = ci.cart_id
             JOIN products p ON ci.product_id = p.id
+            JOIN product_variants pv ON ci.product_variant_id = pv.id
             JOIN vendors v ON ci.vendor_id = v.id
-            JOIN vendor_products vp ON vp.product_id = ci.product_id AND vp.vendor_id = ci.vendor_id
+            JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
             WHERE c.user_id = $1 AND c.status = 'active' AND c.cart_type = $2
             ORDER BY ci.created_at DESC
         `;
@@ -54,10 +57,12 @@ export const addCartItemController = async (req: Request, res: Response): Promis
         return res.status(401).json({ message: "User Id not found" });
     }
 
-    const { product_id, vendor_id, quantity, cart_type } = req.body;
+    const { product_variant_id, vendor_id, quantity, cart_type } = req.body;
+    let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
-    if (!product_id || !vendor_id || !quantity || quantity < 1) {
-        return res.status(400).json({ message: "product_id, vendor_id, and quantity (>=1) are required" });
+    
+    if ((!product_variant_id && !product_id) || !vendor_id || !quantity || quantity < 1) {
+        return res.status(400).json({ message: "product_variant_id (or product_id), vendor_id, and quantity (>=1) are required" });
     }
 
     try {
@@ -78,13 +83,40 @@ export const addCartItemController = async (req: Request, res: Response): Promis
             cartId = cartResult.rows[0].id;
         }
 
+        let resolvedVariantId = product_variant_id;
+        if (!resolvedVariantId) {
+            const variantRes = await pool.query(
+                `SELECT id FROM product_variants WHERE product_id = $1 AND properties = '{}'::jsonb LIMIT 1`,
+                [product_id]
+            );
+            if (variantRes.rows.length > 0) {
+                resolvedVariantId = variantRes.rows[0].id;
+            } else {
+                const insertVariantRes = await pool.query(
+                    `INSERT INTO product_variants (product_id, properties, approval_status, is_active)
+                     VALUES ($1, '{}'::jsonb, 'approved', true) RETURNING id`,
+                    [product_id]
+                );
+                resolvedVariantId = insertVariantRes.rows[0].id;
+            }
+        } else if (!product_id) {
+            const variantRes = await pool.query(
+                `SELECT product_id FROM product_variants WHERE id = $1`,
+                [resolvedVariantId]
+            );
+            if (variantRes.rows.length === 0) {
+                return res.status(404).json({ message: "Product variant not found" });
+            }
+            product_id = variantRes.rows[0].product_id;
+        }
+
         // 2. Get current price from vendor_products
         const priceResult = await pool.query(
             `SELECT vp.price, vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
              FROM vendor_products vp
              JOIN products p ON p.id = vp.product_id
-             WHERE vp.product_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
-            [product_id, vendor_id]
+             WHERE vp.product_variant_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
+            [resolvedVariantId, vendor_id]
         );
         if (priceResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not available from this vendor" });
@@ -93,7 +125,7 @@ export const addCartItemController = async (req: Request, res: Response): Promis
         const quotationLimit = priceResult.rows[0].quotation_limit ? Number(priceResult.rows[0].quotation_limit) : null;
         const moq = Number(priceResult.rows[0].moq) || 1;
 
-        // Check if quantity requires quotation flow (based on product-level quotation_limit)
+        // Check if quantity requires quotation flow
         if (cartType === "direct" && quotationLimit && quantity >= quotationLimit) {
             return res.status(409).json({
                 message: `This product requires quotation for quantities of ${quotationLimit} or more`,
@@ -114,11 +146,11 @@ export const addCartItemController = async (req: Request, res: Response): Promis
 
         // 3. Upsert cart item
         await pool.query(
-            `INSERT INTO cart_items (cart_id, product_id, vendor_id, quantity, price_at_added)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (cart_id, product_id, vendor_id)
-             DO UPDATE SET quantity = cart_items.quantity + $4, updated_at = NOW()`,
-            [cartId, product_id, vendor_id, quantity, currentPrice]
+            `INSERT INTO cart_items (cart_id, product_id, product_variant_id, vendor_id, quantity, price_at_added)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (cart_id, product_variant_id, vendor_id)
+             DO UPDATE SET quantity = cart_items.quantity + $5, updated_at = NOW()`,
+            [cartId, product_id, resolvedVariantId, vendor_id, quantity, currentPrice]
         );
 
         return res.status(201).json({ message: "Item added to cart", cart_id: cartId });
@@ -134,10 +166,12 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
         return res.status(401).json({ message: "User Id not found" });
     }
 
-    const { product_id, vendor_id, quantity, cart_type } = req.body;
+    const { product_variant_id, vendor_id, quantity, cart_type } = req.body;
+    let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
-    if (!product_id || !vendor_id || !quantity || quantity < 1) {
-        return res.status(400).json({ message: "product_id, vendor_id, and quantity (>=1) are required" });
+
+    if ((!product_variant_id && !product_id) || !vendor_id || !quantity || quantity < 1) {
+        return res.status(400).json({ message: "product_variant_id (or product_id), vendor_id, and quantity (>=1) are required" });
     }
 
     try {
@@ -151,12 +185,24 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
         }
         const cartId = cartResult.rows[0].id;
 
+        let resolvedVariantId = product_variant_id;
+        if (!resolvedVariantId) {
+            const variantRes = await pool.query(
+                `SELECT id FROM product_variants WHERE product_id = $1 AND properties = '{}'::jsonb LIMIT 1`,
+                [product_id]
+            );
+            if (variantRes.rows.length === 0) {
+                return res.status(404).json({ message: "Default variant not found" });
+            }
+            resolvedVariantId = variantRes.rows[0].id;
+        }
+
         const priceResult = await pool.query(
             `SELECT vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
              FROM vendor_products vp
              JOIN products p ON p.id = vp.product_id
-             WHERE vp.product_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
-            [product_id, vendor_id]
+             WHERE vp.product_variant_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
+            [resolvedVariantId, vendor_id]
         );
         if (priceResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not available from this vendor" });
@@ -185,9 +231,9 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
         // Update quantity
         const updateResult = await pool.query(
             `UPDATE cart_items SET quantity = $1, updated_at = NOW()
-             WHERE cart_id = $2 AND product_id = $3 AND vendor_id = $4
+             WHERE cart_id = $2 AND product_variant_id = $3 AND vendor_id = $4
              RETURNING id`,
-            [quantity, cartId, product_id, vendor_id]
+            [quantity, cartId, resolvedVariantId, vendor_id]
         );
 
         if (updateResult.rows.length === 0) {
@@ -207,10 +253,12 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
         return res.status(401).json({ message: "User Id not found" });
     }
 
-    const { product_id, vendor_id, cart_type } = req.body;
+    const { product_variant_id, vendor_id, cart_type } = req.body;
+    let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
-    if (!product_id || !vendor_id) {
-        return res.status(400).json({ message: "product_id and vendor_id are required" });
+
+    if ((!product_variant_id && !product_id) || !vendor_id) {
+        return res.status(400).json({ message: "product_variant_id (or product_id) and vendor_id are required" });
     }
 
     try {
@@ -224,10 +272,22 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
         }
         const cartId = cartResult.rows[0].id;
 
+        let resolvedVariantId = product_variant_id;
+        if (!resolvedVariantId) {
+            const variantRes = await pool.query(
+                `SELECT id FROM product_variants WHERE product_id = $1 AND properties = '{}'::jsonb LIMIT 1`,
+                [product_id]
+            );
+            if (variantRes.rows.length === 0) {
+                return res.status(404).json({ message: "Default variant not found" });
+            }
+            resolvedVariantId = variantRes.rows[0].id;
+        }
+
         // Delete item
         const deleteResult = await pool.query(
-            `DELETE FROM cart_items WHERE cart_id = $1 AND product_id = $2 AND vendor_id = $3 RETURNING id`,
-            [cartId, product_id, vendor_id]
+            `DELETE FROM cart_items WHERE cart_id = $1 AND product_variant_id = $2 AND vendor_id = $3 RETURNING id`,
+            [cartId, resolvedVariantId, vendor_id]
         );
 
         if (deleteResult.rows.length === 0) {
@@ -265,6 +325,122 @@ export const clearCartController = async (req: Request, res: Response): Promise<
         return res.status(200).json({ message: "Cart cleared" });
     } catch (e) {
         console.error("Error in clearCartController: ", e);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const shareCartController = async (req: Request, res: Response): Promise<Response> => {
+    const userId = (req as any).user?.userId;
+    if (!userId) {
+        return res.status(401).json({ message: "User Id not found" });
+    }
+
+    const { cart_type } = req.body;
+    const cartType = normalizeCartType(cart_type);
+
+    try {
+        // 1. Get the active cart for the user and type
+        const cartResult = await pool.query(
+            `SELECT id FROM carts WHERE user_id = $1 AND status = 'active' AND cart_type = $2`,
+            [userId, cartType]
+        );
+        if (cartResult.rows.length === 0) {
+            return res.status(404).json({ message: "No active cart found to share" });
+        }
+        const activeCartId = cartResult.rows[0].id;
+
+        // 2. Verify there are items in the active cart
+        const itemsResult = await pool.query(
+            `SELECT COUNT(*) FROM cart_items WHERE cart_id = $1`,
+            [activeCartId]
+        );
+        if (Number(itemsResult.rows[0].count) === 0) {
+            return res.status(400).json({ message: "Cannot share an empty cart" });
+        }
+
+        // 3. Create a new cart row with status = 'shared'
+        const newCartResult = await pool.query(
+            `INSERT INTO carts (user_id, status, cart_type, total_amount) 
+             VALUES ($1, 'shared', $2, 0) RETURNING id`,
+            [userId, cartType]
+        );
+        const sharedCartId = newCartResult.rows[0].id;
+
+        // 4. Copy all items from the active cart to the new shared cart
+        await pool.query(
+            `INSERT INTO cart_items (cart_id, product_id, product_variant_id, vendor_id, quantity, price_at_added)
+             SELECT $1, product_id, product_variant_id, vendor_id, quantity, price_at_added
+             FROM cart_items
+             WHERE cart_id = $2`,
+            [sharedCartId, activeCartId]
+        );
+
+        return res.status(201).json({ 
+            message: "Cart shared successfully", 
+            shared_cart_id: sharedCartId 
+        });
+    } catch (e) {
+        console.error("Error in shareCartController: ", e);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const getSharedCartController = async (req: Request, res: Response): Promise<Response> => {
+    const { id: sharedCartId } = req.params;
+    if (!sharedCartId) {
+        return res.status(400).json({ message: "Shared cart ID is required" });
+    }
+
+    try {
+        // 1. Verify and fetch the shared cart metadata
+        const cartResult = await pool.query(
+            `SELECT id, cart_type, created_at, user_id FROM carts WHERE id = $1 AND status = 'shared'`,
+            [sharedCartId]
+        );
+        if (cartResult.rows.length === 0) {
+            return res.status(404).json({ message: "Shared cart not found" });
+        }
+        const cart = cartResult.rows[0];
+
+        // 2. Fetch the items for this shared cart, joining with product details
+        const query = `
+            SELECT
+                ci.id as cart_item_id,
+                ci.product_id,
+                ci.product_variant_id,
+                pv.properties as variant_properties,
+                ci.vendor_id,
+                ci.quantity,
+                ci.price_at_added,
+                ci.created_at,
+                p.name as product_name,
+                p.quotation_limit,
+                vp.price as current_price,
+                vp.moq,
+                vp.quotation_enabled,
+                vp.stock_quantity,
+                (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) as image_url,
+                v.company_name as vendor_name,
+                u.name as sender_name
+            FROM carts c
+            JOIN cart_items ci ON c.id = ci.cart_id
+            JOIN products p ON ci.product_id = p.id
+            JOIN product_variants pv ON ci.product_variant_id = pv.id
+            JOIN vendors v ON ci.vendor_id = v.id
+            JOIN users u ON c.user_id = u.id
+            JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
+            WHERE c.id = $1 AND c.status = 'shared'
+            ORDER BY ci.created_at DESC
+        `;
+
+        const itemsResult = await pool.query(query, [sharedCartId]);
+        return res.status(200).json({ 
+            cart_type: cart.cart_type,
+            sender_name: itemsResult.rows[0]?.sender_name || "A user",
+            items: itemsResult.rows 
+        });
+    } catch (error) {
+        console.error("Error in getSharedCartController: ", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };

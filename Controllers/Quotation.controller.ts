@@ -28,6 +28,7 @@ type QuotationRow = {
     token_amount: number | null;
     vendor_document_url: string | null;
     vendor_document_s3_key: string | null;
+    product_variant_id?: string;
 };
 
 function normalizeAction(value: unknown): QuotationAction | null {
@@ -83,8 +84,9 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
         // Get cart items (vendor_id here is just the "viewing" vendor, we'll broadcast to all)
         const cartItemsResult = await client.query(
             `
-                SELECT DISTINCT ON (ci.product_id)
+                SELECT DISTINCT ON (ci.product_variant_id)
                     ci.product_id,
+                    ci.product_variant_id,
                     ci.quantity,
                     ci.price_at_added,
                     p.name AS product_name,
@@ -106,7 +108,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
         const createdQuotationIds: string[] = [];
 
         for (const item of cartItemsResult.rows) {
-            // Find ALL vendors serving this product with quotation_enabled = true
+            // Find ALL vendors serving this product variant with quotation_enabled = true
             // AND stock_quantity >= product quotation_limit
             const eligibleVendorsResult = await client.query(
                 `
@@ -119,7 +121,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                     JOIN vendors v ON vp.vendor_id = v.id
                     JOIN users u ON v.user_id = u.id
                     JOIN products p ON vp.product_id = p.id
-                    WHERE vp.product_id = $1
+                    WHERE vp.product_variant_id = $1
                       AND vp.quotation_enabled = true
                       AND vp.is_active = true
                       AND v.approval_status = 'approved'
@@ -128,7 +130,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                       AND u.is_active = true
                       AND (p.quotation_limit IS NULL OR vp.stock_quantity >= p.quotation_limit)
                 `,
-                [item.product_id]
+                [item.product_variant_id]
             );
 
             if (eligibleVendorsResult.rows.length === 0) {
@@ -148,6 +150,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                             user_id,
                             vendor_id,
                             product_id,
+                            product_variant_id,
                             requested_quantity,
                             requested_price,
                             status,
@@ -157,13 +160,14 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                             buyer_country,
                             buyer_pincode,
                             quotation_group_id
-                        ) VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6, $7, $8, $9, $10, $11)
+                        ) VALUES ($1, $2, $3, $4, $5, $6, 'pending_vendor', $7, $8, $9, $10, $11, $12)
                         RETURNING id
                     `,
                     [
                         userId,
                         vendor.vendor_id,
                         item.product_id,
+                        item.product_variant_id,
                         item.quantity,
                         item.price_at_added,
                         requestNote || null,
@@ -291,6 +295,8 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                 SELECT
                     qr.quotation_group_id,
                     qr.product_id,
+                    qr.product_variant_id,
+                    pv.properties AS variant_properties,
                     p.name AS product_name,
                     p.quotation_limit,
                     (SELECT image_url FROM products_images WHERE product_id = qr.product_id AND is_primary = true LIMIT 1) AS product_image,
@@ -317,8 +323,9 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                     END AS group_status
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
+                LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                 WHERE qr.user_id = $1 AND qr.quotation_group_id IS NOT NULL
-                GROUP BY qr.quotation_group_id, qr.product_id, p.name, p.quotation_limit, qr.requested_quantity, qr.requested_price
+                GROUP BY qr.quotation_group_id, qr.product_id, qr.product_variant_id, pv.properties, p.name, p.quotation_limit, qr.requested_quantity, qr.requested_price
                 ORDER BY MAX(qr.updated_at) DESC
             `,
             [authUser.userId]
@@ -330,6 +337,8 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                 SELECT
                     qr.id AS quotation_group_id,
                     qr.product_id,
+                    qr.product_variant_id,
+                    pv.properties AS variant_properties,
                     p.name AS product_name,
                     p.quotation_limit,
                     (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image,
@@ -350,6 +359,7 @@ export const getClientQuotationsController = async (req: Request, res: Response)
                     END AS group_status
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
+                LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                 WHERE qr.user_id = $1 AND qr.quotation_group_id IS NULL
                 ORDER BY qr.updated_at DESC
             `,
@@ -384,12 +394,14 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
             `
                 SELECT
                     qr.*,
+                    pv.properties AS variant_properties,
                     p.name AS product_name,
                     p.quotation_limit,
                     v.company_name AS vendor_name,
                     (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
+                LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                 JOIN vendors v ON qr.vendor_id = v.id
                 WHERE qr.quotation_group_id = $1 AND qr.user_id = $2
                 ORDER BY
@@ -406,12 +418,14 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
                 `
                     SELECT
                         qr.*,
+                        pv.properties AS variant_properties,
                         p.name AS product_name,
                         p.quotation_limit,
                         v.company_name AS vendor_name,
                         (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS product_image
                     FROM quotation_requests qr
                     JOIN products p ON qr.product_id = p.id
+                    LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                     JOIN vendors v ON qr.vendor_id = v.id
                     WHERE qr.id = $1 AND qr.user_id = $2
                 `,
@@ -496,6 +510,8 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
         return res.status(200).json({
             data: {
                 product_id: firstQuotation.product_id,
+                product_variant_id: firstQuotation.product_variant_id,
+                variant_properties: firstQuotation.variant_properties,
                 product_name: firstQuotation.product_name,
                 product_image: firstQuotation.product_image,
                 quotation_limit: firstQuotation.quotation_limit,
@@ -640,10 +656,10 @@ export const respondClientQuotationController = async (req: Request, res: Respon
 
             await client.query(
                 `
-                    INSERT INTO order_items (order_id, product_id, vendor_id, quantity, price)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                 `,
-                [orderId, quotation.product_id, quotation.vendor_id, quotation.current_offer_quantity, quotation.current_offer_price]
+                [orderId, quotation.product_id, quotation.product_variant_id, quotation.vendor_id, quotation.current_offer_quantity, quotation.current_offer_price]
             );
 
             await client.query(
@@ -878,9 +894,12 @@ export const getVendorQuotationsController = async (req: Request, res: Response)
                     qr.user_id AS buyer_id,
                     qr.created_at,
                     qr.updated_at,
-                    p.name AS product_name
+                    p.name AS product_name,
+                    qr.product_variant_id,
+                    pv.properties AS variant_properties
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
+                LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                 WHERE qr.vendor_id = $1
                 ORDER BY qr.updated_at DESC
             `,
@@ -915,11 +934,13 @@ export const getVendorQuotationByIdController = async (req: Request, res: Respon
             `
                 SELECT
                     qr.*,
+                    pv.properties AS variant_properties,
                     p.name AS product_name,
                     p.description AS product_description,
                     p.quotation_limit
                 FROM quotation_requests qr
                 JOIN products p ON qr.product_id = p.id
+                LEFT JOIN product_variants pv ON qr.product_variant_id = pv.id
                 WHERE qr.id = $1 AND qr.vendor_id = $2
                 LIMIT 1
             `,
@@ -1139,10 +1160,10 @@ export const respondVendorQuotationController = async (req: Request, res: Respon
 
             await client.query(
                 `
-                    INSERT INTO order_items (order_id, product_id, vendor_id, quantity, price)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                 `,
-                [orderId, quotation.product_id, quotation.vendor_id, quotation.current_offer_quantity, quotation.current_offer_price]
+                [orderId, quotation.product_id, quotation.product_variant_id, quotation.vendor_id, quotation.current_offer_quantity, quotation.current_offer_price]
             );
 
             await client.query(
@@ -1624,7 +1645,7 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
 
                 // Deduct stock for order items
                 const orderItemsQuery = await client.query(
-                    `SELECT product_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
+                    `SELECT product_variant_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
                     [quotation.order_id]
                 );
 
@@ -1632,8 +1653,8 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
                     await client.query(
                         `UPDATE vendor_products     
                          SET stock_quantity = GREATEST(0, stock_quantity - $1), updated_at = NOW()
-                         WHERE product_id = $2 AND vendor_id = $3`,
-                        [item.quantity, item.product_id, item.vendor_id]
+                         WHERE product_variant_id = $2 AND vendor_id = $3`,
+                        [item.quantity, item.product_variant_id, item.vendor_id]
                     );
                 }
             }

@@ -170,6 +170,8 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
                     SELECT json_agg(
                         json_build_object(
                             'product_id', oi.product_id,
+                            'product_variant_id', oi.product_variant_id,
+                            'variant_properties', pv.properties,
                             'product_name', p.name,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
@@ -178,6 +180,7 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
                     )
                     FROM order_items oi
                     JOIN products p ON oi.product_id = p.id
+                    LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
                     WHERE oi.order_id = o.id
                 ) AS items
             FROM orders o
@@ -227,6 +230,7 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                 o.city,
                 o.state,
                 o.pincode,
+                o.order_type AS order_type,
                 u.name AS customer_name,
                 u.email AS customer_email,
                 c.phone AS customer_phone,
@@ -234,6 +238,8 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                     SELECT json_agg(
                         json_build_object(
                             'product_id', oi.product_id,
+                            'product_variant_id', oi.product_variant_id,
+                            'variant_properties', pv.properties,
                             'product_name', p.name,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
@@ -242,6 +248,7 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                     )
                     FROM order_items oi
                     JOIN products p ON oi.product_id = p.id
+                    LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
                     WHERE oi.order_id = o.id
                 ) AS items
             FROM orders o
@@ -299,6 +306,7 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                 o.state,
                 o.country,
                 o.pincode,
+                o.order_type AS order_type,
                 o.latitude,
                 o.langitude,
                 o.vendor_city,
@@ -312,6 +320,8 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                     SELECT json_agg(
                         json_build_object(
                             'product_id', oi.product_id,
+                            'product_variant_id', oi.product_variant_id,
+                            'variant_properties', pv.properties,
                             'product_name', p.name,
                             'product_description', p.description,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
@@ -321,6 +331,7 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                     )
                     FROM order_items oi
                     JOIN products p ON oi.product_id = p.id
+                    LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
                     WHERE oi.order_id = o.id
                 ) AS items
             FROM orders o
@@ -389,9 +400,9 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
         // Verify and deduct stock on accepting order
         if (status.toLowerCase() === 'processing' && currentOrderStatus === 'pending') {
             const itemsStockQuery = await pool.query(
-                `SELECT oi.product_id, oi.quantity, vp.stock_quantity, p.name as product_name
+                `SELECT oi.product_id, oi.product_variant_id, oi.quantity, vp.stock_quantity, p.name as product_name
                  FROM order_items oi
-                 JOIN vendor_products vp ON vp.product_id = oi.product_id AND vp.vendor_id = oi.vendor_id
+                 JOIN vendor_products vp ON vp.product_variant_id = oi.product_variant_id AND vp.vendor_id = oi.vendor_id
                  JOIN products p ON p.id = oi.product_id
                  WHERE oi.order_id = $1`,
                 [id]
@@ -411,8 +422,8 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
                 await pool.query(
                     `UPDATE vendor_products 
                      SET stock_quantity = stock_quantity - $1, updated_at = NOW()
-                     WHERE product_id = $2 AND vendor_id = $3`,
-                    [item.quantity, item.product_id, vendorId]
+                     WHERE product_variant_id = $2 AND vendor_id = $3`,
+                    [item.quantity, item.product_variant_id, vendorId]
                 );
             }
         }
@@ -552,6 +563,8 @@ async function fetchOrderTrackingData(orderId: string) {
     const itemsQ = await pool.query(
         `SELECT 
             oi.product_id,
+            oi.product_variant_id,
+            pv.properties AS variant_properties,
             p.name AS product_name,
             p.description AS product_description,
             (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1) AS image_url,
@@ -559,6 +572,7 @@ async function fetchOrderTrackingData(orderId: string) {
             oi.price
          FROM order_items oi
          JOIN products p ON oi.product_id = p.id
+         LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id
          WHERE oi.order_id = $1
          ORDER BY oi.created_at`,
         [orderId]

@@ -246,6 +246,31 @@ export const addProductController = async (req: Request, res: Response): Promise
     if (application) attributesObj.application = String(application).trim();
     if (standard) attributesObj.standard = String(standard).trim();
 
+    if (itemCode) {
+        const existingProduct = await pool.query(
+            `SELECT id, name, approval_status, created_by_user_id FROM products WHERE LOWER(item_code) = LOWER($1)`,
+            [String(itemCode).trim()]
+        );
+        if (existingProduct.rows.length > 0) {
+            const product = existingProduct.rows[0];
+            if (product.approval_status === 'pending' && String(product.created_by_user_id) === String(userId)) {
+                // Retry scenario for the same vendor: return the existing product and allow them to proceed
+                return res.status(200).json({
+                    message: "Existing pending product submission found.",
+                    result: product
+                });
+            } else if (product.approval_status === 'approved') {
+                return res.status(400).json({
+                    message: `A product with this Item Code already exists in the catalog (Approved). Please search for "${product.name}" in Step 1 and link your pricing.`
+                });
+            } else {
+                return res.status(400).json({
+                    message: "A product with this Item Code has already been submitted by another vendor and is pending approval."
+                });
+            }
+        }
+    }
+
     const client = await pool.connect();
 
     try {
@@ -333,13 +358,15 @@ export const addProductController = async (req: Request, res: Response): Promise
 }
 
 export const addVendorProductController = async (req: Request, res: Response): Promise<Response> => {
-    const { productId, price, moq, stockQuantity, quotationEnabled, quotationMinQty } = req.body;
+    const { productVariantId, price, moq, stockQuantity, quotationEnabled, quotationMinQty, gstPercentage } = req.body;
+    let productId = req.body.productId;
     const { userId, role } = (req as any).user;
 
-    if (!productId || price === undefined || !moq || stockQuantity === undefined) {
-        return res.status(400).json({ message: "Product ID, price, moq, and stockQuantity are required" });
+    if ((!productVariantId && !productId) || price === undefined || !moq || stockQuantity === undefined) {
+        return res.status(400).json({ message: "Product Variant ID (or Product ID), price, moq, and stockQuantity are required" });
     }
 
+    const client = await pool.connect();
     try {
         const vendorProfile = await getVendorProfileIfExists(userId);
         if (role !== "vendor" && !vendorProfile) {
@@ -347,13 +374,49 @@ export const addVendorProductController = async (req: Request, res: Response): P
         }
 
         const vendor = await getApprovedVendorProfile(userId);
+        const vendorId = vendor.id;
 
-        const productResult = await pool.query(
+        await client.query("BEGIN");
+
+        let resolvedVariantId = productVariantId;
+
+        // If no variant ID is provided, look up or create the default variant for the product
+        if (!resolvedVariantId) {
+            const variantRes = await client.query(
+                `SELECT id FROM product_variants WHERE product_id = $1 AND properties = '{}'::jsonb LIMIT 1`,
+                [productId]
+            );
+            if (variantRes.rows.length > 0) {
+                resolvedVariantId = variantRes.rows[0].id;
+            } else {
+                // Create default variant
+                const insertVariantRes = await client.query(
+                    `INSERT INTO product_variants (product_id, properties, approval_status, is_active)
+                     VALUES ($1, '{}'::jsonb, 'approved', true) RETURNING id`,
+                    [productId]
+                );
+                resolvedVariantId = insertVariantRes.rows[0].id;
+            }
+        } else {
+            // Fetch product ID from the variant to keep vendor_products record aligned
+            const variantRes = await client.query(
+                `SELECT product_id FROM product_variants WHERE id = $1`,
+                [resolvedVariantId]
+            );
+            if (variantRes.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Product variant not found." });
+            }
+            productId = variantRes.rows[0].product_id;
+        }
+
+        const productResult = await client.query(
             `SELECT id, approval_status, created_by_user_id, quotation_limit FROM products WHERE id = $1`,
             [productId]
         );
 
         if (productResult.rows.length === 0) {
+            await client.query("ROLLBACK");
             return res.status(404).json({ message: "Product not found." });
         }
 
@@ -362,42 +425,52 @@ export const addVendorProductController = async (req: Request, res: Response): P
             product.approval_status === "pending" && product.created_by_user_id === userId;
 
         if (product.approval_status !== "approved" && !canAttachPendingOwnProduct) {
+            await client.query("ROLLBACK");
             return res.status(403).json({ message: "You can only add pricing for approved products or your own pending submission." });
         }
 
         // Validate: vendor stock must be >= product quotation_limit to opt in for quotations
         if (Boolean(quotationEnabled) && product.quotation_limit) {
             if (Number(stockQuantity) < Number(product.quotation_limit)) {
+                await client.query("ROLLBACK");
                 return res.status(400).json({
                     message: `To enable quotations, your stock (${stockQuantity}) must be at least the product's quotation limit (${product.quotation_limit}).`
                 });
             }
         }
 
-        const vendorId = vendor.id;
+        const resolvedGst = gstPercentage !== undefined ? Number(gstPercentage) : 0.00;
 
         const query = `
-            INSERT INTO vendor_products (product_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, 'waiting')
-            ON CONFLICT (vendor_id, product_id)
+            INSERT INTO vendor_products (product_id, product_variant_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status, gst_percentage)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 'waiting', $9)
+            ON CONFLICT (vendor_id, product_variant_id)
             DO UPDATE SET
+                product_id = EXCLUDED.product_id,
                 price = EXCLUDED.price,
                 moq = EXCLUDED.moq,
                 stock_quantity = EXCLUDED.stock_quantity,
                 quotation_enabled = EXCLUDED.quotation_enabled,
                 quotation_min_qty = EXCLUDED.quotation_min_qty,
+                gst_percentage = EXCLUDED.gst_percentage,
                 is_active = FALSE,
                 status = 'waiting'
             RETURNING *`;
-        const values = [productId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null];
-        const result = await pool.query(query, values);
+        const values = [productId, resolvedVariantId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null, resolvedGst];
+        const result = await client.query(query, values);
+        
+        await client.query("COMMIT");
         return res.status(201).json({ message: "Vendor product details saved successfully", result: result.rows[0] });
     }
     catch (error) {
+        await client.query("ROLLBACK");
         console.error("Error while saving Vendor Product details : ", error);
         return res.status(500).json({ message: "Internal Server Error" });
     }
-}
+    finally {
+        client.release();
+    }
+};
 
 export const addProductSpecificationsController = async (req: Request, res: Response): Promise<Response> => {
     const { productId, specifications } = req.body;
@@ -539,11 +612,35 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             SELECT p.id, p.name, p.description, p.category, p.product_type
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
+              AND EXISTS (
+                  SELECT 1
+                  FROM vendor_products vp
+                  JOIN vendors v ON v.id = vp.vendor_id
+                  JOIN users u ON u.id = v.user_id
+                  WHERE vp.product_id = p.id
+                    AND vp.is_active = true
+                    AND v.approval_status = 'approved'
+                    AND v.is_active = true
+                    AND v.is_blocked = false
+                    AND u.is_active = true
+              )
         `;
         let countQuery = `
             SELECT COUNT(*)::int AS total_count
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
+              AND EXISTS (
+                  SELECT 1
+                  FROM vendor_products vp
+                  JOIN vendors v ON v.id = vp.vendor_id
+                  JOIN users u ON u.id = v.user_id
+                  WHERE vp.product_id = p.id
+                    AND vp.is_active = true
+                    AND v.approval_status = 'approved'
+                    AND v.is_active = true
+                    AND v.is_blocked = false
+                    AND u.is_active = true
+              )
         `;
 
         const values: any[] = [];
@@ -675,8 +772,8 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
     }
 
     try {
-        const query = `
-           SELECT 
+        const productQuery = `
+            SELECT 
                 p.id AS product_id,
                 p.name AS product_name,
                 p.description,
@@ -691,69 +788,88 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.review_count,
                 p.quotation_limit,
                 p.vendor_can_set_quotation_limit,
-                ${approvedSpecificationsSelect},
-
-                -- Images array
-                COALESCE(
-                    JSON_AGG(
-                        JSONB_BUILD_OBJECT(
-                            'image_url', pImg.image_url,
-                            'is_primary', pImg.is_primary,
-                            'display_order', pImg.display_order
-                        )
-                        ORDER BY pImg.display_order
-                    ) FILTER (WHERE pImg.id IS NOT NULL),
-                    '[]'
-                ) AS images,
-
-                -- Vendors array (with rating, review_count, and vendor address coordinates)
-                COALESCE(
-                    JSON_AGG(DISTINCT JSONB_BUILD_OBJECT(
-                        'vendor_id', v.id,
-                        'vendor_name', v.company_name,
-                        'price', vp.price,
-                        'moq', vp.moq,
-                        'stock_quantity', vp.stock_quantity,
-                        'quotation_enabled', vp.quotation_enabled,
-                        'rating', v.rating,
-                        'review_count', v.review_count,
-                        'latitude', va.latitude,
-                        'longitude', va.longitude,
-                        'city', va.city,
-                        'state', va.state
-                    )) FILTER (WHERE v.id IS NOT NULL),
-                    '[]'
-                ) AS vendors
-
+                ${approvedSpecificationsSelect}
             FROM products p
-            ${approvedSpecificationsJoin}
             LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
-            LEFT JOIN products_images pImg ON p.id = pImg.product_id AND pImg.approval_status = 'approved'
-            LEFT JOIN vendor_products vp ON p.id = vp.product_id
-            LEFT JOIN vendors v ON vp.vendor_id = v.id
-            LEFT JOIN users u ON v.user_id = u.id
-            LEFT JOIN addresses va ON v.user_id = va.user_id
-
-            WHERE p.id = $1
-              AND p.approval_status = 'approved'
-              AND p.is_active = TRUE
-              AND (v.id IS NULL OR (
-                    vp.is_active = true
-                AND v.approval_status = 'approved'
-                AND v.is_active = true
-                AND v.is_blocked = false
-                AND u.is_active = true
-              ))
-
-            GROUP BY p.id, pc.code, specAgg.specifications, p.attributes;
+            ${approvedSpecificationsJoin}
+            WHERE p.id = $1 AND p.approval_status = 'approved' AND p.is_active = TRUE
         `;
-        const result = await pool.query(query, [productId]);
-        const product = result.rows[0];
-        if (product && Array.isArray(product.images)) {
-            for (const img of product.images) {
-                img.image_url = await getPresignedUrlOrOriginal(img.image_url);
+        const productRes = await pool.query(productQuery, [productId]);
+        if (productRes.rows.length === 0) {
+            return res.status(404).json({ message: "Product not found" });
+        }
+        const product = productRes.rows[0];
+
+        // Fetch images
+        const imagesQuery = `
+            SELECT image_url, is_primary, display_order, media_type
+            FROM products_images
+            WHERE product_id = $1 AND approval_status = 'approved'
+            ORDER BY display_order ASC
+        `;
+        const imagesRes = await pool.query(imagesQuery, [productId]);
+        for (const img of imagesRes.rows) {
+            img.image_url = await getPresignedUrlOrOriginal(img.image_url);
+        }
+        product.images = imagesRes.rows;
+
+        // Fetch approved variants for this product
+        const variantsQuery = `
+            SELECT id AS variant_id, sku, properties, approval_status
+            FROM product_variants
+            WHERE product_id = $1 AND approval_status = 'approved' AND is_active = TRUE
+            ORDER BY created_at ASC
+        `;
+        const variantsRes = await pool.query(variantsQuery, [productId]);
+        const variants = variantsRes.rows;
+
+        // For each variant, fetch the associated vendor products
+        for (const variant of variants) {
+            const vendorsQuery = `
+                SELECT 
+                    v.id AS vendor_id,
+                    v.company_name AS vendor_name,
+                    vp.price,
+                    vp.moq,
+                    vp.stock_quantity,
+                    vp.quotation_enabled,
+                    vp.gst_percentage,
+                    v.rating,
+                    v.review_count,
+                    va.latitude,
+                    va.longitude,
+                    va.city,
+                    va.state
+                FROM vendor_products vp
+                JOIN vendors v ON vp.vendor_id = v.id
+                JOIN users u ON v.user_id = u.id
+                LEFT JOIN addresses va ON v.user_id = va.user_id
+                WHERE vp.product_variant_id = $1
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+                ORDER BY vp.price ASC
+            `;
+            const vendorsRes = await pool.query(vendorsQuery, [variant.variant_id]);
+            variant.vendors = vendorsRes.rows;
+        }
+
+        product.variants = variants;
+        
+        // Provide a flat list of all vendors across all variants for fallback/legacy compatibility
+        const allVendors: any[] = [];
+        const vendorIdsSeen = new Set<string>();
+        for (const variant of variants) {
+            for (const vendor of variant.vendors) {
+                if (!vendorIdsSeen.has(vendor.vendor_id)) {
+                    vendorIdsSeen.add(vendor.vendor_id);
+                    allVendors.push(vendor);
+                }
             }
         }
+        product.vendors = allVendors;
 
         return res.status(200).json({ message: "Product fetched successfully", data: product });
     }
@@ -822,7 +938,19 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
             WHERE pc.is_active = TRUE
               AND LOWER(pc.code) = LOWER($1)
               AND (category::text = pc.id::text OR category::text = pc.code)
-        ) AND approval_status = 'approved' AND is_active = TRUE`;
+        ) AND approval_status = 'approved' AND is_active = TRUE
+          AND EXISTS (
+              SELECT 1
+              FROM vendor_products vp
+              JOIN vendors v ON v.id = vp.vendor_id
+              JOIN users u ON u.id = v.user_id
+              WHERE vp.product_id = products.id
+                AND vp.is_active = true
+                AND v.approval_status = 'approved'
+                AND v.is_active = true
+                AND v.is_blocked = false
+                AND u.is_active = true
+          )`;
         let paramCount = 2;
 
         if (search && typeof search === 'string' && search.trim() !== '') {
@@ -1038,11 +1166,13 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                 p.category,
                 p.product_type,
                 vp.price,
+                vp.pending_price,
                 vp.moq,
                 vp.stock_quantity,
                 vp.is_active AS status,
                 vp.status AS vendor_product_status,
                 vp.created_at AS created_date,
+                vp.gst_percentage,
                 pImg.image_url AS primary_image,
                 p.approval_status,
                 p.approval_notes
@@ -1136,33 +1266,69 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
     }
 
     try {
-        const query = `
-            SELECT
-                v.id AS vendor_id,
-                v.company_name AS vendor_name,
-                vp.price,
-                vp.moq,
-                vp.stock_quantity,
-                vp.quotation_enabled,
-                vp.quotation_min_qty,
-                v.rating,
-                v.review_count,
-                va.latitude,
-                va.longitude,
-                va.city,
-                va.state
-            FROM vendor_products vp
-            JOIN vendors v ON vp.vendor_id = v.id
-            JOIN users u ON v.user_id = u.id
-            LEFT JOIN addresses va ON v.user_id = va.user_id
-            WHERE vp.product_id = $1
-              AND vp.is_active = true
-              AND v.approval_status = 'approved'
-              AND v.is_active = true
-              AND v.is_blocked = false
-              AND u.is_active = true
-        `;
-        const result = await pool.query(query, [productId]);
+        const variantId = req.query.variantId as string | undefined;
+        let query;
+        let queryParams;
+        if (variantId) {
+            query = `
+                SELECT
+                    v.id AS vendor_id,
+                    v.company_name AS vendor_name,
+                    vp.price,
+                    vp.moq,
+                    vp.stock_quantity,
+                    vp.quotation_enabled,
+                    vp.quotation_min_qty,
+                    vp.gst_percentage,
+                    v.rating,
+                    v.review_count,
+                    va.latitude,
+                    va.longitude,
+                    va.city,
+                    va.state
+                FROM vendor_products vp
+                JOIN vendors v ON vp.vendor_id = v.id
+                JOIN users u ON v.user_id = u.id
+                LEFT JOIN addresses va ON v.user_id = va.user_id
+                WHERE vp.product_variant_id = $1
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            `;
+            queryParams = [variantId];
+        } else {
+            query = `
+                SELECT
+                    v.id AS vendor_id,
+                    v.company_name AS vendor_name,
+                    vp.price,
+                    vp.moq,
+                    vp.stock_quantity,
+                    vp.quotation_enabled,
+                    vp.quotation_min_qty,
+                    vp.gst_percentage,
+                    v.rating,
+                    v.review_count,
+                    va.latitude,
+                    va.longitude,
+                    va.city,
+                    va.state
+                FROM vendor_products vp
+                JOIN vendors v ON vp.vendor_id = v.id
+                JOIN users u ON v.user_id = u.id
+                LEFT JOIN addresses va ON v.user_id = va.user_id
+                WHERE vp.product_id = $1
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            `;
+            queryParams = [productId];
+        }
+        const result = await pool.query(query, queryParams);
 
         const vendors = result.rows.map((row) => {
             const price = Number(row.price) || 0;
@@ -1184,6 +1350,7 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                 stock_quantity: row.stock_quantity,
                 quotation_enabled: Boolean(row.quotation_enabled),
                 quotation_min_qty: row.quotation_min_qty,
+                gst_percentage: row.gst_percentage !== null && row.gst_percentage !== undefined ? Number(row.gst_percentage) : 0,
                 rating,
                 review_count: reviewCount,
                 latitude: vendorLat,
@@ -1283,10 +1450,12 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.quotation_limit,
                 p.vendor_can_set_quotation_limit,
                 vp.price,
+                vp.pending_price,
                 vp.moq,
                 vp.stock_quantity,
                 vp.quotation_enabled,
                 vp.quotation_min_qty,
+                vp.gst_percentage,
                 vp.is_active,
                 vp.status,
                 vp.created_at AS vendor_product_created_at,
@@ -1297,18 +1466,19 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                         JSONB_BUILD_OBJECT(
                             'image_url', pImg.image_url,
                             'is_primary', pImg.is_primary,
-                            'display_order', pImg.display_order
+                            'display_order', pImg.display_order,
+                            'media_type', pImg.media_type
                         )
                         ORDER BY pImg.display_order
                     ) FILTER (WHERE pImg.id IS NOT NULL),
-                    '[]'::json
+                    '[]'
                 ) AS images
             FROM vendor_products vp
             JOIN products p ON vp.product_id = p.id
             ${approvedSpecificationsJoin}
             LEFT JOIN products_images pImg ON p.id = pImg.product_id
             WHERE vp.vendor_id = $1 AND vp.product_id = $2
-            GROUP BY p.id, vp.price, vp.moq, vp.stock_quantity, vp.quotation_enabled, vp.quotation_min_qty, vp.is_active, vp.status,
+            GROUP BY p.id, vp.price, vp.pending_price, vp.moq, vp.stock_quantity, vp.quotation_enabled, vp.quotation_min_qty, vp.is_active, vp.status,
                      vp.created_at, vp.updated_at, specAgg.specifications, p.attributes
         `;
 
@@ -1337,7 +1507,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
 
 export const updateVendorProductController = async (req: Request, res: Response): Promise<Response> => {
     const { productId } = req.params;
-    const { price, moq, stockQuantity, isActive, quotationEnabled, quotationMinQty } = req.body;
+    const { price, moq, stockQuantity, isActive, quotationEnabled, quotationMinQty, gstPercentage } = req.body;
     const { userId, role } = (req as any).user;
 
     if (!productId) {
@@ -1384,7 +1554,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
 
         // Check if the vendor product exists
         const existingProductResult = await pool.query(
-            `SELECT id, status, is_active FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
+            `SELECT id, status, is_active, price FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
             [vendorId, productId]
         );
 
@@ -1402,32 +1572,70 @@ export const updateVendorProductController = async (req: Request, res: Response)
             });
         }
 
-        // Update the vendor product
-        const updateQuery = `
-            UPDATE vendor_products 
-            SET price = $1,
-                moq = $2,
-                stock_quantity = $3,
-                is_active = $4,
-                quotation_enabled = $5,
-                quotation_min_qty = $6,
-                updated_at = NOW()
-            WHERE vendor_id = $7 AND product_id = $8
-            RETURNING *
-        `;
-        const result = await pool.query(updateQuery, [
-            Number(price),
-            Number(moq),
-            Number(stockQuantity),
-            requestedIsActive,
-            Boolean(quotationEnabled),
-            quotationMinQty ?? null,
-            vendorId,
-            productId
-        ]);
+        let updateQuery;
+        let queryParams;
+        const isPriceChanged = Number(price) !== Number(existingVP.price);
+        const requiresApproval = existingVP.status === 'active' && isPriceChanged;
+
+        if (requiresApproval) {
+            updateQuery = `
+                UPDATE vendor_products 
+                SET pending_price = $1,
+                    moq = $2,
+                    stock_quantity = $3,
+                    is_active = $4,
+                    quotation_enabled = $5,
+                    quotation_min_qty = $6,
+                    gst_percentage = COALESCE($7, gst_percentage),
+                    updated_at = NOW()
+                WHERE vendor_id = $8 AND product_id = $9
+                RETURNING *
+            `;
+            queryParams = [
+                Number(price),
+                Number(moq),
+                Number(stockQuantity),
+                requestedIsActive,
+                Boolean(quotationEnabled),
+                quotationMinQty ?? null,
+                gstPercentage !== undefined ? Number(gstPercentage) : null,
+                vendorId,
+                productId
+            ];
+        } else {
+            updateQuery = `
+                UPDATE vendor_products 
+                SET price = $1,
+                    pending_price = NULL,
+                    moq = $2,
+                    stock_quantity = $3,
+                    is_active = $4,
+                    quotation_enabled = $5,
+                    quotation_min_qty = $6,
+                    gst_percentage = COALESCE($7, gst_percentage),
+                    updated_at = NOW()
+                WHERE vendor_id = $8 AND product_id = $9
+                RETURNING *
+            `;
+            queryParams = [
+                Number(price),
+                Number(moq),
+                Number(stockQuantity),
+                requestedIsActive,
+                Boolean(quotationEnabled),
+                quotationMinQty ?? null,
+                gstPercentage !== undefined ? Number(gstPercentage) : null,
+                vendorId,
+                productId
+            ];
+        }
+
+        const result = await pool.query(updateQuery, queryParams);
 
         return res.status(200).json({
-            message: "Vendor product updated successfully",
+            message: requiresApproval 
+                ? "Product details updated. The price change request has been submitted to admin for approval."
+                : "Vendor product updated successfully",
             data: result.rows[0]
         });
     } catch (error) {
@@ -1922,6 +2130,18 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
               AND p.is_active = TRUE
               AND p.id != $1
               AND p.category = (SELECT category FROM products WHERE id = $1)
+              AND EXISTS (
+                  SELECT 1
+                  FROM vendor_products vp
+                  JOIN vendors v ON v.id = vp.vendor_id
+                  JOIN users u ON u.id = v.user_id
+                  WHERE vp.product_id = p.id
+                    AND vp.is_active = true
+                    AND v.approval_status = 'approved'
+                    AND v.is_active = true
+                    AND v.is_blocked = false
+                    AND u.is_active = true
+              )
             ORDER BY p.rating DESC NULLS LAST, p.review_count DESC NULLS LAST, p.created_at DESC
             LIMIT 8
         `;
@@ -1936,14 +2156,17 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
 export const uploadProductImagesController = async (req: Request, res: Response): Promise<Response> => {
     const { productId } = req.body;
     const { userId, role } = (req as any).user;
-    const files = req.files as Express.Multer.File[];
-
+    
     if (!productId) {
         return res.status(400).json({ message: "Product ID is required" });
     }
 
-    if (!files || files.length === 0) {
-        return res.status(400).json({ message: "No images provided" });
+    const filesMap = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+    const images = filesMap?.["images"] || [];
+    const videoFile = filesMap?.["video"]?.[0] || null;
+
+    if (images.length === 0 && !videoFile) {
+        return res.status(400).json({ message: "No images or video provided" });
     }
 
     try {
@@ -1962,7 +2185,7 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
             const targetPrimaryIndex = req.body.primaryImageIndex !== undefined ? Number(req.body.primaryImageIndex) : -1;
 
-            if (targetPrimaryIndex >= 0 && targetPrimaryIndex < files.length) {
+            if (targetPrimaryIndex >= 0 && targetPrimaryIndex < images.length) {
                 await client.query(`UPDATE products_images SET is_primary = false WHERE product_id = $1`, [productId]);
             }
 
@@ -1972,8 +2195,9 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
             const uploadedImages = [];
 
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
+            // 1. Process Images
+            for (let i = 0; i < images.length; i++) {
+                const file = images[i];
                 const originalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
                 const fileName = `products/${productId}/${Date.now()}_${originalName}`;
 
@@ -1998,8 +2222,8 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
                 // Insert into products_images
                 const insertQuery = `
-                    INSERT INTO products_images (product_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    INSERT INTO products_images (product_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'image')
                     RETURNING *
                 `;
                 const fullUrl = `https://${BUCKET_NAME}.s3.${(process.env.AWS_REGION || "ap-south-1").trim()}.amazonaws.com/${fileName}`;
@@ -2008,8 +2232,36 @@ export const uploadProductImagesController = async (req: Request, res: Response)
                 uploadedImages.push(result.rows[0]);
             }
 
+            // 2. Process Video (if present)
+            if (videoFile) {
+                const originalName = videoFile.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
+                const fileName = `products/${productId}/${Date.now()}_${originalName}`;
+
+                const command = new PutObjectCommand({
+                    Bucket: BUCKET_NAME,
+                    Key: fileName,
+                    Body: videoFile.buffer,
+                    ContentType: videoFile.mimetype,
+                });
+
+                await s3Client.send(command);
+
+                const isApproved = !isVendor;
+
+                // Insert into products_images with media_type = 'video'
+                const insertQuery = `
+                    INSERT INTO products_images (product_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
+                    VALUES ($1, $2, FALSE, 99, $3, $4, $5, 'video')
+                    RETURNING *
+                `;
+                const fullUrl = `https://${BUCKET_NAME}.s3.${(process.env.AWS_REGION || "ap-south-1").trim()}.amazonaws.com/${fileName}`;
+                const values = [productId, fullUrl, approvalStatus, isApproved, userId];
+                const result = await client.query(insertQuery, values);
+                uploadedImages.push(result.rows[0]);
+            }
+
             await client.query("COMMIT");
-            return res.status(201).json({ message: "Images uploaded successfully", data: uploadedImages });
+            return res.status(201).json({ message: "Media files uploaded successfully", data: uploadedImages });
         } catch (error) {
             await client.query("ROLLBACK");
             throw error;
@@ -2017,7 +2269,102 @@ export const uploadProductImagesController = async (req: Request, res: Response)
             client.release();
         }
     } catch (error) {
-        console.error("Error uploading product images:", error);
+        console.error("Error uploading product media:", error);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
+export const getProductTypes = async (_req: Request, res: Response): Promise<Response> => {
+    try {
+        const result = await pool.query(
+            `SELECT DISTINCT product_type 
+             FROM products 
+             WHERE product_type IS NOT NULL AND product_type != '' AND is_active = TRUE AND approval_status = 'approved'
+             ORDER BY product_type ASC`
+        );
+        const types = result.rows.map(row => row.product_type);
+        return res.status(200).json({ message: "Product types fetched successfully", data: types });
+    } catch (e) {
+        console.error("Error while fetching product types : ", e);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
+export const addProductVariantController = async (req: Request, res: Response): Promise<Response> => {
+    const { productId, sku, properties } = req.body;
+    const { userId, role } = (req as any).user;
+
+    if (!productId || !properties || typeof properties !== 'object') {
+        return res.status(400).json({ message: "Product ID and properties object are required." });
+    }
+
+    try {
+        const productResult = await pool.query(`SELECT id, created_by_user_id FROM products WHERE id = $1`, [productId]);
+        if (productResult.rows.length === 0) {
+            return res.status(404).json({ message: "Product not found." });
+        }
+
+        const isVendor = role === "vendor";
+        const approvalStatus = isVendor ? "pending" : "approved";
+
+        // Check if the variant already exists
+        const duplicateResult = await pool.query(
+            `SELECT id FROM product_variants WHERE product_id = $1 AND properties = $2::jsonb`,
+            [productId, JSON.stringify(properties)]
+        );
+        if (duplicateResult.rows.length > 0) {
+            return res.status(409).json({ message: "A variant with these exact properties already exists." });
+        }
+
+        const query = `
+            INSERT INTO product_variants (
+                product_id,
+                sku,
+                properties,
+                approval_status,
+                created_by_user_id,
+                is_active
+            )
+            VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+            RETURNING *
+        `;
+        const values = [
+            productId,
+            sku || null,
+            JSON.stringify(properties),
+            approvalStatus,
+            userId,
+            !isVendor
+        ];
+        
+        const result = await pool.query(query, values);
+        
+        return res.status(201).json({
+            message: isVendor ? "Product variant submitted for approval successfully" : "Product variant added successfully",
+            result: result.rows[0]
+        });
+    } catch (error) {
+        console.error("Error in addProductVariantController:", error);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
+export const getProductVariantsController = async (req: Request, res: Response): Promise<Response> => {
+    const { productId } = req.params;
+    if (!productId) {
+        return res.status(400).json({ message: "Product ID is required." });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT id, product_id, sku, properties, approval_status, is_active 
+             FROM product_variants 
+             WHERE product_id = $1 AND approval_status = 'approved' AND is_active = TRUE`,
+            [productId]
+        );
+        return res.status(200).json({ data: result.rows });
+    } catch (error) {
+        console.error("Error in getProductVariantsController:", error);
         return res.status(500).json({ message: "Internal Server Error" });
     }
 };

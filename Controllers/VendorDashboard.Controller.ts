@@ -266,7 +266,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
             JOIN products p ON oi.product_id = p.id
-            JOIN product_category pc ON p.category = pc.id
+            JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
             WHERE oi.vendor_id = $1 AND NOT (o.status = 'pending' AND o.payment_status = 'pending' AND o.source IN ('client', 'quotation')) ${dateFilter}
             GROUP BY pc.label
             ORDER BY total_quantity DESC

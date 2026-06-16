@@ -1,23 +1,25 @@
 import { Router } from "express";
 import multer from "multer";
-import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController, getPublicProductReviewsController } from "../Controllers/Product.controller";
+import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController, getPublicProductReviewsController, getProductTypes, addProductVariantController, getProductVariantsController } from "../Controllers/Product.controller";
 
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
 
 const productRouter = Router();
 
-// Configure Multer for memory storage
+// Configure Multer for memory storage (set limits higher for videos)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5 MB limit
+    fileSize: 20 * 1024 * 1024, // 20 MB limit for video
   },
 });
 // Public routes
 productRouter.get("/getAllProducts", getAllProducts);
 productRouter.get("/getCategories", getCategories);
+productRouter.get("/getProductTypes", getProductTypes);
 productRouter.get("/getProductById/:productId", getProductById);
+productRouter.get("/getProductVariants/:productId", getProductVariantsController);
 productRouter.get("/getProductsByCategory/:category", getProductsByCategory);
 productRouter.get("/getProductByName", getProductByName);
 productRouter.get("/getRankedVendors/:productId", getRankedVendors);
@@ -35,8 +37,9 @@ productRouter.get("/vendor/product/:productId/analytics", getVendorProductAnalyt
 productRouter.get("/vendor/product/:productId/reviews", getProductReviewsController);
 productRouter.post("/addProduct", addProductController);
 productRouter.post("/addVendorProduct", addVendorProductController);
+productRouter.post("/addProductVariant", addProductVariantController);
 productRouter.post("/addProductSpecifications", addProductSpecificationsController);
-productRouter.post("/uploadProductImages", upload.array("images", 5), uploadProductImagesController);
+productRouter.post("/uploadProductImages", upload.fields([{ name: "images", maxCount: 3 }, { name: "video", maxCount: 1 }]), uploadProductImagesController);
 productRouter.delete("/deleteProduct", deleteProduct);
 productRouter.put("/updateProduct", updateProduct);
 

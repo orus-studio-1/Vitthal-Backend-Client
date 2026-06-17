@@ -187,7 +187,7 @@ export const createPaymentOrderController = async (req: Request, res: Response):
 
         // 3. Fetch cart items joined with stock and product details
         const cartItemsQuery = await pool.query(
-            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity, ci.price_at_added, vp.stock_quantity, p.name as product_name
+            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity, ci.price_at_added, vp.stock_quantity, p.name as product_name, vp.gst_percentage
              FROM cart_items ci
              JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
              JOIN products p ON p.id = ci.product_id
@@ -272,9 +272,13 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             }
         }
 
-        // Add 18% GST/taxes to checkout amount to match frontend calculation
+        // Calculate taxes dynamically based on each item's actual gst_percentage
+        let taxes = 0;
+        for (const item of cartItems) {
+            const itemGstPercent = item.gst_percentage !== null && item.gst_percentage !== undefined ? Number(item.gst_percentage) : 0;
+            taxes += (Number(item.price_at_added) * Number(item.quantity)) * (itemGstPercent / 100);
+        }
         const subtotal = totalCheckoutAmount;
-        const taxes = subtotal * 0.18;
         const finalTotal = subtotal + taxes;
 
         // 6. Create Razorpay order

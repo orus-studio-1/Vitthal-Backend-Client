@@ -31,6 +31,7 @@ export const getCartDataController = async (req: Request, res: Response): Promis
                 vp.moq,
                 vp.quotation_enabled,
                 vp.stock_quantity,
+                vp.gst_percentage,
                 (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) as image_url,
                 v.company_name as vendor_name
             FROM carts c
@@ -60,7 +61,7 @@ export const addCartItemController = async (req: Request, res: Response): Promis
     const { product_variant_id, vendor_id, quantity, cart_type } = req.body;
     let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
-    
+
     if ((!product_variant_id && !product_id) || !vendor_id || !quantity || quantity < 1) {
         return res.status(400).json({ message: "product_variant_id (or product_id), vendor_id, and quantity (>=1) are required" });
     }
@@ -279,6 +280,7 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
                 [product_id]
             );
             if (variantRes.rows.length === 0) {
+                console.log("not found", product_id)
                 return res.status(404).json({ message: "Default variant not found" });
             }
             resolvedVariantId = variantRes.rows[0].id;
@@ -375,9 +377,9 @@ export const shareCartController = async (req: Request, res: Response): Promise<
             [sharedCartId, activeCartId]
         );
 
-        return res.status(201).json({ 
-            message: "Cart shared successfully", 
-            shared_cart_id: sharedCartId 
+        return res.status(201).json({
+            message: "Cart shared successfully",
+            shared_cart_id: sharedCartId
         });
     } catch (e) {
         console.error("Error in shareCartController: ", e);
@@ -419,6 +421,7 @@ export const getSharedCartController = async (req: Request, res: Response): Prom
                 vp.moq,
                 vp.quotation_enabled,
                 vp.stock_quantity,
+                vp.gst_percentage,
                 (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) as image_url,
                 v.company_name as vendor_name,
                 u.name as sender_name
@@ -434,10 +437,10 @@ export const getSharedCartController = async (req: Request, res: Response): Prom
         `;
 
         const itemsResult = await pool.query(query, [sharedCartId]);
-        return res.status(200).json({ 
+        return res.status(200).json({
             cart_type: cart.cart_type,
             sender_name: itemsResult.rows[0]?.sender_name || "A user",
-            items: itemsResult.rows 
+            items: itemsResult.rows
         });
     } catch (error) {
         console.error("Error in getSharedCartController: ", error);

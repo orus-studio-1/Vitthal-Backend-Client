@@ -1,5 +1,17 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
+
+// Helper: resolve S3 image URLs inside order items arrays
+async function resolveItemImages(items: any[] | null): Promise<any[] | null> {
+    if (!items || !Array.isArray(items)) return items;
+    return Promise.all(
+        items.map(async (item: any) => ({
+            ...item,
+            image_url: await getPresignedUrlOrOriginal(item.image_url),
+        }))
+    );
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Haversine distance helper — returns km between two lat/lon points
@@ -191,7 +203,16 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
         `;
         
         const result = await pool.query(query, [userId]);
-        return res.status(200).json({ data: result.rows });
+
+        // Resolve S3 image URLs for each order's items
+        const rows = await Promise.all(
+            result.rows.map(async (row: any) => ({
+                ...row,
+                items: await resolveItemImages(row.items),
+            }))
+        );
+
+        return res.status(200).json({ data: rows });
     } catch (error) {
         console.error("Error fetching orders:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -260,7 +281,16 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
         `;
         
         const result = await pool.query(query, [vendorId]);
-        return res.status(200).json({ data: result.rows });
+
+        // Resolve S3 image URLs for each order's items
+        const rows = await Promise.all(
+            result.rows.map(async (row: any) => ({
+                ...row,
+                items: await resolveItemImages(row.items),
+            }))
+        );
+
+        return res.status(200).json({ data: rows });
     } catch (error) {
         console.error("Error fetching vendor orders:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -348,7 +378,13 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
             return res.status(404).json({ message: "Order not found or access denied" });
         }
 
-        return res.status(200).json({ data: result.rows[0] });
+        // Resolve S3 image URLs for items
+        const order = {
+            ...result.rows[0],
+            items: await resolveItemImages(result.rows[0].items),
+        };
+
+        return res.status(200).json({ data: order });
     } catch (error) {
         console.error("Error fetching vendor order details:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -633,9 +669,12 @@ async function fetchOrderTrackingData(orderId: string) {
         [orderId]
     );
 
+    // Resolve S3 image URLs for items
+    const resolvedItems = await resolveItemImages(itemsQ.rows);
+
     return {
         order,
-        items: itemsQ.rows,
+        items: resolvedItems,
         statusHistory: histQ.rows,
         fulfillmentTracking: ftQ.rows,
         routePlan: routeQ.rows,

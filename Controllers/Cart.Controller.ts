@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
 
 type CartType = "direct" | "quotation";
 
@@ -45,7 +46,13 @@ export const getCartDataController = async (req: Request, res: Response): Promis
         `;
 
         const result = await pool.query(query, [userId, cartType]);
-        return res.status(200).json({ data: result.rows });
+        const rows = await Promise.all(
+            result.rows.map(async (row) => ({
+                ...row,
+                image_url: await getPresignedUrlOrOriginal(row.image_url),
+            }))
+        );
+        return res.status(200).json({ data: rows });
     } catch (error) {
         console.error("Error in getCartDataController: ", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -437,10 +444,16 @@ export const getSharedCartController = async (req: Request, res: Response): Prom
         `;
 
         const itemsResult = await pool.query(query, [sharedCartId]);
+        const items = await Promise.all(
+            itemsResult.rows.map(async (row) => ({
+                ...row,
+                image_url: await getPresignedUrlOrOriginal(row.image_url),
+            }))
+        );
         return res.status(200).json({
             cart_type: cart.cart_type,
-            sender_name: itemsResult.rows[0]?.sender_name || "A user",
-            items: itemsResult.rows
+            sender_name: items[0]?.sender_name || "A user",
+            items
         });
     } catch (error) {
         console.error("Error in getSharedCartController: ", error);

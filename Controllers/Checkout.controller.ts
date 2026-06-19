@@ -55,8 +55,11 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         const cartId = cartQuery.rows[0].id;
 
         const cartItemsQuery = await pool.query(
-            `SELECT product_id, product_variant_id, vendor_id, quantity, price_at_added 
-             FROM cart_items WHERE cart_id = $1`,
+            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity,
+                    vp.price as latest_price, vp.discounted_price
+             FROM cart_items ci
+             JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
+             WHERE ci.cart_id = $1`,
             [cartId]
         );
         const cartItems = cartItemsQuery.rows;
@@ -91,7 +94,10 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             const vendorItems = itemsByVendor[vendorId];
             let totalAmount = 0;
             for (const item of vendorItems) {
-                totalAmount += Number(item.price_at_added) * Number(item.quantity);
+                const latestPrice = Number(item.latest_price) || 0;
+                const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
+                const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
+                totalAmount += effectivePrice * Number(item.quantity);
             }
 
             // Insert into orders table
@@ -121,10 +127,15 @@ export const placeOrderController = async (req: Request, res: Response): Promise
 
             // Insert into order_items table
             for (const item of vendorItems) {
+                const latestPrice = Number(item.latest_price) || 0;
+                const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
+                const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
+                const originalPrice = (discountedPrice !== null && discountedPrice < latestPrice) ? latestPrice : null;
+
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price) 
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, item.price_at_added]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price) 
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice]
                 );
             }
         }
@@ -187,7 +198,7 @@ export const createPaymentOrderController = async (req: Request, res: Response):
 
         // 3. Fetch cart items joined with stock and product details
         const cartItemsQuery = await pool.query(
-            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity, ci.price_at_added, vp.stock_quantity, p.name as product_name, vp.gst_percentage
+            `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity, vp.price as latest_price, vp.discounted_price, vp.stock_quantity, p.name as product_name, vp.gst_percentage
              FROM cart_items ci
              JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
              JOIN products p ON p.id = ci.product_id
@@ -232,7 +243,10 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             const vendorItems = itemsByVendor[vendorId];
             let orderTotal = 0;
             for (const item of vendorItems) {
-                orderTotal += Number(item.price_at_added) * Number(item.quantity);
+                const latestPrice = Number(item.latest_price) || 0;
+                const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
+                const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
+                orderTotal += effectivePrice * Number(item.quantity);
             }
             totalCheckoutAmount += orderTotal;
 
@@ -264,10 +278,15 @@ export const createPaymentOrderController = async (req: Request, res: Response):
 
             // Insert into order_items table
             for (const item of vendorItems) {
+                const latestPrice = Number(item.latest_price) || 0;
+                const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
+                const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
+                const originalPrice = (discountedPrice !== null && discountedPrice < latestPrice) ? latestPrice : null;
+
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price) 
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, item.price_at_added]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price) 
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice]
                 );
             }
         }
@@ -275,8 +294,12 @@ export const createPaymentOrderController = async (req: Request, res: Response):
         // Calculate taxes dynamically based on each item's actual gst_percentage
         let taxes = 0;
         for (const item of cartItems) {
+            const latestPrice = Number(item.latest_price) || 0;
+            const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
+            const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
+
             const itemGstPercent = item.gst_percentage !== null && item.gst_percentage !== undefined ? Number(item.gst_percentage) : 0;
-            taxes += (Number(item.price_at_added) * Number(item.quantity)) * (itemGstPercent / 100);
+            taxes += (effectivePrice * Number(item.quantity)) * (itemGstPercent / 100);
         }
         const subtotal = totalCheckoutAmount;
         const finalTotal = subtotal + taxes;

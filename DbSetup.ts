@@ -83,6 +83,7 @@ export async function ensureMarketplaceSchema() {
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             product_id UUID NOT NULL,
             sku TEXT,
+            name TEXT,
             properties JSONB NOT NULL DEFAULT '{}'::jsonb,
             approval_status TEXT NOT NULL DEFAULT 'approved',
             approval_notes TEXT,
@@ -539,6 +540,40 @@ export async function ensureMarketplaceSchema() {
         ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS gst_percentage NUMERIC(5,2) DEFAULT 0.00;
         ALTER TABLE products_images ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'image';
         ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS pending_price NUMERIC(12,2) DEFAULT NULL CHECK (pending_price >= 0);
+        ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS discounted_price NUMERIC(12,2) DEFAULT NULL CHECK (discounted_price >= 0);
+        ALTER TABLE order_items ADD COLUMN IF NOT EXISTS original_price NUMERIC(12,2) DEFAULT NULL;
+        ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS name TEXT;
+        ALTER TABLE products_images ADD COLUMN IF NOT EXISTS product_variant_id UUID;
+
+        UPDATE product_variants
+        SET name = (
+            SELECT COALESCE(string_agg(key || ': ' || value, ', '), 'Default Variation')
+            FROM jsonb_each_text(properties)
+        )
+        WHERE name IS NULL AND properties IS NOT NULL AND properties != '{}'::jsonb;
+
+        UPDATE product_variants
+        SET name = 'Default Variation'
+        WHERE name IS NULL AND (properties IS NULL OR properties = '{}'::jsonb);
+
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'fk_products_images_product_variant'
+                  AND table_name = 'products_images'
+            ) THEN
+                ALTER TABLE products_images
+                    ADD CONSTRAINT fk_products_images_product_variant
+                    FOREIGN KEY (product_variant_id)
+                    REFERENCES product_variants(id)
+                    ON DELETE CASCADE;
+            END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_products_images_variant_id ON products_images(product_variant_id);
 
         DO $$
         BEGIN

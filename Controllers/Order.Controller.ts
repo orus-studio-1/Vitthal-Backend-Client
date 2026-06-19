@@ -184,10 +184,12 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
                             'product_id', oi.product_id,
                             'product_variant_id', oi.product_variant_id,
                             'variant_properties', pv.properties,
+                            'variant_name', pv.name,
                             'product_name', p.name,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
-                            'price', oi.price
+                            'price', oi.price,
+                            'original_price', oi.original_price
                         )
                     )
                     FROM order_items oi
@@ -261,10 +263,12 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                             'product_id', oi.product_id,
                             'product_variant_id', oi.product_variant_id,
                             'variant_properties', pv.properties,
+                            'variant_name', pv.name,
                             'product_name', p.name,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
-                            'price', oi.price
+                            'price', oi.price,
+                            'original_price', oi.original_price
                         )
                     )
                     FROM order_items oi
@@ -352,11 +356,13 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                             'product_id', oi.product_id,
                             'product_variant_id', oi.product_variant_id,
                             'variant_properties', pv.properties,
+                            'variant_name', pv.name,
                             'product_name', p.name,
                             'product_description', p.description,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
-                            'price', oi.price
+                            'price', oi.price,
+                            'original_price', oi.original_price
                         ) ORDER BY oi.created_at
                     )
                     FROM order_items oi
@@ -601,11 +607,13 @@ async function fetchOrderTrackingData(orderId: string) {
             oi.product_id,
             oi.product_variant_id,
             pv.properties AS variant_properties,
+            pv.name AS variant_name,
             p.name AS product_name,
             p.description AS product_description,
             (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1) AS image_url,
             oi.quantity,
-            oi.price
+            oi.price,
+            oi.original_price
          FROM order_items oi
          JOIN products p ON oi.product_id = p.id
          LEFT JOIN product_variants pv ON oi.product_variant_id = pv.id

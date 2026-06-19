@@ -29,6 +29,7 @@ export const getCartDataController = async (req: Request, res: Response): Promis
                 p.name as product_name,
                 p.quotation_limit,
                 vp.price as current_price,
+                vp.discounted_price,
                 vp.moq,
                 vp.quotation_enabled,
                 vp.stock_quantity,
@@ -47,10 +48,18 @@ export const getCartDataController = async (req: Request, res: Response): Promis
 
         const result = await pool.query(query, [userId, cartType]);
         const rows = await Promise.all(
-            result.rows.map(async (row) => ({
-                ...row,
-                image_url: await getPresignedUrlOrOriginal(row.image_url),
-            }))
+            result.rows.map(async (row) => {
+                const discountedPrice = row.discounted_price !== null && row.discounted_price !== undefined ? Number(row.discounted_price) : null;
+                const currentPrice = Number(row.current_price) || 0;
+                const activePrice = (discountedPrice !== null && discountedPrice < currentPrice) ? discountedPrice : currentPrice;
+                const originalPrice = (discountedPrice !== null && discountedPrice < currentPrice) ? currentPrice : null;
+                return {
+                    ...row,
+                    price_at_added: activePrice,
+                    original_price: originalPrice,
+                    image_url: await getPresignedUrlOrOriginal(row.image_url),
+                };
+            })
         );
         return res.status(200).json({ data: rows });
     } catch (error) {
@@ -120,7 +129,7 @@ export const addCartItemController = async (req: Request, res: Response): Promis
 
         // 2. Get current price from vendor_products
         const priceResult = await pool.query(
-            `SELECT vp.price, vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
+            `SELECT vp.price, vp.discounted_price, vp.moq, vp.quotation_enabled, vp.stock_quantity, p.quotation_limit
              FROM vendor_products vp
              JOIN products p ON p.id = vp.product_id
              WHERE vp.product_variant_id = $1 AND vp.vendor_id = $2 AND vp.is_active = true`,
@@ -129,9 +138,13 @@ export const addCartItemController = async (req: Request, res: Response): Promis
         if (priceResult.rows.length === 0) {
             return res.status(404).json({ message: "Product not available from this vendor" });
         }
-        const currentPrice = priceResult.rows[0].price;
-        const quotationLimit = priceResult.rows[0].quotation_limit ? Number(priceResult.rows[0].quotation_limit) : null;
-        const moq = Number(priceResult.rows[0].moq) || 1;
+        const priceRow = priceResult.rows[0];
+        const currentPrice = priceRow.price;
+        const discountedPrice = priceRow.discounted_price !== null && priceRow.discounted_price !== undefined ? Number(priceRow.discounted_price) : null;
+        const effectivePrice = (discountedPrice !== null && discountedPrice < currentPrice) ? discountedPrice : currentPrice;
+        
+        const quotationLimit = priceRow.quotation_limit ? Number(priceRow.quotation_limit) : null;
+        const moq = Number(priceRow.moq) || 1;
 
         // Check if quantity requires quotation flow
         if (cartType === "direct" && quotationLimit && quantity >= quotationLimit) {
@@ -157,8 +170,8 @@ export const addCartItemController = async (req: Request, res: Response): Promis
             `INSERT INTO cart_items (cart_id, product_id, product_variant_id, vendor_id, quantity, price_at_added)
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (cart_id, product_variant_id, vendor_id)
-             DO UPDATE SET quantity = cart_items.quantity + $5, updated_at = NOW()`,
-            [cartId, product_id, resolvedVariantId, vendor_id, quantity, currentPrice]
+             DO UPDATE SET quantity = cart_items.quantity + $5, updated_at = NOW()` ,
+            [cartId, product_id, resolvedVariantId, vendor_id, quantity, effectivePrice]
         );
 
         return res.status(201).json({ message: "Item added to cart", cart_id: cartId });
@@ -425,6 +438,7 @@ export const getSharedCartController = async (req: Request, res: Response): Prom
                 p.name as product_name,
                 p.quotation_limit,
                 vp.price as current_price,
+                vp.discounted_price,
                 vp.moq,
                 vp.quotation_enabled,
                 vp.stock_quantity,
@@ -445,10 +459,18 @@ export const getSharedCartController = async (req: Request, res: Response): Prom
 
         const itemsResult = await pool.query(query, [sharedCartId]);
         const items = await Promise.all(
-            itemsResult.rows.map(async (row) => ({
-                ...row,
-                image_url: await getPresignedUrlOrOriginal(row.image_url),
-            }))
+            itemsResult.rows.map(async (row) => {
+                const discountedPrice = row.discounted_price !== null && row.discounted_price !== undefined ? Number(row.discounted_price) : null;
+                const currentPrice = Number(row.current_price) || 0;
+                const activePrice = (discountedPrice !== null && discountedPrice < currentPrice) ? discountedPrice : currentPrice;
+                const originalPrice = (discountedPrice !== null && discountedPrice < currentPrice) ? currentPrice : null;
+                return {
+                    ...row,
+                    price_at_added: activePrice,
+                    original_price: originalPrice,
+                    image_url: await getPresignedUrlOrOriginal(row.image_url),
+                };
+            })
         );
         return res.status(200).json({
             cart_type: cart.cart_type,

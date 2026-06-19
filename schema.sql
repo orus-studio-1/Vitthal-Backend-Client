@@ -327,6 +327,7 @@ CREATE TABLE IF NOT EXISTS vendor_products (
     status vendor_product_status NOT NULL DEFAULT 'waiting',
     gst_percentage NUMERIC(5,2) DEFAULT 0.00,
     pending_price NUMERIC(12,2) DEFAULT NULL CHECK (pending_price >= 0),
+    discounted_price NUMERIC(12,2) DEFAULT NULL CHECK (discounted_price >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -766,6 +767,7 @@ CREATE TABLE IF NOT EXISTS order_items (
     quantity INTEGER NOT NULL CHECK (quantity > 0),
 
     price NUMERIC(12,2) NOT NULL, -- 🔥 final locked price at checkout
+    original_price NUMERIC(12,2) DEFAULT NULL,
 
     created_at TIMESTAMPTZ DEFAULT NOW(),
 

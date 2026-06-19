@@ -246,6 +246,22 @@ export const addProductController = async (req: Request, res: Response): Promise
     if (application) attributesObj.application = String(application).trim();
     if (standard) attributesObj.standard = String(standard).trim();
 
+    // Map attributes into parsedSpecifications so they are also saved in product_specification
+    Object.entries(attributesObj).forEach(([key, val]) => {
+        const valueStr = String(val).trim();
+        if (valueStr) {
+            const normalizedKey = key.trim();
+            const exists = parsedSpecifications.some(s => s.spec_key.toLowerCase() === normalizedKey.toLowerCase());
+            if (!exists) {
+                parsedSpecifications.push({
+                    spec_key: normalizedKey,
+                    spec_value: valueStr,
+                    approval_status: actsAsVendor ? "pending" : "approved"
+                });
+            }
+        }
+    });
+
     if (itemCode) {
         const existingProduct = await pool.query(
             `SELECT id, name, approval_status, created_by_user_id FROM products WHERE LOWER(item_code) = LOWER($1)`,
@@ -358,7 +374,7 @@ export const addProductController = async (req: Request, res: Response): Promise
 }
 
 export const addVendorProductController = async (req: Request, res: Response): Promise<Response> => {
-    const { productVariantId, price, moq, stockQuantity, quotationEnabled, quotationMinQty, gstPercentage } = req.body;
+    const { productVariantId, price, moq, stockQuantity, quotationEnabled, quotationMinQty, gstPercentage, discountedPrice } = req.body;
     let productId = req.body.productId;
     const { userId, role } = (req as any).user;
 
@@ -442,8 +458,8 @@ export const addVendorProductController = async (req: Request, res: Response): P
         const resolvedGst = gstPercentage !== undefined ? Number(gstPercentage) : 0.00;
 
         const query = `
-            INSERT INTO vendor_products (product_id, product_variant_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status, gst_percentage)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 'waiting', $9)
+            INSERT INTO vendor_products (product_id, product_variant_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status, gst_percentage, discounted_price)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 'waiting', $9, $10)
             ON CONFLICT (vendor_id, product_variant_id)
             DO UPDATE SET
                 product_id = EXCLUDED.product_id,
@@ -453,10 +469,11 @@ export const addVendorProductController = async (req: Request, res: Response): P
                 quotation_enabled = EXCLUDED.quotation_enabled,
                 quotation_min_qty = EXCLUDED.quotation_min_qty,
                 gst_percentage = EXCLUDED.gst_percentage,
+                discounted_price = EXCLUDED.discounted_price,
                 is_active = FALSE,
                 status = 'waiting'
             RETURNING *`;
-        const values = [productId, resolvedVariantId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null, resolvedGst];
+        const values = [productId, resolvedVariantId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null, resolvedGst, discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null];
         const result = await client.query(query, values);
         
         await client.query("COMMIT");
@@ -591,6 +608,31 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
         const query = `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4, attributes = $5 WHERE id = $6`;
         const values = [name, description, category, productType, JSON.stringify(newAttributes), productId];
         const result = await pool.query(query, values);
+
+        // Sync newAttributes into product_specification table
+        for (const [key, val] of Object.entries(newAttributes)) {
+            const specKey = String(key).trim();
+            const specVal = String(val).trim();
+            if (specKey && specVal) {
+                const checkRes = await pool.query(
+                    `SELECT id FROM product_specification WHERE product_id = $1 AND LOWER(spec_key) = LOWER($2)`,
+                    [productId, specKey]
+                );
+                if (checkRes.rows.length > 0) {
+                    await pool.query(
+                        `UPDATE product_specification SET spec_value = $1, approval_status = 'approved' WHERE id = $2`,
+                        [specVal, checkRes.rows[0].id]
+                    );
+                } else {
+                    await pool.query(
+                        `INSERT INTO product_specification (product_id, spec_key, spec_value, approval_status, created_by_user_id)
+                         VALUES ($1, $2, $3, 'approved', $4)`,
+                        [productId, specKey, specVal, (req as any).user.userId]
+                    );
+                }
+            }
+        }
+
         return res.status(200).json({ message: "Product updated successfully", result });
     }
     catch (error) {
@@ -703,6 +745,8 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 -- Price range (cast to numeric)
                 COALESCE(pr.min_price, 0)::numeric AS min_price,
                 COALESCE(pr.max_price, 0)::numeric AS max_price,
+                COALESCE(pr.min_original_price, 0)::numeric AS min_original_price,
+                COALESCE(pr.max_original_price, 0)::numeric AS max_original_price,
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
@@ -736,8 +780,10 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             -- Price range from vendor_products
             LEFT JOIN LATERAL (
                 SELECT 
-                    MIN(price)::numeric AS min_price, 
-                    MAX(price)::numeric AS max_price,
+                    MIN(COALESCE(vp.discounted_price, vp.price))::numeric AS min_price, 
+                    MAX(COALESCE(vp.discounted_price, vp.price))::numeric AS max_price,
+                    MIN(vp.price)::numeric AS min_original_price,
+                    MAX(vp.price)::numeric AS max_original_price,
                     MIN(moq)::int AS min_moq
                 FROM vendor_products vp
                 JOIN vendors v ON v.id = vp.vendor_id
@@ -826,7 +872,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             ? "approval_status != 'rejected'"
             : "approval_status = 'approved'";
         const imagesQuery = `
-            SELECT image_url, is_primary, display_order, media_type
+            SELECT image_url, is_primary, display_order, media_type, product_variant_id
             FROM products_images
             WHERE product_id = $1 AND ${imagesApprovalCondition}
             ORDER BY display_order ASC
@@ -842,7 +888,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             ? "approval_status != 'rejected'"
             : "(approval_status = 'approved' AND is_active = TRUE) OR (id IN (SELECT DISTINCT product_variant_id FROM vendor_products WHERE product_id = $1 AND is_active = true))";
         const variantsQuery = `
-            SELECT id AS variant_id, sku, properties, approval_status
+            SELECT id AS variant_id, sku, name AS variant_name, properties, approval_status
             FROM product_variants
             WHERE product_id = $1 AND (${variantApprovalCondition})
             ORDER BY created_at ASC
@@ -857,6 +903,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                     v.id AS vendor_id,
                     v.company_name AS vendor_name,
                     vp.price,
+                    vp.discounted_price,
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
@@ -891,6 +938,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                     v.id AS vendor_id,
                     v.company_name AS vendor_name,
                     vp.price,
+                    vp.discounted_price,
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
@@ -1049,6 +1097,8 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 -- Price range (cast to numeric)
                 COALESCE(pr.min_price, 0)::numeric AS min_price,
                 COALESCE(pr.max_price, 0)::numeric AS max_price,
+                COALESCE(pr.min_original_price, 0)::numeric AS min_original_price,
+                COALESCE(pr.max_original_price, 0)::numeric AS max_original_price,
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
@@ -1086,8 +1136,10 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
             -- Price range from vendor_products
             LEFT JOIN LATERAL (
                 SELECT 
-                    MIN(price)::numeric AS min_price, 
-                    MAX(price)::numeric AS max_price,
+                    MIN(COALESCE(vp.discounted_price, vp.price))::numeric AS min_price, 
+                    MAX(COALESCE(vp.discounted_price, vp.price))::numeric AS max_price,
+                    MIN(vp.price)::numeric AS min_original_price,
+                    MAX(vp.price)::numeric AS max_original_price,
                     MIN(moq)::int AS min_moq
                 FROM vendor_products vp
                 JOIN vendors v ON v.id = vp.vendor_id
@@ -1264,7 +1316,8 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                         'status', vp.status,
                         'gst_percentage', vp.gst_percentage,
                         'properties', pv.properties,
-                        'sku', pv.sku
+                        'sku', pv.sku,
+                        'name', pv.name
                     ) ORDER BY pv.created_at ASC
                 ) AS variants
             FROM vendor_products vp
@@ -1368,6 +1421,7 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                     v.id AS vendor_id,
                     v.company_name AS vendor_name,
                     vp.price,
+                    vp.discounted_price,
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
@@ -1397,6 +1451,7 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                     v.id AS vendor_id,
                     v.company_name AS vendor_name,
                     vp.price,
+                    vp.discounted_price,
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
@@ -1424,7 +1479,9 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
         const result = await pool.query(query, queryParams);
 
         const vendors = result.rows.map((row) => {
-            const price = Number(row.price) || 0;
+            const originalPrice = Number(row.price) || 0;
+            const discountedPrice = row.discounted_price !== null ? Number(row.discounted_price) : null;
+            const price = discountedPrice !== null && discountedPrice < originalPrice ? discountedPrice : originalPrice;
             const rating = Number(row.rating) || 0;
             const reviewCount = Number(row.review_count) || 0;
             const vendorLat = row.latitude !== null ? Number(row.latitude) : null;
@@ -1439,6 +1496,8 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
                 vendor_id: row.vendor_id,
                 vendor_name: row.vendor_name,
                 price,
+                original_price: originalPrice,
+                discounted_price: discountedPrice,
                 moq: row.moq,
                 stock_quantity: row.stock_quantity,
                 quotation_enabled: Boolean(row.quotation_enabled),
@@ -1559,6 +1618,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                         'vendor_product_id', vp.id,
                         'product_variant_id', vp.product_variant_id,
                         'price', vp.price,
+                        'discounted_price', vp.discounted_price,
                         'pending_price', vp.pending_price,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
@@ -1566,7 +1626,8 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                         'status', vp.status,
                         'gst_percentage', vp.gst_percentage,
                         'properties', pv.properties,
-                        'sku', pv.sku
+                        'sku', pv.sku,
+                        'name', pv.name
                     ) ORDER BY pv.created_at ASC
                 ) AS variants
             FROM vendor_products vp
@@ -1603,7 +1664,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
 
 export const updateVendorProductController = async (req: Request, res: Response): Promise<Response> => {
     const { productId } = req.params;
-    const { price, moq, stockQuantity, isActive, quotationEnabled, quotationMinQty, gstPercentage, productVariantId } = req.body;
+    const { price, moq, stockQuantity, isActive, quotationEnabled, quotationMinQty, gstPercentage, productVariantId, discountedPrice } = req.body;
     const { userId, role } = (req as any).user;
 
     if (!productId) {
@@ -1702,8 +1763,9 @@ export const updateVendorProductController = async (req: Request, res: Response)
                     quotation_enabled = $5,
                     quotation_min_qty = $6,
                     gst_percentage = COALESCE($7, gst_percentage),
+                    discounted_price = $8,
                     updated_at = NOW()
-                WHERE vendor_id = $8 AND ${productVariantId ? "product_variant_id" : "product_id"} = $9
+                WHERE vendor_id = $9 AND ${productVariantId ? "product_variant_id" : "product_id"} = $10
                 RETURNING *
             `;
             queryParams = [
@@ -1714,6 +1776,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 Boolean(quotationEnabled),
                 quotationMinQty ?? null,
                 gstPercentage !== undefined ? Number(gstPercentage) : null,
+                discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
                 vendorId,
                 productVariantId || productId
             ];
@@ -1728,8 +1791,9 @@ export const updateVendorProductController = async (req: Request, res: Response)
                     quotation_enabled = $5,
                     quotation_min_qty = $6,
                     gst_percentage = COALESCE($7, gst_percentage),
+                    discounted_price = $8,
                     updated_at = NOW()
-                WHERE vendor_id = $8 AND ${productVariantId ? "product_variant_id" : "product_id"} = $9
+                WHERE vendor_id = $9 AND ${productVariantId ? "product_variant_id" : "product_id"} = $10
                 RETURNING *
             `;
             queryParams = [
@@ -1740,6 +1804,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 Boolean(quotationEnabled),
                 quotationMinQty ?? null,
                 gstPercentage !== undefined ? Number(gstPercentage) : null,
+                discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
                 vendorId,
                 productVariantId || productId
             ];
@@ -2278,7 +2343,7 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
 };
 
 export const uploadProductImagesController = async (req: Request, res: Response): Promise<Response> => {
-    const { productId } = req.body;
+    const { productId, productVariantId } = req.body;
     const { userId, role } = (req as any).user;
     
     if (!productId) {
@@ -2346,12 +2411,12 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
                 // Insert into products_images
                 const insertQuery = `
-                    INSERT INTO products_images (product_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'image')
+                    INSERT INTO products_images (product_id, product_variant_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'image')
                     RETURNING *
                 `;
                 const fullUrl = `https://${BUCKET_NAME}.s3.${(process.env.AWS_REGION || "ap-south-1").trim()}.amazonaws.com/${fileName}`;
-                const values = [productId, fullUrl, isPrimary, i, approvalStatus, isApproved, userId];
+                const values = [productId, productVariantId || null, fullUrl, isPrimary, i, approvalStatus, isApproved, userId];
                 const result = await client.query(insertQuery, values);
                 uploadedImages.push(result.rows[0]);
             }
@@ -2374,12 +2439,12 @@ export const uploadProductImagesController = async (req: Request, res: Response)
 
                 // Insert into products_images with media_type = 'video'
                 const insertQuery = `
-                    INSERT INTO products_images (product_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
-                    VALUES ($1, $2, FALSE, 99, $3, $4, $5, 'video')
+                    INSERT INTO products_images (product_id, product_variant_id, image_url, is_primary, display_order, approval_status, is_approved, created_by_user_id, media_type)
+                    VALUES ($1, $2, $3, FALSE, 99, $4, $5, $6, 'video')
                     RETURNING *
                 `;
                 const fullUrl = `https://${BUCKET_NAME}.s3.${(process.env.AWS_REGION || "ap-south-1").trim()}.amazonaws.com/${fileName}`;
-                const values = [productId, fullUrl, approvalStatus, isApproved, userId];
+                const values = [productId, productVariantId || null, fullUrl, approvalStatus, isApproved, userId];
                 const result = await client.query(insertQuery, values);
                 uploadedImages.push(result.rows[0]);
             }
@@ -2415,7 +2480,7 @@ export const getProductTypes = async (_req: Request, res: Response): Promise<Res
 };
 
 export const addProductVariantController = async (req: Request, res: Response): Promise<Response> => {
-    const { productId, sku, properties } = req.body;
+    const { productId, sku, name, properties } = req.body;
     const { userId, role } = (req as any).user;
 
     if (!productId || !properties || typeof properties !== 'object') {
@@ -2440,21 +2505,30 @@ export const addProductVariantController = async (req: Request, res: Response): 
             return res.status(409).json({ message: "A variant with these exact properties already exists." });
         }
 
+        let finalName = name ? String(name).trim() : null;
+        if (!finalName && properties && typeof properties === 'object') {
+            finalName = Object.entries(properties)
+                .map(([key, val]) => `${key}: ${val}`)
+                .join(', ') || "Default Variation";
+        }
+
         const query = `
             INSERT INTO product_variants (
                 product_id,
                 sku,
+                name,
                 properties,
                 approval_status,
                 created_by_user_id,
                 is_active
             )
-            VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
             RETURNING *
         `;
         const values = [
             productId,
             sku || null,
+            finalName,
             JSON.stringify(properties),
             approvalStatus,
             userId,
@@ -2481,7 +2555,7 @@ export const getProductVariantsController = async (req: Request, res: Response):
 
     try {
         const result = await pool.query(
-            `SELECT id, product_id, sku, properties, approval_status, is_active 
+            `SELECT id, product_id, sku, name, properties, approval_status, is_active 
              FROM product_variants 
              WHERE product_id = $1 AND approval_status = 'approved' AND is_active = TRUE`,
             [productId]

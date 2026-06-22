@@ -1300,7 +1300,7 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                 p.name AS product_name,
                 p.category,
                 p.product_type,
-                pImg.image_url AS primary_image,
+                (SELECT image_url FROM products_images WHERE product_id = p.id AND is_primary = true LIMIT 1) AS primary_image,
                 p.approval_status,
                 p.approval_notes,
                 MIN(vp.created_at) AS created_date,
@@ -1323,7 +1323,6 @@ export const getVendorProductsController = async (req: Request, res: Response): 
             FROM vendor_products vp
             JOIN products p ON vp.product_id = p.id
             JOIN product_variants pv ON vp.product_variant_id = pv.id
-            LEFT JOIN products_images pImg ON p.id = pImg.product_id AND pImg.is_primary = true
             WHERE vp.vendor_id = $1
         `;
 
@@ -1370,7 +1369,7 @@ export const getVendorProductsController = async (req: Request, res: Response): 
             }
         }
 
-        query += ` GROUP BY p.id, p.name, p.category, p.product_type, pImg.image_url, p.approval_status, p.approval_notes`;
+        query += ` GROUP BY p.id, p.name, p.category, p.product_type, p.approval_status, p.approval_notes`;
         query += ` ORDER BY MIN(vp.created_at) DESC`;
 
         const result = await pool.query(query, values);
@@ -1602,17 +1601,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.quotation_limit,
                 p.vendor_can_set_quotation_limit,
                 ${approvedSpecificationsSelect},
-                COALESCE(
-                    JSON_AGG(
-                        DISTINCT JSONB_BUILD_OBJECT(
-                            'image_url', pImg.image_url,
-                            'is_primary', pImg.is_primary,
-                            'display_order', pImg.display_order,
-                            'media_type', pImg.media_type
-                        )
-                    ) FILTER (WHERE pImg.id IS NOT NULL),
-                    '[]'
-                ) AS images,
+                COALESCE(imgAgg.images, '[]'::jsonb) AS images,
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'vendor_product_id', vp.id,
@@ -1634,9 +1623,23 @@ export const getVendorProductByIdController = async (req: Request, res: Response
             JOIN products p ON vp.product_id = p.id
             JOIN product_variants pv ON vp.product_variant_id = pv.id
             ${approvedSpecificationsJoin}
-            LEFT JOIN products_images pImg ON p.id = pImg.product_id
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                    JSONB_AGG(
+                        JSONB_BUILD_OBJECT(
+                            'image_url', pi.image_url,
+                            'is_primary', pi.is_primary,
+                            'display_order', pi.display_order,
+                            'media_type', pi.media_type
+                        ) ORDER BY pi.display_order ASC, pi.created_at ASC
+                    ),
+                    '[]'::jsonb
+                ) AS images
+                FROM products_images pi
+                WHERE pi.product_id = p.id
+            ) imgAgg ON true
             WHERE vp.vendor_id = $1 AND vp.product_id = $2
-            GROUP BY p.id, specAgg.specifications, p.attributes
+            GROUP BY p.id, specAgg.specifications, p.attributes, imgAgg.images
         `;
 
         const result = await pool.query(query, [vendorId, productId]);

@@ -901,6 +901,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             const vendorsQuery = `
                 SELECT 
                     v.id AS vendor_id,
+                    vp.product_variant_id,
                     v.company_name AS vendor_name,
                     vp.price,
                     vp.discounted_price,
@@ -936,6 +937,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             const fallbackVendorsQuery = `
                 SELECT 
                     v.id AS vendor_id,
+                    vp.product_variant_id,
                     v.company_name AS vendor_name,
                     vp.price,
                     vp.discounted_price,
@@ -969,8 +971,9 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             const vendorIdsSeen = new Set<string>();
             for (const variant of variants) {
                 for (const vendor of variant.vendors) {
-                    if (!vendorIdsSeen.has(vendor.vendor_id)) {
-                        vendorIdsSeen.add(vendor.vendor_id);
+                    const vendorKey = `${vendor.vendor_id}-${vendor.product_variant_id || variant.variant_id}`;
+                    if (!vendorIdsSeen.has(vendorKey)) {
+                        vendorIdsSeen.add(vendorKey);
                         allVendors.push(vendor);
                     }
                 }

@@ -187,11 +187,11 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
         return res.status(401).json({ message: "User Id not found" });
     }
 
-    const { product_variant_id, vendor_id, quantity, cart_type } = req.body;
+    const { cart_item_id, product_variant_id, vendor_id, quantity, cart_type } = req.body;
     let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
 
-    if ((!product_variant_id && !product_id) || !vendor_id || !quantity || quantity < 1) {
+    if ((!cart_item_id && !product_variant_id && !product_id) || (!cart_item_id && !vendor_id) || !quantity || quantity < 1) {
         return res.status(400).json({ message: "product_variant_id (or product_id), vendor_id, and quantity (>=1) are required" });
     }
 
@@ -205,6 +205,19 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
             return res.status(404).json({ message: "Cart not found" });
         }
         const cartId = cartResult.rows[0].id;
+
+        if (cart_item_id) {
+            const updateResult = await pool.query(
+                `UPDATE cart_items SET quantity = $1, updated_at = NOW()
+                 WHERE id = $2 AND cart_id = $3
+                 RETURNING id`,
+                [quantity, cart_item_id, cartId]
+            );
+            if (updateResult.rows.length === 0) {
+                return res.status(404).json({ message: "Cart item not found" });
+            }
+            return res.status(200).json({ message: "Quantity updated" });
+        }
 
         let resolvedVariantId = product_variant_id;
         if (!resolvedVariantId) {
@@ -274,11 +287,11 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
         return res.status(401).json({ message: "User Id not found" });
     }
 
-    const { product_variant_id, vendor_id, cart_type } = req.body;
+    const { cart_item_id, product_variant_id, vendor_id, cart_type } = req.body;
     let product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
 
-    if ((!product_variant_id && !product_id) || !vendor_id) {
+    if ((!cart_item_id && !product_variant_id && !product_id) || (!cart_item_id && !vendor_id)) {
         return res.status(400).json({ message: "product_variant_id (or product_id) and vendor_id are required" });
     }
 
@@ -292,6 +305,17 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
             return res.status(404).json({ message: "Cart not found" });
         }
         const cartId = cartResult.rows[0].id;
+
+        if (cart_item_id) {
+            const deleteResult = await pool.query(
+                `DELETE FROM cart_items WHERE id = $1 AND cart_id = $2 RETURNING id`,
+                [cart_item_id, cartId]
+            );
+            if (deleteResult.rows.length === 0) {
+                return res.status(404).json({ message: "Cart item not found" });
+            }
+            return res.status(200).json({ message: "Item removed" });
+        }
 
         let resolvedVariantId = product_variant_id;
         if (!resolvedVariantId) {

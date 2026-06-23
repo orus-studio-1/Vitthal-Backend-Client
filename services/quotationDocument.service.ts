@@ -8,8 +8,8 @@ const COMPANY_LOGO_URL = "https://res.cloudinary.com/deudvpcgx/image/upload/v177
 const COMPANY_ADDRESS_LINE1 = "Plot No. 42, Bopodi Industrial Estate";
 const COMPANY_ADDRESS_LINE2 = "Bopodi, Pune, Maharashtra 411003";
 const COMPANY_PHONE = "+91 20 2588 0042";
-const COMPANY_EMAIL = "info@mtwogroups.com";
-const COMPANY_WEBSITE = "www.mtwogroups.com";
+const COMPANY_EMAIL = "info@mtwo.in";
+const COMPANY_WEBSITE = "https://mtwo.in";
 const COMPANY_GST = "27AADCM1234F1Z5";
 const GST_RATE = 18; // percent
 const VALIDITY_DAYS = 30;
@@ -141,10 +141,10 @@ export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Bu
                 vLineWidth: function () { return 0; },
                 hLineColor: function () { return "transparent"; },
                 vLineColor: function () { return "transparent"; },
-                paddingLeft: function() { return 0; },
-                paddingRight: function() { return 0; },
-                paddingTop: function() { return 0; },
-                paddingBottom: function() { return 0; },
+                paddingLeft: function () { return 0; },
+                paddingRight: function () { return 0; },
+                paddingTop: function () { return 0; },
+                paddingBottom: function () { return 0; },
                 fillColor: function () { return "#dcfce7"; }
             }
         });
@@ -223,12 +223,12 @@ export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Bu
             { canvas: [{ type: "line", x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 3, lineColor: "#166534" }], margin: [0, 0, 0, 15] },
 
             { text: "QUOTATION", fontSize: 24, bold: true, color: "#166534", alignment: "center", characterSpacing: 2 },
-            { 
-                text: isVendorVersion ? `Vendor Offer — ${data.vendorName}` : "Request for Quotation", 
-                fontSize: 10, 
-                color: "#9ca3af", 
-                alignment: "center", 
-                margin: [0, 4, 0, 20] 
+            {
+                text: isVendorVersion ? `Vendor Offer — ${data.vendorName}` : "Request for Quotation",
+                fontSize: 10,
+                color: "#9ca3af",
+                alignment: "center",
+                margin: [0, 4, 0, 20]
             },
 
             {
@@ -315,10 +315,10 @@ export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Bu
                     vLineWidth: function () { return 1; },
                     hLineColor: function () { return "#e5e7eb"; },
                     vLineColor: function () { return "#e5e7eb"; },
-                    paddingLeft: function() { return 12; },
-                    paddingRight: function() { return 12; },
-                    paddingTop: function() { return 8; },
-                    paddingBottom: function() { return 8; }
+                    paddingLeft: function () { return 12; },
+                    paddingRight: function () { return 12; },
+                    paddingTop: function () { return 8; },
+                    paddingBottom: function () { return 8; }
                 },
                 margin: [0, 0, 0, 20]
             },
@@ -497,7 +497,7 @@ export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Bu
     };
 
     const pdfDoc = await printer.createPdfKitDocument(docDefinition);
-    
+
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
         pdfDoc.on("data", (chunk: any) => chunks.push(chunk));

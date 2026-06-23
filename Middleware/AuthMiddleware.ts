@@ -1,8 +1,9 @@
 import type { Request, Response, NextFunction } from "express";
 import { generateAccessToken, verifyToken } from "../helpers/jwt.helper";
 import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
+import pool from "../DbConnect";
 
-export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const requestFrom = req.headers["x-request-from"];
         const authorization = req.headers.authorization;
@@ -17,12 +18,12 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
         if (requestFrom === "client") {
             const accessToken = usesHeaderAuth ? bearerToken : req.cookies.clientAccessToken;
             const refreshToken = usesHeaderAuth ? headerRefreshToken : req.cookies.clientRefreshToken;
-            return handleClientTokens(accessToken, refreshToken, req, res, next);
+            return await handleClientTokens(accessToken, refreshToken, req, res, next);
         }
         else if (requestFrom === "vendor") {
             const accessToken = usesHeaderAuth ? bearerToken : req.cookies.vendorAccessToken;
             const refreshToken = usesHeaderAuth ? headerRefreshToken : req.cookies.vendorRefreshToken;
-            return handleVendorTokens(accessToken, refreshToken, req, res, next);
+            return await handleVendorTokens(accessToken, refreshToken, req, res, next);
         }
         else {
             return res.status(400).json({ message: "Bad Request! Missing or invalid 'x-request-from' header." });
@@ -49,11 +50,18 @@ const generateNewAccessToken = (refreshToken: string) => {
 }
 
 
-const handleClientTokens = (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
+const handleClientTokens = async (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
     try {
         if (accessToken) {
             try {
                 const decoded = verifyToken(accessToken, "access", { logErrors: false });
+                
+                // Query database to verify if user's session is still active (refresh_token is not null/revoked)
+                const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
+                if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+                    throw new Error("Session has been logged out or is invalid");
+                }
+
                 (req as any).user = decoded;
                 return next();
             } catch (error) {
@@ -63,6 +71,13 @@ const handleClientTokens = (accessToken: string | undefined, refreshToken: strin
 
         if (refreshToken) {
             const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
+            
+            // Query database to verify if user's session is still active (refresh_token is not null/revoked)
+            const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
+            if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+                throw new Error("Session has been logged out or is invalid");
+            }
+
             const newAccessToken = generateNewAccessToken(refreshToken);
             res.cookie("clientAccessToken", newAccessToken, { ...COOKIE_OPTIONS, maxAge: 30 * 60 * 1000 });
             res.setHeader("x-access-token", newAccessToken);
@@ -84,11 +99,18 @@ const handleClientTokens = (accessToken: string | undefined, refreshToken: strin
     }
 }
 
-const handleVendorTokens = (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
+const handleVendorTokens = async (accessToken: string | undefined, refreshToken: string | undefined, req: Request, res: Response, next: NextFunction) => {
     try {
         if (accessToken) {
             try {
                 const decoded = verifyToken(accessToken, "access", { logErrors: false });
+                
+                // Query database to verify if user's session is still active (refresh_token is not null/revoked)
+                const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
+                if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+                    throw new Error("Session has been logged out or is invalid");
+                }
+
                 (req as any).user = decoded;
                 return next();
             } catch (error) {
@@ -98,6 +120,13 @@ const handleVendorTokens = (accessToken: string | undefined, refreshToken: strin
 
         if (refreshToken) {
             const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
+            
+            // Query database to verify if user's session is still active (refresh_token is not null/revoked)
+            const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
+            if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+                throw new Error("Session has been logged out or is invalid");
+            }
+
             const newAccessToken = generateNewAccessToken(refreshToken);
             res.cookie("vendorAccessToken", newAccessToken, { ...COOKIE_OPTIONS, maxAge: 30 * 60 * 1000 });
             res.setHeader("x-access-token", newAccessToken);

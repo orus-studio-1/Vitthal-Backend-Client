@@ -342,17 +342,17 @@ export const OTPVerificationController = async (req: Request, res: Response): Pr
         }
 
         // Compare input OTP with stored hashed OTP
-        // const isOTPValid = await bcrypt.compare(otp, storedHashedOTP);
-        const isOTPValid = true
+        const isOTPValid = await bcrypt.compare(otp, storedHashedOTP);
 
         if (!isOTPValid) {
             return res.status(401).json({ message: 'Invalid OTP' });
         }
 
-        // Clear OTP fields after successful verification
+        // Set OTP = 'VERIFIED' with a 10-minute expiry window for password reset
+        const verificationExpiry = new Date(Date.now() + 10 * 60 * 1000);
         await pool.query(
-            'UPDATE users SET OTP = NULL, OTP_Expiry = NULL WHERE email = $1',
-            [email]
+            'UPDATE users SET OTP = $1, OTP_Expiry = $2 WHERE email = $3',
+            ['VERIFIED', verificationExpiry, email]
         );
 
         return res.status(200).json({
@@ -697,18 +697,36 @@ export const resetPasswordController = async (req: Request, res: Response) => {
     }
 
     try {
+        // Retrieve current OTP status
+        const userResult = await pool.query(
+            'SELECT OTP, OTP_Expiry FROM users WHERE email = $1',
+            [email]
+        );
+
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const user = userResult.rows[0];
+        
+        // Ensure OTP has been verified
+        if (user.otp !== 'VERIFIED') {
+            return res.status(400).json({ message: 'OTP must be verified before resetting password' });
+        }
+
+        // Ensure the verification has not expired
+        if (!user.otp_expiry || new Date() > new Date(user.otp_expiry)) {
+            return res.status(400).json({ message: 'Verification window has expired. Please verify OTP again.' });
+        }
+
         // Hash the new password
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Update user password
-        const result = await pool.query(
-            'UPDATE users SET password_hash = $1 WHERE email = $2 RETURNING id, email',
+        // Update user password and clear verification status
+        await pool.query(
+            'UPDATE users SET password_hash = $1, OTP = NULL, OTP_Expiry = NULL WHERE email = $2',
             [hashedPassword, email]
         );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'User not found' });
-        }
 
         return res.status(200).json({
             message: 'Password reset successfully',

@@ -226,23 +226,47 @@ export async function logoutUser(req: Request, res: Response): Promise<Response>
     const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
         ? req.headers['x-refresh-token']
         : undefined;
-    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken` || 'vendorRefreshToken']
+    const refreshToken = req.cookies[`${isRequestFrom}RefreshToken`]
+        || req.cookies['vendorRefreshToken']
         || req.cookies['clientRefreshToken']
         || req.body?.refreshToken
         || headerRefreshToken;
 
-    if (!refreshToken) {
-        return res.status(200).json({ message: 'Logout successful (cookies cleared)' });
+    const authHeader = req.headers.authorization;
+    const usesHeader = typeof authHeader === "string";
+    const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7).trim() : undefined;
+    const accessToken = usesHeader ? bearer : (req.cookies[`${isRequestFrom}AccessToken`] || req.cookies['vendorAccessToken'] || req.cookies['clientAccessToken']);
+
+    let userId: string | undefined;
+
+    // 1. Try to extract userId from access token
+    if (accessToken) {
+        try {
+            const decoded = verifyToken(accessToken, 'access', { logErrors: false });
+            userId = decoded.userId;
+        } catch (err) {
+            // Ignore token verification errors
+        }
+    }
+
+    // 2. Try to extract userId from refresh token
+    if (refreshToken) {
+        try {
+            const decoded = verifyToken(refreshToken, 'refresh', { logErrors: false });
+            userId = userId || decoded.userId;
+        } catch (err) {
+            // Ignore
+        }
     }
 
     try {
-        const isVerified = verifyToken(refreshToken, 'refresh');
-        if (!isVerified) {
-            return res.status(200).json({ message: 'Logout successful (cookies cleared, token invalid)' });
+        if (userId) {
+            // If we have a verified userId, clear their refresh token from the database directly
+            await pool.query('UPDATE users SET refresh_token = NULL WHERE id = $1', [userId]);
+        } else if (refreshToken) {
+            // Fallback: clear by refresh token value
+            await pool.query('UPDATE users SET refresh_token = NULL WHERE refresh_token = $1', [refreshToken]);
         }
-
-        // Clear refresh token from database
-        await pool.query('UPDATE users SET refresh_token = NULL WHERE refresh_token = $1', [refreshToken]);
 
         return res.status(200).json({ message: 'Logout successful' });
     }

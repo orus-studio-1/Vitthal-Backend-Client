@@ -6,7 +6,7 @@ import pool from "../DbConnect";
 import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
 import { sendOTPEmail } from "../helpers/emailService.helper";
 
-const validUserRoles = new Set(["client", "vendor", "admin", "super_admin"]);
+const validUserRoles = new Set(["client", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
 
 function normalizeRequiredText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
@@ -212,15 +212,19 @@ export async function logoutUser(req: Request, res: Response): Promise<Response>
     const isRequestFrom = req.headers['x-request-from'] || '';
     
     // Always clear cookies for the requesting role so the client is guaranteed to be logged out
-    if (isRequestFrom === 'vendor' || isRequestFrom === 'client') {
+    if (typeof isRequestFrom === 'string' && isRequestFrom.trim() !== '') {
         res.clearCookie(`${isRequestFrom}RefreshToken`, COOKIE_OPTIONS);
         res.clearCookie(`${isRequestFrom}AccessToken`, COOKIE_OPTIONS);
     } else {
-        // Fallback: clear both to be safe
+        // Fallback: clear all known role cookies to be safe
         res.clearCookie('vendorRefreshToken', COOKIE_OPTIONS);
         res.clearCookie('vendorAccessToken', COOKIE_OPTIONS);
         res.clearCookie('clientRefreshToken', COOKIE_OPTIONS);
         res.clearCookie('clientAccessToken', COOKIE_OPTIONS);
+        res.clearCookie('fulfillment_centerRefreshToken', COOKIE_OPTIONS);
+        res.clearCookie('fulfillment_centerAccessToken', COOKIE_OPTIONS);
+        res.clearCookie('delivery_agentRefreshToken', COOKIE_OPTIONS);
+        res.clearCookie('delivery_agentAccessToken', COOKIE_OPTIONS);
     }
 
     const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'

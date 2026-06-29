@@ -12,6 +12,8 @@ export async function ensureMarketplaceSchema() {
             END IF;
         END $$;
 
+        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'fulfillment_center';
+
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'cart_type') THEN
@@ -322,6 +324,33 @@ export async function ensureMarketplaceSchema() {
                 REFERENCES users(id)
                 ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS fulfillment_centers (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                code TEXT NOT NULL UNIQUE,
+                contact_phone TEXT,
+                contact_email CITEXT,
+                manager_name TEXT,
+                address TEXT NOT NULL,
+                city TEXT NOT NULL,
+                state TEXT NOT NULL,
+                country TEXT NOT NULL,
+                pincode VARCHAR(6) NOT NULL CHECK (pincode ~ '^[0-9]{6}$'),
+                latitude DOUBLE PRECISION CHECK (latitude BETWEEN -90 AND 90),
+                longitude DOUBLE PRECISION CHECK (longitude BETWEEN -180 AND 180),
+                total_area_sqft NUMERIC(10,2),
+                capacity_packages INTEGER,
+                storage_type TEXT,
+                operating_hours TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fulfillment_centers_user_id ON fulfillment_centers(user_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_centers_code ON fulfillment_centers(code);
 
         ALTER TABLE products
             ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved',

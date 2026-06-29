@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
-import { getPresignedUrlOrOriginal } from "../services/s3.service";
+import { getPresignedUrlOrOriginal, uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 
 async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.gst_certificate_link) {
@@ -9,7 +9,39 @@ async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.vendor_gst_certificate_link) {
         vendor.vendor_gst_certificate_link = await getPresignedUrlOrOriginal(vendor.vendor_gst_certificate_link);
     }
+    if (vendor && vendor.vendor_signature_image_link) {
+        vendor.vendor_signature_image_link = await getPresignedUrlOrOriginal(vendor.vendor_signature_image_link);
+    }
     return vendor;
+}
+
+const signatureImageMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+
+function getUploadedFile(req: Request, fieldName: string): Express.Multer.File | undefined {
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    return files?.[fieldName]?.[0];
+}
+
+function safeFileExtension(file: Express.Multer.File) {
+    const extension = file.originalname.includes(".")
+        ? file.originalname.split(".").pop()?.toLowerCase()
+        : file.mimetype.split("/").pop();
+    return extension && /^[a-z0-9]+$/.test(extension) ? extension : "jpg";
+}
+
+async function uploadSignatureImage(file?: Express.Multer.File) {
+    if (!file) {
+        return "";
+    }
+    if (!signatureImageMimeTypes.has(file.mimetype)) {
+        throw new Error("Signature image must be a JPG, PNG, or WEBP file.");
+    }
+    if (!BUCKET_NAME) {
+        throw new Error("AWS_BUCKET_NAME is not configured.");
+    }
+    const key = `vendor-registration/signature-images/${Date.now()}_${Math.random().toString(36).slice(2, 10)}.${safeFileExtension(file)}`;
+    const uploaded = await uploadBufferToS3(file.buffer, key, file.mimetype);
+    return uploaded.s3Key;
 }
 
 
@@ -494,6 +526,7 @@ export const completeVendorSetupController = async (req: Request, res: Response)
     const normalizedCountry = normalizeRequiredText(country);
     const normalizedPincode = normalizeRequiredText(pincode);
     const normalizedCreditCycle = normalizeRequiredText(creditCycle);
+    const signatureImageFile = getUploadedFile(req, "signatureImage");
 
     const parsedLatitude = parseCoordinate(latitude);
     const parsedLongitude = parseCoordinate(longitude);
@@ -575,6 +608,19 @@ export const completeVendorSetupController = async (req: Request, res: Response)
             return res.status(409).json({ message: "This GST number is already registered with another vendor." });
         }
 
+        const existingVendor = await client.query(
+            `SELECT vendor_signature_image_link FROM vendors WHERE user_id = $1`,
+            [userId]
+        );
+        const existingSignatureImageLink = normalizeRequiredText(existingVendor.rows[0]?.vendor_signature_image_link);
+        const uploadedSignatureImageLink = await uploadSignatureImage(signatureImageFile);
+        const finalSignatureImageLink = uploadedSignatureImageLink || existingSignatureImageLink;
+
+        if (!finalSignatureImageLink) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "Signature image is required." });
+        }
+
         const appNumber = `APP-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.floor(1000 + Math.random() * 9000)}`;
         const vendorResult = await client.query(
             `
@@ -583,6 +629,7 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                     company_name,
                     gst_number,
                     gst_certificate_link,
+                    vendor_signature_image_link,
                     business_type,
                     company_website,
                     phone,
@@ -598,12 +645,13 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                     application_number,
                     updated_at
                 )
-                VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', NULL, $14, NOW())
+                VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11, $12, $13, $14, 'pending', 'Awaiting admin approval', NULL, $15, NOW())
                 ON CONFLICT (user_id)
                 DO UPDATE SET
                     company_name = EXCLUDED.company_name,
                     gst_number = EXCLUDED.gst_number,
                     gst_certificate_link = EXCLUDED.gst_certificate_link,
+                    vendor_signature_image_link = EXCLUDED.vendor_signature_image_link,
                     business_type = EXCLUDED.business_type,
                     company_website = EXCLUDED.company_website,
                     phone = EXCLUDED.phone,
@@ -625,6 +673,7 @@ export const completeVendorSetupController = async (req: Request, res: Response)
                 normalizedCompanyName,
                 normalizedGstNumber,
                 normalizedGstCertificateLink,
+                finalSignatureImageLink,
                 normalizedBusinessType,
                 normalizedCompanyWebsite,
                 normalizedPhone,
@@ -766,6 +815,7 @@ export const getVendorDetailsController = async (req: Request, res: Response): P
                 v.company_name as vendor_company_name,
                 v.gst_number as vendor_gst_number,
                 v.gst_certificate_link as vendor_gst_certificate_link,
+                v.vendor_signature_image_link as vendor_signature_image_link,
                 v.business_type as vendor_business_type,
                 v.company_website as vendor_company_website,
                 v.alternative_number as vendor_alternative_number,

@@ -5,8 +5,11 @@ import { generateAccessToken, generateRefreshToken, verifyToken } from "../helpe
 import pool from "../DbConnect";
 import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
 import { sendOTPEmail } from "../helpers/emailService.helper";
+import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 
 const validUserRoles = new Set(["client", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
+const gstDocumentMimeTypes = new Set(["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"]);
+const signatureImageMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
 
 function normalizeRequiredText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
@@ -22,6 +25,15 @@ function parseCoordinate(value: unknown) {
 }
 
 function normalizeCategoryCodes(value: unknown) {
+    if (typeof value === "string") {
+        try {
+            const parsed = JSON.parse(value);
+            return normalizeCategoryCodes(parsed);
+        } catch {
+            return value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+        }
+    }
+
     if (!Array.isArray(value)) {
         return [] as string[];
     }
@@ -30,6 +42,39 @@ function normalizeCategoryCodes(value: unknown) {
         .filter((item): item is string => typeof item === "string")
         .map((item) => item.trim().toLowerCase())
         .filter((item) => item.length > 0);
+}
+
+function getUploadedFile(req: Request, fieldName: string): Express.Multer.File | undefined {
+    const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+    return files?.[fieldName]?.[0];
+}
+
+function safeFileExtension(file: Express.Multer.File) {
+    const extension = file.originalname.includes(".")
+        ? file.originalname.split(".").pop()?.toLowerCase()
+        : file.mimetype.split("/").pop();
+    return extension && /^[a-z0-9]+$/.test(extension) ? extension : "bin";
+}
+
+async function uploadRegistrationFile(file: Express.Multer.File | undefined, options: { fieldLabel: string; folder: string; allowedTypes: Set<string>; required: boolean }) {
+    if (!file) {
+        if (options.required) {
+            throw new Error(`${options.fieldLabel} is required.`);
+        }
+        return "";
+    }
+
+    if (!options.allowedTypes.has(file.mimetype)) {
+        throw new Error(`${options.fieldLabel} must be a valid ${options.fieldLabel.toLowerCase().includes("signature") ? "JPG, PNG, or WEBP image" : "PDF or image"} file.`);
+    }
+
+    if (!BUCKET_NAME) {
+        throw new Error("AWS_BUCKET_NAME is not configured.");
+    }
+
+    const key = `vendor-registration/${options.folder}/${Date.now()}_${Math.random().toString(36).slice(2, 10)}.${safeFileExtension(file)}`;
+    const uploaded = await uploadBufferToS3(file.buffer, key, file.mimetype);
+    return uploaded.s3Key;
 }
 
 export async function registerUser(req: Request, res: Response): Promise<Response> {
@@ -447,6 +492,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         const normalizedGstNumber = normalizeRequiredText(req.body.gstNumber);
         const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
         const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
+        const gstCertificateFile = getUploadedFile(req, "gstCertificate");
+        const signatureImageFile = getUploadedFile(req, "signatureImage");
         const normalizedPhone = normalizeRequiredText(req.body.phone);
         const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
         const normalizedDesignation = normalizeRequiredText(req.body.designation);
@@ -478,7 +525,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             normalizedGstCertificateLink,
             normalizedAlternativeNumber,
             normalizedCreditCycle,
-        ].some((value) => value.length > 0) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
+        ].some((value) => value.length > 0) || Boolean(gstCertificateFile) || Boolean(signatureImageFile) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
 
         if (shouldPersistVendorSetup) {
             if (
@@ -497,9 +544,11 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 parsedMinCommission === null ||
                 parsedMaxCommission === null ||
                 parsedLatitude === null ||
-                parsedLongitude === null
+                parsedLongitude === null ||
+                !gstCertificateFile ||
+                !signatureImageFile
             ) {
-                return res.status(400).json({ message: "Missing vendor setup fields. All fields including commission details are required." });
+                return res.status(400).json({ message: "Missing vendor setup fields. All fields, GST certificate, signature image, and commission details are required." });
             }
 
             if (!/^\d{6}$/.test(normalizedPincode)) {
@@ -564,6 +613,19 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                     return res.status(409).json({ message: "This GST number is already registered with another vendor." });
                 }
 
+                const uploadedGstCertificateLink = await uploadRegistrationFile(gstCertificateFile, {
+                    fieldLabel: "GST certificate",
+                    folder: "gst-certificates",
+                    allowedTypes: gstDocumentMimeTypes,
+                    required: true,
+                });
+                const uploadedSignatureImageLink = await uploadRegistrationFile(signatureImageFile, {
+                    fieldLabel: "Signature image",
+                    folder: "signature-images",
+                    allowedTypes: signatureImageMimeTypes,
+                    required: true,
+                });
+
                 await client.query(
                     `
                             INSERT INTO vendors (
@@ -571,6 +633,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 company_name,
                                 gst_number,
                                 gst_certificate_link,
+                                vendor_signature_image_link,
                                 business_type,
                                 company_website,
                                 phone,
@@ -585,12 +648,13 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 application_number,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11, $12, $13, $14, 'pending', 'Awaiting admin approval', $15, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
                                 gst_number = EXCLUDED.gst_number,
                                 gst_certificate_link = EXCLUDED.gst_certificate_link,
+                                vendor_signature_image_link = EXCLUDED.vendor_signature_image_link,
                                 business_type = EXCLUDED.business_type,
                                 company_website = EXCLUDED.company_website,
                                 phone = EXCLUDED.phone,
@@ -609,7 +673,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         user.id,
                         normalizedCompanyName,
                         normalizedGstNumber,
-                        normalizedGstCertificateLink,
+                        uploadedGstCertificateLink,
+                        uploadedSignatureImageLink,
                         normalizedBusinessType,
                         normalizedCompanyWebsite,
                         normalizedPhone,

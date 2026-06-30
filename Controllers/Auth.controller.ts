@@ -9,7 +9,6 @@ import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 
 const validUserRoles = new Set(["client", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
 const gstDocumentMimeTypes = new Set(["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"]);
-const signatureImageMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
 
 function normalizeRequiredText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
@@ -497,7 +496,6 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
         const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
         const gstCertificateFile = getUploadedFile(req, "gstCertificate");
-        const signatureImageFile = getUploadedFile(req, "signatureImage");
         const normalizedPhone = normalizeRequiredText(req.body.phone);
         const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
         const normalizedDesignation = normalizeRequiredText(req.body.designation);
@@ -529,7 +527,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             normalizedGstCertificateLink,
             normalizedAlternativeNumber,
             normalizedCreditCycle,
-        ].some((value) => value.length > 0) || Boolean(gstCertificateFile) || Boolean(signatureImageFile) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
+        ].some((value) => value.length > 0) || Boolean(gstCertificateFile) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
 
         if (shouldPersistVendorSetup) {
             if (
@@ -549,10 +547,9 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 parsedMaxCommission === null ||
                 parsedLatitude === null ||
                 parsedLongitude === null ||
-                !gstCertificateFile ||
-                !signatureImageFile
+                (!gstCertificateFile && !normalizedGstCertificateLink)
             ) {
-                return res.status(400).json({ message: "Missing vendor setup fields. All fields, GST certificate, signature image, and commission details are required." });
+                return res.status(400).json({ message: "Missing vendor setup fields. All fields, GST certificate, and commission details are required." });
             }
 
             if (!/^\d{6}$/.test(normalizedPincode)) {
@@ -617,18 +614,12 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                     return res.status(409).json({ message: "This GST number is already registered with another vendor." });
                 }
 
-                const uploadedGstCertificateLink = await uploadRegistrationFile(gstCertificateFile, {
+                const uploadedGstCertificateLink = gstCertificateFile ? await uploadRegistrationFile(gstCertificateFile, {
                     fieldLabel: "GST certificate",
                     folder: "gst-certificates",
                     allowedTypes: gstDocumentMimeTypes,
                     required: true,
-                });
-                const uploadedSignatureImageLink = await uploadRegistrationFile(signatureImageFile, {
-                    fieldLabel: "Signature image",
-                    folder: "signature-images",
-                    allowedTypes: signatureImageMimeTypes,
-                    required: true,
-                });
+                }) : normalizedGstCertificateLink;
 
                 await client.query(
                     `
@@ -637,7 +628,6 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 company_name,
                                 gst_number,
                                 gst_certificate_link,
-                                vendor_signature_image_link,
                                 business_type,
                                 company_website,
                                 phone,
@@ -652,13 +642,12 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 application_number,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, $11, $12, $13, $14, 'pending', 'Awaiting admin approval', $15, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
                                 gst_number = EXCLUDED.gst_number,
                                 gst_certificate_link = EXCLUDED.gst_certificate_link,
-                                vendor_signature_image_link = EXCLUDED.vendor_signature_image_link,
                                 business_type = EXCLUDED.business_type,
                                 company_website = EXCLUDED.company_website,
                                 phone = EXCLUDED.phone,
@@ -678,7 +667,6 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         normalizedCompanyName,
                         normalizedGstNumber,
                         uploadedGstCertificateLink,
-                        uploadedSignatureImageLink,
                         normalizedBusinessType,
                         normalizedCompanyWebsite,
                         normalizedPhone,

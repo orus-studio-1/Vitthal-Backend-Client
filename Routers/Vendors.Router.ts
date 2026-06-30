@@ -1,5 +1,4 @@
 import { Router } from "express";
-import multer from "multer";
 
 import { addVendorController, createVendorAddress, getVendorCategoriesController, getVendorDetailsController, updateVendorAddress, updateVendorBasicDetailsController, completeVendorSetupController, getVendorIdStatusController, checkVendorSetupStatus, lookupPincodeController } from "../Controllers/Vendors.Controller";
 import { getVendorDashboardController, getVendorAnalyticsController } from "../Controllers/VendorDashboard.Controller";
@@ -9,17 +8,11 @@ import { authMiddleware } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
 
 const vendorsRouter = Router();
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 5 * 1024 * 1024,
-    },
-});
 vendorsRouter.get("/pincode/:pincode", lookupPincodeController);
 vendorsRouter.use(authMiddleware);
 
 vendorsRouter.post("/createVendor", addVendorController);
-vendorsRouter.post("/completeSetup", upload.fields([{ name: "signatureImage", maxCount: 1 }]), completeVendorSetupController);
+vendorsRouter.post("/completeSetup", completeVendorSetupController);
 vendorsRouter.put("/updateVendorBasicDetails", updateVendorBasicDetailsController);
 vendorsRouter.post("/createVendorAddress", createVendorAddress);
 vendorsRouter.put("/updateVendorAddress", updateVendorAddress);

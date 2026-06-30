@@ -1007,7 +1007,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
             id: row.id,
             role: row.role,
             vendor_id: row.vendor_id ?? null,
-            approval_status: row.approval_status ?? "pending",
+            approval_status: row.vendor_id ? (row.approval_status ?? "pending") : "setup_required",
             application_number: row.application_number ?? null,
             is_active: row.is_active ?? true,
             is_blocked: row.is_blocked ?? false,

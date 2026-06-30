@@ -204,6 +204,10 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
         if (user.role != role)
             return res.status(401).json({ message: `This email is associated with ${user.role} and you are trying to log in as ${role}! That is not allowed.` });
 
+        if (!user.is_verified) {
+            return res.status(403).json({ message: 'Please verify your email before logging in.' });
+        }
+
         const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
         if (!isPasswordValid) {

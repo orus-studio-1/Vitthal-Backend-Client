@@ -350,6 +350,26 @@ export async function ensureMarketplaceSchema() {
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
+            ALTER TABLE fulfillment_centers
+                ADD COLUMN IF NOT EXISTS code TEXT,
+                ADD COLUMN IF NOT EXISTS contact_phone TEXT,
+                ADD COLUMN IF NOT EXISTS contact_email CITEXT,
+                ADD COLUMN IF NOT EXISTS manager_name TEXT,
+                ADD COLUMN IF NOT EXISTS total_area_sqft NUMERIC(10,2),
+                ADD COLUMN IF NOT EXISTS capacity_packages INTEGER,
+                ADD COLUMN IF NOT EXISTS storage_type TEXT,
+                ADD COLUMN IF NOT EXISTS operating_hours TEXT,
+                ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+            UPDATE fulfillment_centers
+            SET code = 'FC-' || substr(id::text, 1, 8)
+            WHERE code IS NULL OR btrim(code) = '';
+
+            ALTER TABLE fulfillment_centers
+                ALTER COLUMN code SET NOT NULL;
+
             CREATE INDEX IF NOT EXISTS idx_fulfillment_centers_user_id ON fulfillment_centers(user_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_centers_code ON fulfillment_centers(code);
 
@@ -392,6 +412,7 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS reconsideration_notes TEXT,
             ADD COLUMN IF NOT EXISTS review_count INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS gst_certificate_link TEXT,
+            ADD COLUMN IF NOT EXISTS vendor_signature_image_link TEXT,
             ADD COLUMN IF NOT EXISTS business_type TEXT,
             ADD COLUMN IF NOT EXISTS company_website TEXT,
             ADD COLUMN IF NOT EXISTS alternative_number TEXT,
@@ -450,10 +471,25 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS images TEXT[] DEFAULT '{}';
 
         ALTER TABLE product_category
+            ADD COLUMN IF NOT EXISTS code TEXT,
+            ADD COLUMN IF NOT EXISTS label TEXT,
             ADD COLUMN IF NOT EXISTS image TEXT NOT NULL DEFAULT '',
             ADD COLUMN IF NOT EXISTS min_commision_percentage INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS max_commision_percentage INTEGER NOT NULL DEFAULT 10;
 
+        UPDATE product_category
+        SET code = 'category-' || substr(id::text, 1, 8)
+        WHERE code IS NULL OR btrim(code) = '';
+
+        UPDATE product_category
+        SET label = code
+        WHERE label IS NULL OR btrim(label) = '';
+
+        ALTER TABLE product_category
+            ALTER COLUMN code SET NOT NULL,
+            ALTER COLUMN label SET NOT NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_code ON product_category(code);
 
         DO $$
         BEGIN

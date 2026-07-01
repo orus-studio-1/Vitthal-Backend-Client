@@ -35,6 +35,56 @@ const approvedSpecificationsJoin = `
             ) specAgg ON true
         `;
 
+function readVariantProperty(properties: unknown, keys: string[]) {
+    if (!properties || typeof properties !== "object") {
+        return null;
+    }
+
+    const record = properties as Record<string, unknown>;
+    const normalizedEntries = Object.entries(record).map(([key, value]) => [key.toLowerCase().replace(/[\s_-]+/g, ""), value] as const);
+    for (const key of keys) {
+        const normalizedKey = key.toLowerCase().replace(/[\s_-]+/g, "");
+        const match = normalizedEntries.find(([entryKey]) => entryKey === normalizedKey);
+        if (match && match[1] !== undefined && match[1] !== null && String(match[1]).trim() !== "") {
+            return String(match[1]).trim();
+        }
+    }
+
+    return null;
+}
+
+function normalizeOffer(row: any) {
+    const originalPrice = Number(row.price) || 0;
+    const discountedPrice = row.discounted_price !== null && row.discounted_price !== undefined ? Number(row.discounted_price) : null;
+    const activePrice = discountedPrice !== null && discountedPrice > 0 && discountedPrice < originalPrice ? discountedPrice : originalPrice;
+    const gstPercentage = row.gst_percentage !== null && row.gst_percentage !== undefined ? Number(row.gst_percentage) : 0;
+    const moq = Number(row.moq) || 1;
+
+    return {
+        vendor_product_id: row.vendor_product_id,
+        vendor_id: row.vendor_id,
+        product_variant_id: row.product_variant_id || null,
+        vendor_name: row.vendor_name,
+        price: activePrice,
+        original_price: originalPrice,
+        discounted_price: discountedPrice,
+        gst_percentage: gstPercentage,
+        unit_price_with_gst: activePrice + (activePrice * gstPercentage / 100),
+        moq,
+        stock_quantity: Number(row.stock_quantity) || 0,
+        quotation_enabled: Boolean(row.quotation_enabled),
+        quotation_min_qty: row.quotation_min_qty !== null && row.quotation_min_qty !== undefined ? Number(row.quotation_min_qty) : null,
+        rating: Number(row.rating) || 0,
+        review_count: Number(row.review_count) || 0,
+        latitude: row.latitude !== null && row.latitude !== undefined ? Number(row.latitude) : null,
+        longitude: row.longitude !== null && row.longitude !== undefined ? Number(row.longitude) : null,
+        city: row.city,
+        state: row.state,
+        delivery_lead_time: row.city || row.state ? "2-5 business days" : "Confirm with vendor",
+        is_verified: true,
+    };
+}
+
 function normalizeSpecificationEntries(
     specifications: unknown,
     defaultApprovalStatus: "pending" | "approved"
@@ -845,8 +895,11 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.name AS product_name,
                 p.description,
                 pc.code AS category,
+                pc.label AS category_name,
                 p.product_type,
+                p.item_code AS product_code,
                 p.attributes,
+                p.attributes->>'brand' AS brand,
                 p.attributes->>'material' AS material,
                 p.attributes->>'grade' AS grade,
                 p.attributes->>'application' AS application,
@@ -888,18 +941,33 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
             ? "approval_status != 'rejected'"
             : "(approval_status = 'approved' AND is_active = TRUE) OR (id IN (SELECT DISTINCT product_variant_id FROM vendor_products WHERE product_id = $1 AND is_active = true))";
         const variantsQuery = `
-            SELECT id AS variant_id, sku, name AS variant_name, properties, approval_status
+            SELECT
+                id AS variant_id,
+                sku,
+                name AS variant_name,
+                properties,
+                properties->>'modelNo' AS model_no,
+                properties->>'model_no' AS model_no_alt,
+                properties->>'size' AS size,
+                properties->>'variant' AS variant_label,
+                approval_status
             FROM product_variants
             WHERE product_id = $1 AND (${variantApprovalCondition})
             ORDER BY created_at ASC
         `;
         const variantsRes = await pool.query(variantsQuery, [productId]);
-        const variants = variantsRes.rows;
+        const variants = variantsRes.rows.map((variant) => ({
+            ...variant,
+            model_no: variant.model_no || variant.model_no_alt || readVariantProperty(variant.properties, ["modelNo", "model_no", "model", "model number", "modelNumber"]),
+            size: variant.size || readVariantProperty(variant.properties, ["size", "dimension", "dimensions"]),
+            variant_label: variant.variant_label || readVariantProperty(variant.properties, ["variant", "color", "type", "finish", "grade"]),
+        }));
 
         // For each variant, fetch the associated vendor products
         for (const variant of variants) {
             const vendorsQuery = `
                 SELECT 
+                    vp.id AS vendor_product_id,
                     v.id AS vendor_id,
                     vp.product_variant_id,
                     v.company_name AS vendor_name,
@@ -908,6 +976,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
+                    vp.quotation_min_qty,
                     vp.gst_percentage,
                     v.rating,
                     v.review_count,
@@ -928,7 +997,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 ORDER BY vp.price ASC
             `;
             const vendorsRes = await pool.query(vendorsQuery, [variant.variant_id]);
-            variant.vendors = vendorsRes.rows;
+            variant.vendors = vendorsRes.rows.map(normalizeOffer);
         }
 
         product.variants = variants;
@@ -936,6 +1005,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
         if (variants.length === 0) {
             const fallbackVendorsQuery = `
                 SELECT 
+                    vp.id AS vendor_product_id,
                     v.id AS vendor_id,
                     vp.product_variant_id,
                     v.company_name AS vendor_name,
@@ -944,6 +1014,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                     vp.moq,
                     vp.stock_quantity,
                     vp.quotation_enabled,
+                    vp.quotation_min_qty,
                     vp.gst_percentage,
                     v.rating,
                     v.review_count,
@@ -964,7 +1035,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 ORDER BY vp.price ASC
             `;
             const fallbackVendorsRes = await pool.query(fallbackVendorsQuery, [productId]);
-            product.vendors = fallbackVendorsRes.rows;
+            product.vendors = fallbackVendorsRes.rows.map(normalizeOffer);
         } else {
             // Provide a flat list of all vendors across all variants for fallback/legacy compatibility
             const allVendors: any[] = [];
@@ -1420,7 +1491,9 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
         if (variantId) {
             query = `
                 SELECT
+                    vp.id AS vendor_product_id,
                     v.id AS vendor_id,
+                    vp.product_variant_id,
                     v.company_name AS vendor_name,
                     vp.price,
                     vp.discounted_price,
@@ -1450,7 +1523,9 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
         } else {
             query = `
                 SELECT
+                    vp.id AS vendor_product_id,
                     v.id AS vendor_id,
+                    vp.product_variant_id,
                     v.company_name AS vendor_name,
                     vp.price,
                     vp.discounted_price,
@@ -1495,7 +1570,9 @@ export const getRankedVendors = async (req: Request, res: Response): Promise<Res
             }
 
             return {
+                vendor_product_id: row.vendor_product_id,
                 vendor_id: row.vendor_id,
+                product_variant_id: row.product_variant_id || null,
                 vendor_name: row.vendor_name,
                 price,
                 original_price: originalPrice,

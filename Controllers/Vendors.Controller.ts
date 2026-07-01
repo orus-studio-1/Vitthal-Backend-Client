@@ -9,9 +9,11 @@ async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.vendor_gst_certificate_link) {
         vendor.vendor_gst_certificate_link = await getPresignedUrlOrOriginal(vendor.vendor_gst_certificate_link);
     }
+    if (vendor && vendor.vendor_signature_image_link) {
+        vendor.vendor_signature_image_link = await getPresignedUrlOrOriginal(vendor.vendor_signature_image_link);
+    }
     return vendor;
 }
-
 
 function normalizeRequiredText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
@@ -766,6 +768,7 @@ export const getVendorDetailsController = async (req: Request, res: Response): P
                 v.company_name as vendor_company_name,
                 v.gst_number as vendor_gst_number,
                 v.gst_certificate_link as vendor_gst_certificate_link,
+                v.vendor_signature_image_link as vendor_signature_image_link,
                 v.business_type as vendor_business_type,
                 v.company_website as vendor_company_website,
                 v.alternative_number as vendor_alternative_number,
@@ -957,7 +960,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
             id: row.id,
             role: row.role,
             vendor_id: row.vendor_id ?? null,
-            approval_status: row.approval_status ?? "pending",
+            approval_status: row.vendor_id ? (row.approval_status ?? "pending") : "setup_required",
             application_number: row.application_number ?? null,
             is_active: row.is_active ?? true,
             is_blocked: row.is_blocked ?? false,

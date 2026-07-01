@@ -16,6 +16,7 @@ import reviewRouter from './Routers/Review.router';
 import quotationRouter from './Routers/Quotation.router';
 import notificationRouter from './Routers/Notification.router';
 import uploadRouter from './Routers/Upload.router';
+import deliveryRouter from './Routers/Delivery.router';
 import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
 import { createServer } from 'http';
 import { initSocket } from './socket';
@@ -87,6 +88,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api/auth", authRouter);
+app.use("/api/delivery", deliveryRouter);
 app.use("/api/products", productRouter);
 app.use("/api/vendors", vendorsRouter);
 app.use("/api/client", clientRouter);

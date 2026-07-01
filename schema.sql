@@ -26,7 +26,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
-        CREATE TYPE user_role AS ENUM ('client', 'vendor', 'admin', 'super_admin');
+        CREATE TYPE user_role AS ENUM ('client', 'vendor', 'admin', 'super_admin', 'fulfillment_center', 'delivery_agent');
     END IF;
 END$$;
 
@@ -805,12 +805,56 @@ CREATE TABLE IF NOT EXISTS order_status_history(
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS fulfillment_centers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    code TEXT NOT NULL UNIQUE,
+    contact_phone TEXT,
+    contact_email CITEXT,
+    manager_name TEXT,
+    address TEXT NOT NULL,
+    city TEXT NOT NULL,
+    state TEXT NOT NULL,
+    country TEXT NOT NULL,
+    pincode VARCHAR(6) NOT NULL CHECK (pincode ~ '^[0-9]{6}$'),
+    latitude DOUBLE PRECISION CHECK (latitude BETWEEN -90 AND 90),
+    longitude DOUBLE PRECISION CHECK (longitude BETWEEN -180 AND 180),
+    total_area_sqft NUMERIC(10,2),
+    capacity_packages INTEGER,
+    storage_type TEXT,
+    operating_hours TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_fulfillment_centers_user_id ON fulfillment_centers(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_centers_code ON fulfillment_centers(code);
+
+CREATE TABLE IF NOT EXISTS delivery_agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    fulfillment_center_id UUID NOT NULL REFERENCES fulfillment_centers(id) ON DELETE CASCADE,
+    special_rider_id TEXT NOT NULL UNIQUE,
+    contact_phone TEXT,
+    vehicle_type TEXT,
+    vehicle_number TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    is_online BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_agents_fc ON delivery_agents(fulfillment_center_id);
+
 CREATE TABLE IF NOT EXISTS order_fulfillment_tracking (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     order_id UUID NOT NULL,
 
     fulfillment_center_id UUID,
+    delivery_agent_id UUID,
 
     status order_status NOT NULL,
     -- received, processing, dispatched, arrived, handed_over
@@ -827,6 +871,11 @@ CREATE TABLE IF NOT EXISTS order_fulfillment_tracking (
     CONSTRAINT fk_oft_center
         FOREIGN KEY (fulfillment_center_id)
         REFERENCES fulfillment_centers(id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT fk_oft_delivery_agent
+        FOREIGN KEY (delivery_agent_id)
+        REFERENCES delivery_agents(id)
         ON DELETE SET NULL
 );
 

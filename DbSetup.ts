@@ -13,6 +13,7 @@ export async function ensureMarketplaceSchema() {
         END $$;
 
         ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'fulfillment_center';
+        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'delivery_agent';
 
         DO $$
         BEGIN
@@ -351,6 +352,25 @@ export async function ensureMarketplaceSchema() {
 
             CREATE INDEX IF NOT EXISTS idx_fulfillment_centers_user_id ON fulfillment_centers(user_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_centers_code ON fulfillment_centers(code);
+
+            CREATE TABLE IF NOT EXISTS delivery_agents (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                fulfillment_center_id UUID NOT NULL REFERENCES fulfillment_centers(id) ON DELETE CASCADE,
+                special_rider_id TEXT NOT NULL UNIQUE,
+                contact_phone TEXT,
+                vehicle_type TEXT,
+                vehicle_number TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                is_online BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_delivery_agents_fc ON delivery_agents(fulfillment_center_id);
+
+            ALTER TABLE order_fulfillment_tracking 
+                ADD COLUMN IF NOT EXISTS delivery_agent_id UUID REFERENCES delivery_agents(id) ON DELETE SET NULL;
 
         ALTER TABLE products
             ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'approved',

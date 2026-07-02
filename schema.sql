@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS vendors (
     is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
     approval_status vendor_approval_status NOT NULL DEFAULT 'pending',
     approval_notes TEXT,
+    vendor_type TEXT NOT NULL DEFAULT 'product' CHECK (vendor_type IN ('product', 'service', 'both')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -1012,6 +1013,7 @@ ALTER TABLE vendors
     ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS approval_status vendor_approval_status NOT NULL DEFAULT 'pending',
     ADD COLUMN IF NOT EXISTS approval_notes TEXT,
+    ADD COLUMN IF NOT EXISTS vendor_type TEXT NOT NULL DEFAULT 'product' CHECK (vendor_type IN ('product', 'service', 'both')),
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 

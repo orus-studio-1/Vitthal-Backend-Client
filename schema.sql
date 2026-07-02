@@ -612,29 +612,7 @@ CREATE TABLE IF NOT EXISTS orders (
     CONSTRAINT fk_orders_cart FOREIGN KEY (cart_id) REFERENCES carts(id)
 );
 
--- ================================
--- PAYMENTS
--- ================================
-CREATE TABLE IF NOT EXISTS payments (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    amount NUMERIC(12, 2) NOT NULL,
-    currency VARCHAR(10) DEFAULT 'INR',
-    status VARCHAR(50) DEFAULT 'pending',
-    payment_method VARCHAR(50) DEFAULT 'razorpay',
-    razorpay_order_id VARCHAR(255) UNIQUE,
-    razorpay_payment_id VARCHAR(255),
-    razorpay_signature TEXT,
-    order_ids UUID[] DEFAULT '{}',
-    quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
-    split_number INTEGER DEFAULT 1,
-    split_percentage NUMERIC(5, 2) DEFAULT 100.00,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
 
-CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
-CREATE INDEX IF NOT EXISTS idx_payments_razorpay_order_id ON payments(razorpay_order_id);
 
 -- ================================
 -- VENDOR PAYOUTS
@@ -755,6 +733,30 @@ CREATE TABLE IF NOT EXISTS quotation_messages (
         CHECK (sender_role IN ('client', 'vendor', 'admin'))
 );
 
+-- ================================
+-- PAYMENTS
+-- ================================
+CREATE TABLE IF NOT EXISTS payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount NUMERIC(12, 2) NOT NULL,
+    currency VARCHAR(10) DEFAULT 'INR',
+    status VARCHAR(50) DEFAULT 'pending',
+    payment_method VARCHAR(50) DEFAULT 'razorpay',
+    razorpay_order_id VARCHAR(255) UNIQUE,
+    razorpay_payment_id VARCHAR(255),
+    razorpay_signature TEXT,
+    order_ids UUID[] DEFAULT '{}',
+    quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
+    split_number INTEGER DEFAULT 1,
+    split_percentage NUMERIC(5, 2) DEFAULT 100.00,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id);
+CREATE INDEX IF NOT EXISTS idx_payments_razorpay_order_id ON payments(razorpay_order_id);
+
 -- cart_items : 
 CREATE TABLE IF NOT EXISTS order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -829,6 +831,9 @@ CREATE TABLE IF NOT EXISTS fulfillment_centers (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Ensure 'code' column exists if table was created in an older schema version
+ALTER TABLE fulfillment_centers ADD COLUMN IF NOT EXISTS code TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_fulfillment_centers_user_id ON fulfillment_centers(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fulfillment_centers_code ON fulfillment_centers(code);
@@ -1289,3 +1294,198 @@ ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS vendor_state TEXT,
     ADD COLUMN IF NOT EXISTS vendor_latitude DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS vendor_longitude DOUBLE PRECISION;
+
+-- ============================================
+-- SERVICES SUBSYSTEM (Added 2026-07-02)
+-- ============================================
+
+-- 1. Extend product_category to support different types
+ALTER TABLE product_category ADD COLUMN IF NOT EXISTS category_type TEXT DEFAULT 'product';
+
+-- Drop constraint if exists and re-add to check category_type
+ALTER TABLE product_category DROP CONSTRAINT IF EXISTS chk_category_type;
+ALTER TABLE product_category ADD CONSTRAINT chk_category_type CHECK (category_type IN ('product', 'service', 'both'));
+
+-- 2. Create the Services Catalog Table
+CREATE TABLE IF NOT EXISTS services (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    description TEXT,
+    category_id UUID NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, approved, rejected
+    created_by_user_id UUID,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    rating NUMERIC(2,1) NOT NULL DEFAULT 0 CHECK (rating >= 0 AND rating <= 5),
+    review_count INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_services_category FOREIGN KEY (category_id) REFERENCES product_category(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_services_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT chk_services_status CHECK (status IN ('pending', 'approved', 'rejected'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_services_category_id ON services(category_id);
+CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
+
+-- 3. Create the Vendor Services Mapping Table
+CREATE TABLE IF NOT EXISTS vendor_services (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    service_id UUID NOT NULL,
+    vendor_id UUID NOT NULL,
+    pricing_type TEXT NOT NULL DEFAULT 'flat', -- hourly, project, milestone, flat
+    price NUMERIC(12,2) NOT NULL CHECK (price >= 0),
+    moq INTEGER NOT NULL DEFAULT 1 CHECK (moq > 0), -- e.g. minimum hours or projects
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT unique_vendor_service UNIQUE (vendor_id, service_id),
+    CONSTRAINT fk_vendor_services_service FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+    CONSTRAINT fk_vendor_services_vendor FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE CASCADE,
+    CONSTRAINT chk_vendor_services_pricing CHECK (pricing_type IN ('hourly', 'project', 'milestone', 'flat'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_vendor_services_service_id ON vendor_services(service_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_services_vendor_id ON vendor_services(vendor_id);
+
+-- 4. Create Service Bookings Table (equivalent to orders)
+CREATE TABLE IF NOT EXISTS service_bookings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL, -- client
+    vendor_id UUID NOT NULL,
+    vendor_service_id UUID NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, confirmed, in_progress, completed, cancelled
+    payment_status TEXT NOT NULL DEFAULT 'pending', -- pending, paid, refunded
+    total_amount NUMERIC(12,2) NOT NULL,
+    scheduled_start TIMESTAMPTZ,
+    scheduled_end TIMESTAMPTZ,
+    booking_notes TEXT,
+    completion_otp_hash VARCHAR(64) DEFAULT NULL,
+    completion_otp_expires_at TIMESTAMPTZ DEFAULT NULL,
+    completion_otp_failed_attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_bookings_user FOREIGN KEY (user_id) REFERENCES users(id),
+    CONSTRAINT fk_bookings_vendor FOREIGN KEY (vendor_id) REFERENCES vendors(id),
+    CONSTRAINT fk_bookings_vendor_service FOREIGN KEY (vendor_service_id) REFERENCES vendor_services(id),
+    CONSTRAINT chk_bookings_status CHECK (status IN ('pending', 'confirmed', 'in_progress', 'completed', 'cancelled')),
+    CONSTRAINT chk_bookings_payment CHECK (payment_status IN ('pending', 'paid', 'refunded'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bookings_user_id ON service_bookings(user_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_vendor_id ON service_bookings(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_bookings_status ON service_bookings(status);
+
+-- 5. Create Service Quotations Table (B2B service negotiations)
+CREATE TABLE IF NOT EXISTS service_quotations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    vendor_id UUID NOT NULL,
+    service_id UUID NOT NULL,
+    scope_of_work TEXT NOT NULL,
+    requested_price NUMERIC(12,2) CHECK (requested_price >= 0),
+    status TEXT NOT NULL DEFAULT 'pending_vendor', -- pending_vendor, vendor_offered, client_accepted, client_rejected, cancelled
+    agreed_price NUMERIC(12,2) CHECK (agreed_price >= 0),
+    booking_id UUID REFERENCES service_bookings(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_service_quotes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_service_quotes_vendor FOREIGN KEY (vendor_id) REFERENCES vendors(id) ON DELETE CASCADE,
+    CONSTRAINT fk_service_quotes_service FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_quotes_user_id ON service_quotations(user_id);
+CREATE INDEX IF NOT EXISTS idx_service_quotes_vendor_id ON service_quotations(vendor_id);
+
+-- 6. Create Services Media Table (Promotional / Portfolio media supporting image, video)
+CREATE TABLE IF NOT EXISTS services_media (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    service_id UUID NOT NULL,
+    media_url TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    is_approved BOOLEAN NOT NULL DEFAULT FALSE,
+    approval_status TEXT NOT NULL DEFAULT 'pending',
+    created_by_user_id UUID,
+    reviewed_by_user_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_services_media_service FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+    CONSTRAINT fk_services_media_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT fk_services_media_reviewed_by FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    CONSTRAINT chk_services_media_type CHECK (media_type IN ('image', 'video')),
+    CONSTRAINT chk_services_media_status CHECK (approval_status IN ('pending', 'approved', 'rejected'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_services_media_service_id ON services_media(service_id);
+
+-- Enforce at most one video per service
+CREATE UNIQUE INDEX IF NOT EXISTS unique_video_per_service ON services_media(service_id) WHERE (media_type = 'video');
+
+-- 7. Create Service Quotation Messages Table (Negotiation Chat History for Services)
+CREATE TABLE IF NOT EXISTS service_quotation_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_id UUID NOT NULL,
+    sender_user_id UUID NOT NULL,
+    sender_role TEXT NOT NULL,
+    action quotation_message_action NOT NULL,
+    offer_price NUMERIC(12,2) CHECK (offer_price >= 0),
+    note TEXT,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_service_quotation_messages_quotation
+        FOREIGN KEY (quotation_id)
+        REFERENCES service_quotations(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_service_quotation_messages_sender
+        FOREIGN KEY (sender_user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+    CONSTRAINT chk_service_quotation_sender_role
+        CHECK (sender_role IN ('client', 'vendor', 'admin'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_quotation_messages_quotation_id ON service_quotation_messages(quotation_id);
+
+-- 8. Create Service Reviews Table (Ratings and feedback for services)
+CREATE TABLE IF NOT EXISTS service_reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    booking_id UUID NOT NULL UNIQUE,
+    user_id UUID NOT NULL,
+    service_id UUID NOT NULL,
+    vendor_id UUID NOT NULL,
+    rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+    review_title TEXT,
+    review_text TEXT,
+    images TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_service_reviews_booking
+        FOREIGN KEY (booking_id)
+        REFERENCES service_bookings(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_service_reviews_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_service_reviews_service
+        FOREIGN KEY (service_id)
+        REFERENCES services(id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_service_reviews_vendor
+        FOREIGN KEY (vendor_id)
+        REFERENCES vendors(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_reviews_service_id ON service_reviews(service_id);
+CREATE INDEX IF NOT EXISTS idx_service_reviews_vendor_id ON service_reviews(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_service_reviews_user_id ON service_reviews(user_id);
+
+

@@ -215,9 +215,15 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
 
         }
 
-        const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
+        let vendorType: string | undefined;
+        if (user.role === 'vendor') {
+            const vendorResult = await pool.query('SELECT vendor_type FROM vendors WHERE user_id = $1 LIMIT 1', [user.id]);
+            vendorType = vendorResult.rows[0]?.vendor_type || 'product';
+        }
 
-        const accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+        const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role, vendorType);
+
+        const accessToken = generateAccessToken(user.id, user.name, user.email, user.role, vendorType);
 
         // Store refresh token in database for revocation and session tracking
         await pool.query('UPDATE users SET refresh_token = $1 WHERE id = $2', [refreshToken, user.id]);
@@ -589,6 +595,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         let userRole = user.role;
         let refreshToken = "";
         let accessToken = "";
+        let vendorType: string | undefined;
 
         try {
             await client.query("BEGIN");
@@ -699,12 +706,13 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
                 // Get the vendor record to link categories
                 const vendorResult = await client.query(
-                    `SELECT id FROM vendors WHERE user_id = $1`,
+                    `SELECT id, vendor_type FROM vendors WHERE user_id = $1`,
                     [user.id]
                 );
 
                 if (vendorResult.rows.length > 0) {
                     const vendorId = vendorResult.rows[0].id;
+                    vendorType = vendorResult.rows[0].vendor_type || 'product';
 
                     // Delete existing vendor categories first (for updates)
                     await client.query(
@@ -736,8 +744,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 }
             }
 
-            refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
-            accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+            refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role, vendorType);
+            accessToken = generateAccessToken(user.id, user.name, user.email, user.role, vendorType);
 
             const tokenResult = await client.query('UPDATE users SET refresh_token = $1 WHERE id = $2 RETURNING role', [refreshToken, user.id]);
             userRole = tokenResult.rows[0]?.role || userRole;

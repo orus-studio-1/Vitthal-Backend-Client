@@ -1140,7 +1140,7 @@ CREATE TABLE IF NOT EXISTS notifications (
             'general'
         )),
     CONSTRAINT chk_notification_reference_type
-        CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product'))
+        CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product', 'service_quotation', 'service_booking'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);

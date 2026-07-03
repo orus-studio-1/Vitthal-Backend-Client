@@ -100,12 +100,31 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             [cartId]
         );
 
-        if (cartItemsResult.rows.length === 0) {
+        // Get service cart items
+        const serviceCartItemsResult = await client.query(
+            `
+                SELECT 
+                    sci.id AS service_cart_item_id,
+                    sci.service_id,
+                    sci.vendor_id,
+                    sci.quantity,
+                    sci.price_at_added,
+                    s.name AS service_name,
+                    s.description AS service_description
+                FROM service_cart_items sci
+                JOIN services s ON sci.service_id = s.id
+                WHERE sci.cart_id = $1
+            `,
+            [cartId]
+        );
+
+        if (cartItemsResult.rows.length === 0 && serviceCartItemsResult.rows.length === 0) {
             await client.query("ROLLBACK");
             return res.status(400).json({ message: "Quotation cart is empty" });
         }
 
         const createdQuotationIds: string[] = [];
+        const createdServiceQuotationIds: string[] = [];
 
         for (const item of cartItemsResult.rows) {
             // Find ALL vendors serving this product variant with quotation_enabled = true
@@ -222,12 +241,58 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             }
         }
 
-        if (createdQuotationIds.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "No eligible vendors found for the products in your quotation cart." });
+        // Process Service Quotations
+        for (const item of serviceCartItemsResult.rows) {
+            const [serviceCheck, vendorCheck] = await Promise.all([
+                client.query(`SELECT id FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`, [item.service_id]),
+                client.query(`SELECT id, user_id FROM vendors WHERE id = $1 AND approval_status = 'approved' AND is_active = true LIMIT 1`, [item.vendor_id]),
+            ]);
+
+            if (serviceCheck.rows.length === 0 || vendorCheck.rows.length === 0) {
+                continue;
+            }
+
+            const vendorUser = vendorCheck.rows[0];
+
+            const quotationResult = await client.query(
+                `INSERT INTO service_quotations (user_id, vendor_id, service_id, scope_of_work, requested_price, status)
+                 VALUES ($1, $2, $3, $4, $5, 'pending_vendor')
+                 RETURNING id`,
+                [userId, item.vendor_id, item.service_id, requestNote || `Request quote for service: ${item.service_name}`, item.price_at_added]
+            );
+
+            const serviceQuotationId = quotationResult.rows[0].id as string;
+            createdServiceQuotationIds.push(serviceQuotationId);
+
+            await client.query(
+                `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
+                 VALUES ($1, $2, 'client', 'request', $3, $4)`,
+                [serviceQuotationId, userId, item.price_at_added, requestNote || `Request quote for service: ${item.service_name}`]
+            );
+
+            if (vendorUser.user_id) {
+                await createNotification({
+                    userId: vendorUser.user_id,
+                    type: "quotation_request_received",
+                    title: "New service quotation request",
+                    body: `You received a service quotation request for ${item.service_name}`,
+                    referenceType: "service_quotation",
+                    referenceId: serviceQuotationId,
+                });
+            }
         }
 
-        await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+        if (createdQuotationIds.length === 0 && createdServiceQuotationIds.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "No eligible vendors found for the items in your quotation cart." });
+        }
+
+        if (cartItemsResult.rows.length > 0) {
+            await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+        }
+        if (serviceCartItemsResult.rows.length > 0) {
+            await client.query(`DELETE FROM service_cart_items WHERE cart_id = $1`, [cartId]);
+        }
 
         await client.query("COMMIT");
 

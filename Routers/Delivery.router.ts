@@ -13,7 +13,9 @@ import {
     patchRiderController,
     patchRiderStatusController,
     getRiderTasksController,
-    postRiderDeliverController
+    postRiderDeliverController,
+    postRelocateItemController,
+    postRiderFailDeliveryController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -26,6 +28,7 @@ deliveryRouter.get("/hub/inventory", authMiddleware, getHubInventoryController);
 deliveryRouter.patch("/hub/inventory/:packageId/status", authMiddleware, patchInventoryItemStatusController);
 deliveryRouter.get("/hub/pending-outbound", authMiddleware, getPendingOutboundController);
 deliveryRouter.post("/hub/handover-scan", authMiddleware, postHandoverScanController);
+deliveryRouter.post("/hub/relocate", authMiddleware, postRelocateItemController);
 
 // Rider CRUD / management for Hub Manager
 deliveryRouter.get("/riders", authMiddleware, getRidersController);
@@ -36,5 +39,6 @@ deliveryRouter.patch("/riders/:riderId", authMiddleware, patchRiderController);
 deliveryRouter.patch("/rider/status", authMiddleware, patchRiderStatusController);
 deliveryRouter.get("/rider/tasks", authMiddleware, getRiderTasksController);
 deliveryRouter.post("/rider/deliver", authMiddleware, postRiderDeliverController);
+deliveryRouter.post("/rider/fail-delivery", authMiddleware, postRiderFailDeliveryController);
 
 export default deliveryRouter;

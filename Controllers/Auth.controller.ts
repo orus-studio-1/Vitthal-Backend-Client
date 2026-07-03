@@ -498,6 +498,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
         const normalizedCompanyName = normalizeRequiredText(req.body.companyName);
         const normalizedBusinessType = normalizeRequiredText(req.body.businessType);
+        const normalizedVendorType = req.body.vendorType === "service" ? "service" : "product";
         const normalizedGstNumber = normalizeRequiredText(req.body.gstNumber);
         const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
         const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
@@ -647,9 +648,10 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 approval_status,
                                 approval_notes,
                                 application_number,
+                                vendor_type,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, $15, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
@@ -667,6 +669,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 approval_status = EXCLUDED.approval_status,
                                 approval_notes = EXCLUDED.approval_notes,
                                 application_number = COALESCE(vendors.application_number, EXCLUDED.application_number),
+                                vendor_type = EXCLUDED.vendor_type,
                                 updated_at = NOW()
                         `,
                     [
@@ -683,7 +686,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         normalizedCreditCycle,
                         parsedMinCommission,
                         parsedMaxCommission,
-                        appNumber
+                        appNumber,
+                        normalizedVendorType
                     ]
                 );
 

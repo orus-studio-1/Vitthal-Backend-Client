@@ -77,7 +77,7 @@ export const getWishlistController = async (req: Request, res: Response): Promis
             FROM wishlists w
             JOIN wishlist_items wi ON w.id = wi.wishlist_id
             JOIN services s ON wi.service_id = s.id
-            LEFT JOIN product_categories pc ON s.category_id = pc.id
+            LEFT JOIN product_category pc ON s.category_id = pc.id
             WHERE w.user_id = $1 AND w.status = 'active' AND wi.service_id IS NOT NULL
         `;
 

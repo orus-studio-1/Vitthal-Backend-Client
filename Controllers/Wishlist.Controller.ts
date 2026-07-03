@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { getPresignedUrlOrOriginal } from "../services/s3.service";
 
 const getWishlistId = async (userId: string): Promise<string> => {
     const existingWishlist = await pool.query(
@@ -64,7 +65,11 @@ export const getWishlistController = async (req: Request, res: Response): Promis
                 wi.created_at,
                 s.name as product_name,
                 s.description,
-                (SELECT media_url FROM services_media WHERE service_id = s.id AND is_primary = true AND approval_status = 'approved' LIMIT 1) as image_url,
+                COALESCE(
+                    (SELECT media_url FROM services_media WHERE service_id = s.id AND is_primary = true AND approval_status = 'approved' LIMIT 1),
+                    (SELECT media_url FROM services_media WHERE service_id = s.id AND approval_status = 'approved' LIMIT 1),
+                    pc.image
+                ) as image_url,
                 NULL as vendor_name,
                 (SELECT MIN(vs.price) FROM vendor_services vs WHERE vs.service_id = s.id AND vs.is_active = true) as current_price,
                 1 as moq,
@@ -72,6 +77,7 @@ export const getWishlistController = async (req: Request, res: Response): Promis
             FROM wishlists w
             JOIN wishlist_items wi ON w.id = wi.wishlist_id
             JOIN services s ON wi.service_id = s.id
+            LEFT JOIN product_categories pc ON s.category_id = pc.id
             WHERE w.user_id = $1 AND w.status = 'active' AND wi.service_id IS NOT NULL
         `;
 
@@ -84,7 +90,15 @@ export const getWishlistController = async (req: Request, res: Response): Promis
             (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
         );
 
-        return res.status(200).json({ data: allItems });
+        // Resolve presigned S3 URLs for both products and services
+        const resolvedItems = await Promise.all(
+            allItems.map(async (row) => ({
+                ...row,
+                image_url: row.image_url ? await getPresignedUrlOrOriginal(row.image_url) : null
+            }))
+        );
+
+        return res.status(200).json({ data: resolvedItems });
     } catch (error) {
         console.error("Error in getWishlistController:", error);
         return res.status(500).json({ message: "Internal server error" });

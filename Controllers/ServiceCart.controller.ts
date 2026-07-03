@@ -36,12 +36,15 @@ export const getServiceCartController = async (req: Request, res: Response): Pro
                 vs.moq,
                 v.company_name      AS vendor_name,
                 v.rating            AS vendor_rating,
-                (SELECT sm.media_url FROM services_media sm
-                 WHERE sm.service_id = s.id AND sm.is_primary = true
-                 LIMIT 1)           AS image_url
+                COALESCE(
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                    pc.image
+                )                   AS image_url
             FROM carts c
             JOIN service_cart_items sci ON c.id = sci.cart_id
             JOIN services s    ON s.id = sci.service_id
+            LEFT JOIN product_category pc ON pc.id = s.category_id
             JOIN vendor_services vs ON vs.id = sci.vendor_service_id
             JOIN vendors v     ON v.id = sci.vendor_id
             WHERE c.user_id = $1 AND c.status = 'active' AND c.cart_type = $2

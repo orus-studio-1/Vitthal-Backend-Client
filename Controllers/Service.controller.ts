@@ -97,12 +97,17 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                     s.id, s.name, s.description, s.rating, s.review_count, s.category_id,
                     pc.label AS category_label,
                     COUNT(DISTINCT vs.id) AS vendor_count,
-                    MIN(vs.price) AS starting_price
+                    MIN(vs.price) AS starting_price,
+                    COALESCE(
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                        pc.image
+                    ) AS image_url
                  FROM services s
                  LEFT JOIN product_category pc ON pc.id = s.category_id
                  LEFT JOIN vendor_services vs ON vs.service_id = s.id AND vs.is_active = true
                  ${where}
-                 GROUP BY s.id, pc.label
+                 GROUP BY s.id, pc.label, pc.image
                  ORDER BY s.rating DESC NULLS LAST, s.review_count DESC
                  LIMIT $${idx} OFFSET $${idx + 1}`,
                 [...values, limitNum, offset]
@@ -113,8 +118,15 @@ export const browseServicesController = async (req: Request, res: Response): Pro
             ),
         ]);
 
+        const rows = await Promise.all(
+            dataResult.rows.map(async (row) => ({
+                ...row,
+                image_url: await getPresignedUrlOrOriginal(row.image_url),
+            }))
+        );
+
         return res.status(200).json({
-            data: dataResult.rows,
+            data: rows,
             pagination: {
                 page: pageNum,
                 limit: limitNum,

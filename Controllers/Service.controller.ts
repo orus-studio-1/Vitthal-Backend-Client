@@ -127,14 +127,32 @@ export const browseServicesController = async (req: Request, res: Response): Pro
     }
 };
 
+function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+}
+
 export const getServiceDetailController = async (req: Request, res: Response): Promise<Response> => {
     const { id } = req.params;
+    const { userLat, userLng } = req.query;
+    const parsedLat = userLat ? Number(userLat) : null;
+    const parsedLng = userLng ? Number(userLng) : null;
 
     try {
         const serviceResult = await pool.query(
             `SELECT
                 s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id,
-                pc.label AS category_label
+                s.specifications,
+                pc.label AS category_label,
+                pc.code AS category_code,
+                pc.image AS category_image
              FROM services s
              LEFT JOIN product_category pc ON pc.id = s.category_id
              WHERE s.id = $1 AND s.status = 'approved'
@@ -146,7 +164,7 @@ export const getServiceDetailController = async (req: Request, res: Response): P
             return res.status(404).json({ message: "Service not found" });
         }
 
-        const [mediaResult, vendorOfferingsResult] = await Promise.all([
+        const [mediaResult, vendorOfferingsResult, reviewsResult] = await Promise.all([
             pool.query(
                 `SELECT id, media_url, media_type, is_primary, display_order
                  FROM services_media
@@ -157,11 +175,22 @@ export const getServiceDetailController = async (req: Request, res: Response): P
             pool.query(
                 `SELECT
                     vs.id AS vendor_service_id, vs.pricing_type, vs.price, vs.moq, vs.is_active,
-                    v.id AS vendor_id, v.company_name, v.rating AS vendor_rating, v.review_count AS vendor_review_count
+                    v.id AS vendor_id, v.company_name, v.rating AS vendor_rating, v.review_count AS vendor_review_count,
+                    va.latitude, va.longitude, va.city, va.state
                  FROM vendor_services vs
                  JOIN vendors v ON v.id = vs.vendor_id AND v.approval_status = 'approved'
-                 WHERE vs.service_id = $1 AND vs.is_active = true
-                 ORDER BY vs.price ASC`,
+                 LEFT JOIN addresses va ON v.user_id = va.user_id
+                 WHERE vs.service_id = $1 AND vs.is_active = true`,
+                [id]
+            ),
+            pool.query(
+                `SELECT
+                    sr.id, sr.rating, sr.review_title, sr.review_text, sr.images, sr.created_at,
+                    u.name AS reviewer_name
+                 FROM service_reviews sr
+                 JOIN users u ON u.id = sr.user_id
+                 WHERE sr.service_id = $1
+                 ORDER BY sr.created_at DESC`,
                 [id]
             ),
         ]);
@@ -173,11 +202,74 @@ export const getServiceDetailController = async (req: Request, res: Response): P
             }))
         );
 
+        let vendorOfferings = vendorOfferingsResult.rows.map((row) => {
+            const price = Number(row.price) || 0;
+            const rating = Number(row.vendor_rating) || 0;
+            const reviewCount = Number(row.vendor_review_count) || 0;
+            const vendorLat = row.latitude !== null ? Number(row.latitude) : null;
+            const vendorLng = row.longitude !== null ? Number(row.longitude) : null;
+
+            let distance: number | null = null;
+            if (parsedLat !== null && parsedLng !== null && !isNaN(parsedLat) && !isNaN(parsedLng) && vendorLat !== null && vendorLng !== null) {
+                distance = haversineDistance(parsedLat, parsedLng, vendorLat, vendorLng);
+            }
+
+            return {
+                ...row,
+                price,
+                vendor_rating: rating,
+                vendor_review_count: reviewCount,
+                latitude: vendorLat,
+                longitude: vendorLng,
+                distance,
+            };
+        });
+
+        if (parsedLat !== null && parsedLng !== null && !isNaN(parsedLat) && !isNaN(parsedLng) && vendorOfferings.length > 0) {
+            const prices = vendorOfferings.map((v) => v.price).filter((p) => p > 0);
+            const distances = vendorOfferings.map((v) => v.distance).filter((d): d is number => d !== null);
+            const ratings = vendorOfferings.map((v) => v.vendor_rating);
+
+            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+            const minDist = distances.length > 0 ? Math.min(...distances) : 0;
+            const maxDist = distances.length > 0 ? Math.max(...distances) : 0;
+            const maxRating = ratings.length > 0 ? Math.max(...ratings) : 5;
+
+            const PRICE_WEIGHT = 0.4;
+            const DISTANCE_WEIGHT = 0.4;
+            const REVIEW_WEIGHT = 0.2;
+
+            vendorOfferings = vendorOfferings.map((v) => {
+                const priceScore = maxPrice > minPrice ? (maxPrice - v.price) / (maxPrice - minPrice) : 1;
+                const distanceScore = v.distance !== null && maxDist > minDist
+                    ? (maxDist - v.distance) / (maxDist - minDist)
+                    : v.distance !== null ? 1 : 0.5;
+                const reviewScore = maxRating > 0 ? v.vendor_rating / maxRating : 0;
+
+                const totalScore = (PRICE_WEIGHT * priceScore) + (DISTANCE_WEIGHT * distanceScore) + (REVIEW_WEIGHT * reviewScore);
+
+                return {
+                    ...v,
+                    price_score: Math.round(priceScore * 100) / 100,
+                    distance_score: Math.round(distanceScore * 100) / 100,
+                    review_score: Math.round(reviewScore * 100) / 100,
+                    total_score: Math.round(totalScore * 100) / 100,
+                };
+            });
+
+            vendorOfferings.sort((a, b) => (b.total_score || 0) - (a.total_score || 0));
+        } else {
+            // Default sort by price ASC
+            vendorOfferings.sort((a, b) => a.price - b.price);
+        }
+
         return res.status(200).json({
             data: {
                 ...serviceResult.rows[0],
                 media: mediaWithUrls,
-                vendor_offerings: vendorOfferingsResult.rows,
+                vendor_offerings: vendorOfferings,
+                reviews: reviewsResult.rows,
             },
         });
     } catch (error) {

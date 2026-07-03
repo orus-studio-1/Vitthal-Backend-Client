@@ -541,6 +541,7 @@ export const getMyServiceQuotationsController = async (req: Request, res: Respon
         const result = await pool.query(
             `SELECT
                 sq.id, sq.status, sq.scope_of_work, sq.requested_price, sq.agreed_price, sq.created_at, sq.updated_at,
+                sq.service_id, sq.vendor_id,
                 s.name AS service_name,
                 v.company_name AS vendor_name
              FROM service_quotations sq

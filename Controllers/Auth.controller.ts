@@ -259,7 +259,29 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
     if (!user) {
         return res.status(401).json({ message: 'Unauthorized' });
     }
-    return res.status(200).json({ user: { userId: user.userId, username: user.username, email: user.email, role: user.role } });
+    let vendorType: string | null = null;
+    if (user.role === "vendor") {
+        try {
+            const vendorRes = await pool.query(
+                `SELECT vendor_type FROM vendors WHERE user_id = $1`,
+                [user.userId]
+            );
+            if (vendorRes.rows.length > 0) {
+                vendorType = vendorRes.rows[0].vendor_type;
+            }
+        } catch (err) {
+            console.error("Error fetching vendor_type for getCurrentUser:", err);
+        }
+    }
+    return res.status(200).json({
+        user: {
+            userId: user.userId,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            vendorType
+        }
+    });
 }
 
 export async function logoutUser(req: Request, res: Response): Promise<Response> {

@@ -3,7 +3,9 @@ import type { PoolClient } from "pg";
 import crypto from "crypto";
 import pool from "../DbConnect";
 import { sendEmail } from "../helpers/mailer.helper";
-import { uploadBufferToS3, getPresignedUrlOrOriginal } from "../services/s3.service";
+import { uploadBufferToS3, getPresignedUrlOrOriginal, getPresignedUrl } from "../services/s3.service";
+import { createNotification } from "./Notification.controller";
+import { generateBaseServiceQuotationDocument, generateVendorServiceQuotationDocument } from "../services/serviceQuotationDocument.service";
 
 type AuthUser = { userId: string; role: string; email?: string };
 
@@ -105,7 +107,16 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                     ) AS image_url
                  FROM services s
                  LEFT JOIN product_category pc ON pc.id = s.category_id
-                 LEFT JOIN vendor_services vs ON vs.service_id = s.id AND vs.is_active = true
+                 LEFT JOIN vendor_services vs ON vs.service_id = s.id AND vs.is_active = true AND EXISTS (
+                     SELECT 1 FROM vendors v
+                     JOIN users u ON u.id = v.user_id
+                     WHERE v.id = vs.vendor_id
+                       AND v.approval_status = 'approved'
+                       AND v.is_active = true
+                       AND v.is_blocked = false
+                       AND v.vendor_type IN ('service', 'both')
+                       AND u.is_active = true
+                 )
                  ${where}
                  GROUP BY s.id, pc.label, pc.image
                  ORDER BY s.rating DESC NULLS LAST, s.review_count DESC
@@ -189,10 +200,15 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                     vs.id AS vendor_service_id, vs.pricing_type, vs.price, vs.moq, vs.is_active,
                     v.id AS vendor_id, v.company_name, v.rating AS vendor_rating, v.review_count AS vendor_review_count,
                     va.latitude, va.longitude, va.city, va.state
-                 FROM vendor_services vs
-                 JOIN vendors v ON v.id = vs.vendor_id AND v.approval_status = 'approved'
-                 LEFT JOIN addresses va ON v.user_id = va.user_id
-                 WHERE vs.service_id = $1 AND vs.is_active = true`,
+                  FROM vendor_services vs
+                  JOIN vendors v ON v.id = vs.vendor_id 
+                      AND v.approval_status = 'approved'
+                      AND v.is_active = true
+                      AND v.is_blocked = false
+                      AND v.vendor_type IN ('service', 'both')
+                  JOIN users u ON u.id = v.user_id AND u.is_active = true
+                  LEFT JOIN addresses va ON v.user_id = va.user_id
+                  WHERE vs.service_id = $1 AND vs.is_active = true`,
                 [id]
             ),
             pool.query(
@@ -488,8 +504,8 @@ export const createServiceQuotationController = async (req: Request, res: Respon
         await client.query("BEGIN");
 
         const [serviceCheck, vendorCheck] = await Promise.all([
-            client.query(`SELECT id FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`, [serviceId]),
-            client.query(`SELECT id FROM vendors WHERE id = $1 AND approval_status = 'approved' LIMIT 1`, [vendorId]),
+            client.query(`SELECT id, name FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`, [serviceId]),
+            client.query(`SELECT id, user_id FROM vendors WHERE id = $1 AND approval_status = 'approved' LIMIT 1`, [vendorId]),
         ]);
 
         if (serviceCheck.rows.length === 0) {
@@ -501,11 +517,47 @@ export const createServiceQuotationController = async (req: Request, res: Respon
             return res.status(404).json({ message: "Vendor not found or not approved" });
         }
 
+        const serviceName = serviceCheck.rows[0].name;
+        const vendorUserId = vendorCheck.rows[0].user_id;
+
+        const vendorServiceCheck = await client.query(
+            `SELECT price, delivery_days, token_percentage FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
+            [vendorId, serviceId]
+        );
+
+        let defaultPrice: number | null = null;
+        let defaultDeliveryDays: number | null = null;
+        let defaultTokenPercentage: number | null = null;
+        let defaultTokenAmount: number | null = null;
+
+        if (vendorServiceCheck.rows.length > 0) {
+            const row = vendorServiceCheck.rows[0];
+            defaultPrice = row.price != null ? Number(row.price) : null;
+            defaultDeliveryDays = row.delivery_days != null ? Number(row.delivery_days) : null;
+            defaultTokenPercentage = row.token_percentage != null ? Number(row.token_percentage) : null;
+            if (defaultPrice != null && defaultTokenPercentage != null) {
+                defaultTokenAmount = Number(((defaultTokenPercentage / 100) * (defaultPrice * 1.18)).toFixed(2));
+            }
+        }
+
         const quotationResult = await client.query(
-            `INSERT INTO service_quotations (user_id, vendor_id, service_id, scope_of_work, requested_price, status)
-             VALUES ($1, $2, $3, $4, $5, 'pending_vendor')
+            `INSERT INTO service_quotations (
+                user_id, vendor_id, service_id, scope_of_work, requested_price, status,
+                current_offer_price, delivery_days, token_percentage, token_amount, current_offer_by
+             )
+             VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6, $7, $8, $9, 'vendor')
              RETURNING id, status, scope_of_work, requested_price, created_at`,
-            [authUser.userId, vendorId, serviceId, scopeText, priceVal]
+            [
+                authUser.userId, 
+                vendorId, 
+                serviceId, 
+                scopeText, 
+                priceVal,
+                defaultPrice,
+                defaultDeliveryDays,
+                defaultTokenPercentage,
+                defaultTokenAmount
+            ]
         );
 
         const quotation = quotationResult.rows[0];
@@ -517,6 +569,42 @@ export const createServiceQuotationController = async (req: Request, res: Respon
         );
 
         await client.query("COMMIT");
+
+        // Fetch client address details and generate base quotation PDF in background
+        pool.query(
+            `SELECT city, state, pincode, country FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+            [authUser.userId]
+        ).then((addrResult) => {
+            const address = addrResult.rows[0] || {};
+            generateBaseServiceQuotationDocument({
+                serviceQuotationId: quotation.id,
+                userId: authUser.userId,
+                serviceId,
+                serviceName,
+                scopeOfWork: scopeText,
+                targetPrice: priceVal ? Number(priceVal) : undefined,
+                clientCity: address.city || "",
+                clientState: address.state || "",
+                clientPincode: address.pincode || "",
+                clientCountry: address.country || "India",
+            }).catch((err) => {
+                console.error(`[ServiceQuotationDocument] Failed to generate base document for service quotation ${quotation.id}:`, err);
+            });
+        }).catch((err) => {
+            console.error(`[ServiceQuotationDocument] Failed to query address details for base service document ${quotation.id}:`, err);
+        });
+
+        // Trigger real-time notification to vendor
+        if (vendorUserId) {
+            await createNotification({
+                userId: vendorUserId,
+                type: "quotation_request_received",
+                title: "New service quotation request",
+                body: `You received a service quotation request for ${serviceName}`,
+                referenceType: "quotation",
+                referenceId: quotation.id,
+            });
+        }
 
         return res.status(201).json({
             message: "Service quotation request submitted",
@@ -543,7 +631,12 @@ export const getMyServiceQuotationsController = async (req: Request, res: Respon
                 sq.id, sq.status, sq.scope_of_work, sq.requested_price, sq.agreed_price, sq.created_at, sq.updated_at,
                 sq.service_id, sq.vendor_id,
                 s.name AS service_name,
-                v.company_name AS vendor_name
+                v.company_name AS vendor_name,
+                COALESCE(
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                    (SELECT pc.image FROM product_category pc WHERE pc.id = s.category_id LIMIT 1)
+                ) AS service_image
              FROM service_quotations sq
              JOIN services s ON s.id = sq.service_id
              JOIN vendors v ON v.id = sq.vendor_id
@@ -577,10 +670,14 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
         let quotationResult;
         if (isClient) {
             quotationResult = await pool.query(
-                `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name
+                `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name, 
+                        sqd.document_url AS base_document_url, sqd.s3_key AS base_document_s3_key,
+                        vs.pricing_type, vs.moq
                  FROM service_quotations sq
                  JOIN services s ON s.id = sq.service_id
                  JOIN vendors v ON v.id = sq.vendor_id
+                 LEFT JOIN vendor_services vs ON vs.vendor_id = sq.vendor_id AND vs.service_id = sq.service_id
+                 LEFT JOIN service_quotation_documents sqd ON sqd.service_quotation_id = sq.id
                  WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
                 [id, authUser.userId]
             );
@@ -588,10 +685,14 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
             const vendorId = await getVendorIdByUserId(authUser.userId);
             if (!vendorId) return res.status(403).json({ message: "Vendor profile not found" });
             quotationResult = await pool.query(
-                `SELECT sq.*, s.name AS service_name, u.name AS client_name, u.email AS client_email
+                `SELECT sq.*, s.name AS service_name, u.name AS client_name, u.email AS client_email, 
+                        sqd.document_url AS base_document_url, sqd.s3_key AS base_document_s3_key,
+                        vs.pricing_type, vs.moq
                  FROM service_quotations sq
                  JOIN services s ON s.id = sq.service_id
                  JOIN users u ON u.id = sq.user_id
+                 LEFT JOIN vendor_services vs ON vs.vendor_id = sq.vendor_id AND vs.service_id = sq.service_id
+                 LEFT JOIN service_quotation_documents sqd ON sqd.service_quotation_id = sq.id
                  WHERE sq.id = $1 AND sq.vendor_id = $2 LIMIT 1`,
                 [id, vendorId]
             );
@@ -599,6 +700,24 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
 
         if (quotationResult.rows.length === 0) {
             return res.status(404).json({ message: "Quotation not found" });
+        }
+
+        const quotationRow = quotationResult.rows[0];
+
+        // Presign S3 documents
+        if (quotationRow.base_document_s3_key) {
+            try {
+                quotationRow.base_document_url = await getPresignedUrl(quotationRow.base_document_s3_key);
+            } catch (s3Err) {
+                console.error("Failed to generate presigned URL for service base doc:", s3Err);
+            }
+        }
+        if (quotationRow.vendor_document_s3_key) {
+            try {
+                quotationRow.vendor_document_url = await getPresignedUrl(quotationRow.vendor_document_s3_key);
+            } catch (s3Err) {
+                console.error("Failed to generate presigned URL for service vendor doc:", s3Err);
+            }
         }
 
         const messagesResult = await pool.query(
@@ -613,7 +732,7 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
 
         return res.status(200).json({
             data: {
-                quotation: quotationResult.rows[0],
+                quotation: quotationRow,
                 messages: messagesResult.rows,
             },
         });
@@ -630,7 +749,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
     }
 
     const { id } = req.params;
-    const { action, offerPrice, note, reason } = req.body as Record<string, unknown>;
+    const { action, offerPrice, note, reason, deliveryDays, tokenPercentage } = req.body as Record<string, unknown>;
 
     const VALID_CLIENT_ACTIONS = new Set(["counter", "accept", "reject"]);
     const VALID_VENDOR_ACTIONS = new Set(["offer", "counter", "accept", "reject"]);
@@ -653,15 +772,23 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
 
         let quotationResult;
         let senderRole: string;
+        let vendorUserId: string | null = null;
+        let vendorId: string | null = null;
 
         if (isClient) {
             quotationResult = await client.query(
-                `SELECT id, status, vendor_id FROM service_quotations WHERE id = $1 AND user_id = $2 LIMIT 1`,
+                `SELECT sq.id, sq.status, sq.vendor_id, v.user_id AS vendor_user_id 
+                 FROM service_quotations sq 
+                 LEFT JOIN vendors v ON v.id = sq.vendor_id 
+                 WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
                 [id, authUser.userId]
             );
             senderRole = "client";
+            if (quotationResult.rows.length > 0) {
+                vendorUserId = quotationResult.rows[0].vendor_user_id;
+            }
         } else {
-            const vendorId = await getVendorIdByUserId(authUser.userId);
+            vendorId = await getVendorIdByUserId(authUser.userId);
             if (!vendorId) {
                 await client.query("ROLLBACK");
                 return res.status(403).json({ message: "Vendor profile not found" });
@@ -694,13 +821,59 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
 
         const newStatus = statusMap[action]!;
         const priceVal = offerPrice != null ? parsePositiveDecimal(offerPrice) : null;
-        const agreedPrice = action === "accept" && isClient ? (priceVal ?? null) : null;
+
+        // When client accepts, the agreed_price is the vendor's current offered price (already on the row as agreed_price)
+        // When vendor offers/counters, the agreed_price is the price they send
+        let agreedPrice: string | null = null;
+        if (action === "offer" || action === "counter") {
+            agreedPrice = priceVal;
+        } else if (action === "accept" && isClient) {
+            // Use the vendor's offered price from the DB row
+            const currentPriceResult = await client.query(
+                `SELECT agreed_price FROM service_quotations WHERE id = $1`,
+                [id]
+            );
+            const rawPrice = currentPriceResult.rows[0]?.agreed_price;
+            agreedPrice = rawPrice != null ? String(rawPrice) : null;
+        }
+
+        // On vendor first offer, delivery_days and token_percentage are required
+        if (isVendor && action === "offer" && (deliveryDays == null || tokenPercentage == null)) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "Timeline days and token money percentage are required for the first offer" });
+        }
+
+        // Calculate token amount if provided
+        let tokenAmt: number | null = null;
+        if (priceVal != null && tokenPercentage != null) {
+            const priceNum = Number(priceVal);
+            const totalVal = priceNum;
+            const gstAmount = totalVal * 0.18; // 18% GST
+            const grandTotal = totalVal + gstAmount;
+            tokenAmt = (Number(tokenPercentage) / 100) * grandTotal;
+        }
 
         await client.query(
             `UPDATE service_quotations
-             SET status = $1, agreed_price = COALESCE($2, agreed_price), updated_at = NOW()
+             SET status = $1, 
+                 agreed_price = COALESCE($2, agreed_price), 
+                 delivery_days = COALESCE($4, delivery_days),
+                 token_percentage = COALESCE($5, token_percentage),
+                 token_amount = COALESCE($6, token_amount),
+                 current_offer_price = COALESCE($7, current_offer_price),
+                 current_offer_by = $8,
+                 updated_at = NOW()
              WHERE id = $3`,
-            [newStatus, agreedPrice, id]
+            [
+                newStatus, 
+                agreedPrice, 
+                id, 
+                deliveryDays != null ? Number(deliveryDays) : null,
+                tokenPercentage != null ? Number(tokenPercentage) : null,
+                tokenAmt,
+                priceVal != null ? Number(priceVal) : null,
+                senderRole
+            ]
         );
 
         await client.query(
@@ -710,6 +883,92 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
         );
 
         await client.query("COMMIT");
+
+        // Generate vendor-specific document on offer or counter (non-blocking)
+        const finalDeliveryDays = deliveryDays !== null && deliveryDays !== undefined ? Number(deliveryDays) : null;
+        const finalTokenPercentage = tokenPercentage !== null && tokenPercentage !== undefined ? Number(tokenPercentage) : null;
+
+        if ((action === "offer" || action === "counter") && isVendor && vendorId && finalDeliveryDays != null && finalTokenPercentage != null) {
+            const vendorNameResult = await pool.query(
+                `SELECT company_name FROM vendors WHERE id = $1`, [vendorId]
+            );
+            const vendorName = vendorNameResult.rows[0]?.company_name || "Vendor";
+
+            generateVendorServiceQuotationDocument({
+                serviceQuotationId: id as string,
+                vendorId,
+                vendorName,
+                offerPrice: Number(priceVal),
+                deliveryDays: finalDeliveryDays,
+                tokenPercentage: finalTokenPercentage,
+            }).then(async (result) => {
+                await pool.query(
+                    `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+                    [result.documentUrl, result.s3Key, id as string]
+                );
+            }).catch((err) => {
+                console.error(`[ServiceQuotationDocument] Failed to generate vendor document for quotation ${id as string}:`, err);
+            });
+        } else if (action === "counter" && isClient) {
+            const fullQuoteResult = await pool.query(
+                `SELECT sq.vendor_id, sq.delivery_days, sq.token_percentage, v.company_name
+                 FROM service_quotations sq
+                 JOIN vendors v ON sq.vendor_id = v.id
+                 WHERE sq.id = $1 LIMIT 1`,
+                [id as string]
+            );
+            if (fullQuoteResult.rows.length > 0) {
+                const row = fullQuoteResult.rows[0];
+                if (row.delivery_days != null && row.token_percentage != null) {
+                    generateVendorServiceQuotationDocument({
+                        serviceQuotationId: id as string,
+                        vendorId: row.vendor_id,
+                        vendorName: row.company_name || "Vendor",
+                        offerPrice: Number(priceVal),
+                        deliveryDays: Number(row.delivery_days),
+                        tokenPercentage: Number(row.token_percentage),
+                    }).then(async (result) => {
+                        await pool.query(
+                            `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+                            [result.documentUrl, result.s3Key, id as string]
+                        );
+                    }).catch((err) => {
+                        console.error(`[ServiceQuotationDocument] Failed to generate vendor document on client counter for quotation ${id as string}:`, err);
+                    });
+                }
+            }
+        }
+
+        // Trigger real-time notifications for quotation updates
+        if (isClient && vendorUserId) {
+            await createNotification({
+                userId: vendorUserId,
+                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : "quotation_counter_received",
+                title: "Quotation Update",
+                body: action === "counter"
+                    ? "Client counter-offered for your service request"
+                    : action === "accept"
+                    ? "Client accepted your service request"
+                    : "Client rejected your service request",
+                referenceType: "quotation",
+                referenceId: id as string,
+            });
+        } else if (isVendor && quotation.user_id) {
+            await createNotification({
+                userId: quotation.user_id,
+                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : "quotation_counter_received",
+                title: "Quotation Update",
+                body: action === "offer"
+                    ? "Vendor submitted an offer for your service request"
+                    : action === "counter"
+                    ? "Vendor counter-offered for your service request"
+                    : action === "accept"
+                    ? "Vendor accepted your service request"
+                    : "Vendor rejected your service request",
+                referenceType: "quotation",
+                referenceId: id as string,
+            });
+        }
 
         return res.status(200).json({ message: "Quotation updated", data: { status: newStatus } });
     } catch (error) {
@@ -816,6 +1075,7 @@ export const getVendorServiceBookingsController = async (req: Request, res: Resp
             `SELECT
                 sb.id, sb.status, sb.payment_status, sb.total_amount,
                 sb.scheduled_start, sb.scheduled_end, sb.booking_notes, sb.created_at,
+                sb.vendor_service_id,
                 s.name AS service_name,
                 u.name AS client_name, u.email AS client_email,
                 vs.pricing_type

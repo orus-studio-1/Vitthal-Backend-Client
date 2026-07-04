@@ -699,5 +699,30 @@ export async function ensureMarketplaceSchema() {
                     UNIQUE (cart_id, product_variant_id, vendor_id);
             END IF;
         END $$;
+
+        -- Service quotation S3 documents and signature updates
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS vendor_document_url TEXT;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS vendor_document_s3_key TEXT;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS token_amount NUMERIC(12,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS current_offer_price NUMERIC(12,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS current_offer_by TEXT CHECK (current_offer_by IN ('client', 'vendor'));
+
+        CREATE TABLE IF NOT EXISTS service_quotation_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            service_quotation_id UUID NOT NULL REFERENCES service_quotations(id) ON DELETE CASCADE,
+            quotation_number TEXT NOT NULL UNIQUE,
+            document_url TEXT NOT NULL,
+            s3_key TEXT NOT NULL,
+            valid_until DATE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_service_quotation_documents_quote_id ON service_quotation_documents(service_quotation_id);
+
+        -- Add default timeline and token money to vendor service offerings
+        ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
+        ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
     `);
 }

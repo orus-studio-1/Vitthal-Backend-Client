@@ -13,14 +13,23 @@ export const getVendorDashboardController = async (req: Request, res: Response):
 
     try {
         // Get vendor id from user_id
-        const vendorResult = await pool.query('SELECT id FROM vendors WHERE user_id = $1', [userId]);
+        const vendorResult = await pool.query('SELECT id, vendor_type FROM vendors WHERE user_id = $1', [userId]);
         if (vendorResult.rows.length === 0) {
             return res.status(404).json({ message: "Vendor not found. Please setup your profile first." });
         }
-        const vendorId = vendorResult.rows[0].id;
+        const { id: vendorId, vendor_type: vendorType } = vendorResult.rows[0];
+        const isService = vendorType === "service";
 
         // 1. Stats
-        const statsQuery = `
+        const statsQuery = isService ? `
+            SELECT
+                COALESCE(SUM(sb.total_amount), 0) AS total_revenue,
+                COUNT(sb.id) AS total_orders,
+                (SELECT COUNT(*) FROM vendor_services vs WHERE vs.vendor_id = $1 AND vs.is_active = true) AS active_products,
+                COUNT(DISTINCT sb.user_id) AS total_customers
+            FROM service_bookings sb
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'
+        ` : `
             SELECT
                 COALESCE(SUM(o.total_amount), 0) AS total_revenue,
                 COUNT(o.id) AS total_orders,
@@ -39,7 +48,18 @@ export const getVendorDashboardController = async (req: Request, res: Response):
 
         if (timeframe === '365') {
             // Group by month for this year
-            const revenueChartQuery = `
+            const revenueChartQuery = isService ? `
+                SELECT
+                    TO_CHAR(sb.created_at, 'Mon') AS month_name,
+                    EXTRACT(MONTH FROM sb.created_at)::integer AS month_num,
+                    COALESCE(SUM(sb.total_amount), 0) AS revenue
+                FROM service_bookings sb
+                WHERE sb.vendor_id = $1
+                    AND sb.status != 'cancelled'
+                    AND sb.created_at >= DATE_TRUNC('year', NOW())
+                GROUP BY TO_CHAR(sb.created_at, 'Mon'), EXTRACT(MONTH FROM sb.created_at)
+                ORDER BY month_num ASC
+            ` : `
                 SELECT
                     TO_CHAR(o.created_at, 'Mon') AS month_name,
                     EXTRACT(MONTH FROM o.created_at)::integer AS month_num,
@@ -67,7 +87,17 @@ export const getVendorDashboardController = async (req: Request, res: Response):
         } else {
             // last 7 or 30 days
             const intervalDays = timeframe === '30' ? 29 : 6;
-            const revenueChartQuery = `
+            const revenueChartQuery = isService ? `
+                SELECT
+                    DATE(sb.created_at)::text AS day_date,
+                    COALESCE(SUM(sb.total_amount), 0) AS revenue
+                FROM service_bookings sb
+                WHERE sb.vendor_id = $1
+                    AND sb.status != 'cancelled'
+                    AND sb.created_at >= NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY DATE(sb.created_at)
+                ORDER BY DATE(sb.created_at) ASC
+            ` : `
                 SELECT
                     DATE(o.created_at)::text AS day_date,
                     COALESCE(SUM(o.total_amount), 0) AS revenue
@@ -103,7 +133,22 @@ export const getVendorDashboardController = async (req: Request, res: Response):
         }
 
         // 3. Recent orders (last 5)
-        const recentOrdersQuery = `
+        const recentOrdersQuery = isService ? `
+            SELECT
+                sb.id AS order_id,
+                sb.status,
+                sb.total_amount,
+                sb.created_at,
+                u.name AS customer_name,
+                s.name AS product_name
+            FROM service_bookings sb
+            JOIN users u ON sb.user_id = u.id
+            JOIN vendor_services vs ON sb.vendor_service_id = vs.id
+            JOIN services s ON vs.service_id = s.id
+            WHERE sb.vendor_id = $1
+            ORDER BY sb.created_at DESC
+            LIMIT 5
+        ` : `
             SELECT
                 o.id AS order_id,
                 o.status,
@@ -126,7 +171,19 @@ export const getVendorDashboardController = async (req: Request, res: Response):
         const recentOrdersResult = await pool.query(recentOrdersQuery, [vendorId]);
 
         // 4. Top products (by total quantity sold)
-        const topProductsQuery = `
+        const topProductsQuery = isService ? `
+            SELECT
+                s.name AS product_name,
+                COUNT(sb.id) AS total_sales,
+                SUM(sb.total_amount) AS total_revenue
+            FROM service_bookings sb
+            JOIN vendor_services vs ON sb.vendor_service_id = vs.id
+            JOIN services s ON vs.service_id = s.id
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'
+            GROUP BY s.name
+            ORDER BY total_sales DESC
+            LIMIT 3
+        ` : `
             SELECT
                 p.name AS product_name,
                 SUM(oi.quantity) AS total_sales,

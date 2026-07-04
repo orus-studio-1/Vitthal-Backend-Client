@@ -13,6 +13,7 @@ import {
     respondServiceQuotationController,
     submitServiceReviewController,
     getVendorServiceBookingsController,
+    getVendorServiceBookingByIdController,
     vendorCompleteBookingController,
     getVendorServiceQuotationsController,
 } from "../Controllers/Service.controller";
@@ -36,6 +37,7 @@ serviceRouter.post("/quotations/:id/respond", respondServiceQuotationController)
 serviceRouter.post("/reviews", submitServiceReviewController);
 
 serviceRouter.get("/vendor/bookings", requireApprovedVendor, getVendorServiceBookingsController);
+serviceRouter.get("/vendor/bookings/:id", requireApprovedVendor, getVendorServiceBookingByIdController);
 serviceRouter.post("/vendor/bookings/:id/complete", requireApprovedVendor, vendorCompleteBookingController);
 serviceRouter.get("/vendor/quotations", requireApprovedVendor, getVendorServiceQuotationsController);
 serviceRouter.get("/vendor/quotations/:id", requireApprovedVendor, getServiceQuotationDetailController);

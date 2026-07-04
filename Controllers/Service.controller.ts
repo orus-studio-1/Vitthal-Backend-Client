@@ -1120,6 +1120,52 @@ export const getVendorServiceBookingsController = async (req: Request, res: Resp
     }
 };
 
+export const getVendorServiceBookingByIdController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = getAuthUser(req);
+    if (!authUser || authUser.role !== "vendor") {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const { id } = req.params;
+    const vendorId = await getVendorIdByUserId(authUser.userId);
+    if (!vendorId) {
+        return res.status(403).json({ message: "Vendor profile not found or not approved" });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT
+                sb.id, sb.status, sb.payment_status, sb.total_amount,
+                sb.scheduled_start, sb.scheduled_end, sb.booking_notes, sb.created_at,
+                sb.vendor_service_id,
+                s.name AS service_name,
+                s.description AS service_description,
+                u.name AS client_name, u.email AS client_email,
+                u.phone AS client_phone,
+                vs.pricing_type,
+                sq.id AS service_quotation_id,
+                sq.scope_of_work
+             FROM service_bookings sb
+             JOIN vendor_services vs ON vs.id = sb.vendor_service_id
+             JOIN services s ON s.id = vs.service_id
+             JOIN users u ON u.id = sb.user_id
+             LEFT JOIN service_quotations sq ON sq.booking_id = sb.id
+             WHERE sb.id = $1 AND sb.vendor_id = $2
+             LIMIT 1`,
+            [id, vendorId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "Booking not found" });
+        }
+
+        return res.status(200).json({ data: result.rows[0] });
+    } catch (error) {
+        console.error("Error fetching vendor service booking by ID:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
 export const vendorCompleteBookingController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = getAuthUser(req);
     if (!authUser || authUser.role !== "vendor") {

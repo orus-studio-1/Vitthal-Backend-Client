@@ -124,7 +124,13 @@ export const getExpectedInboundController = async (req: Request, res: Response):
                        FROM order_items oi
                        JOIN products p ON oi.product_id = p.id
                        WHERE oi.order_id = orp.order_id AND oi.vendor_id = o.vendor_id
-                   ) as items
+                   ) as items,
+                   (
+                       SELECT note 
+                       FROM order_fulfillment_tracking 
+                       WHERE order_id = orp.order_id
+                       ORDER BY created_at DESC LIMIT 1
+                   ) as last_tracking_note
             FROM order_route_plan orp
             JOIN orders o ON orp.order_id = o.id
             JOIN vendors v ON o.vendor_id = v.id
@@ -414,6 +420,53 @@ export const postHandoverScanController = async (req: Request, res: Response): P
         return res.status(500).json({ message: "Internal server error" });
     } finally {
         client.release();
+    }
+};
+
+// 7.5 POST /api/delivery/hub/relocate (Manager changes shelving location of a package)
+export const postRelocateItemController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId, newShelfLocation } = req.body;
+
+    if (!user || user.role !== "fulfillment_center") {
+        return res.status(403).json({ message: "Unauthorized. Hub Manager access only." });
+    }
+    if (!orderId || !newShelfLocation) {
+        return res.status(400).json({ message: "Order ID and new shelf location are required." });
+    }
+
+    try {
+        const hub = await resolveHubDetails(user.userId);
+        if (!hub) {
+            return res.status(404).json({ message: "Hub not found." });
+        }
+
+        // Verify package is currently shelved at this hub
+        const stopRes = await pool.query(
+            `SELECT id FROM order_route_plan 
+             WHERE order_id = $1 AND fulfillment_center_id = $2 AND status = 'arrived'`,
+            [orderId, hub.id]
+        );
+        if (stopRes.rows.length === 0) {
+            return res.status(400).json({ message: "Package is not currently shelved at this hub." });
+        }
+
+        // Insert new relocation tracking log with received status so WMS inventory queries pick it up
+        const locationLabel = `${hub.name} (${hub.code})`;
+        const note = `[RELOCATED] Shelved at location: ${newShelfLocation}`;
+        await pool.query(
+            `INSERT INTO order_fulfillment_tracking (order_id, fulfillment_center_id, status, note, location_label)
+             VALUES ($1, $2, 'received', $3, $4)`,
+            [orderId, hub.id, note, locationLabel]
+        );
+
+        return res.status(200).json({
+            message: "Package successfully relocated in warehouse shelves.",
+            data: { orderId, newShelfLocation }
+        });
+    } catch (error) {
+        console.error("Error relocating warehouse item:", error);
+        return res.status(500).json({ message: "Internal server error" });
     }
 };
 
@@ -739,4 +792,84 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         client.release();
     }
 };
+
+// 14. POST /api/delivery/rider/fail-delivery (Rider reports delivery issue / failed delivery)
+export const postRiderFailDeliveryController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId, reason } = req.body;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+    if (!orderId || !reason) {
+        return res.status(400).json({ message: "Order ID and failure reason are required." });
+    }
+
+    const client = pool;
+    const tx = await client.connect();
+    try {
+        await tx.query("BEGIN");
+
+        // Resolve rider profile
+        const riderRes = await tx.query(
+            "SELECT id, fulfillment_center_id FROM delivery_agents WHERE user_id = $1 AND status = 'active'",
+            [user.userId]
+        );
+        if (riderRes.rows.length === 0) {
+            await tx.query("ROLLBACK");
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+        const rider = riderRes.rows[0];
+
+        // Verify package is indeed assigned to this rider
+        const assignmentRes = await tx.query(
+            `SELECT id FROM order_fulfillment_tracking 
+             WHERE order_id = $1 AND delivery_agent_id = $2 AND status = 'handed_over'
+             AND NOT EXISTS (
+                 SELECT 1 FROM order_fulfillment_tracking oft2 
+                 WHERE oft2.order_id = $1 AND oft2.status = 'delivered'
+             )`,
+            [orderId, rider.id]
+        );
+        if (assignmentRes.rows.length === 0) {
+            await tx.query("ROLLBACK");
+            return res.status(400).json({ message: "This order is not actively assigned to you." });
+        }
+
+        // 1. Insert failed delivery tracking event
+        const note = `[DELIVERY_FAILED] Reason: ${reason}`;
+        await tx.query(
+            `INSERT INTO order_fulfillment_tracking (order_id, fulfillment_center_id, delivery_agent_id, status, note, location_label)
+             VALUES ($1, $2, $3, 'processing', $4, 'Customer Location')`,
+            [orderId, rider.fulfillment_center_id, rider.id, note]
+        );
+
+        // 2. Revert order status globally to 'processing'
+        await tx.query(
+            `UPDATE orders SET status = 'processing', updated_at = NOW() WHERE id = $1`,
+            [orderId]
+        );
+
+        // 3. Set the active stop status of the fulfillment center back to 'in_transit' so it gets returned and shelved
+        await tx.query(
+            `UPDATE order_route_plan 
+             SET status = 'in_transit', actual_arrival = NULL, updated_at = NOW() 
+             WHERE order_id = $1 AND fulfillment_center_id = $2`,
+            [orderId, rider.fulfillment_center_id]
+        );
+
+        await tx.query("COMMIT");
+        return res.status(200).json({
+            message: "Delivery marked as failed. Return package to hub.",
+            data: { orderId, reason }
+        });
+    } catch (error) {
+        await tx.query("ROLLBACK");
+        console.error("Error failing delivery:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        tx.release();
+    }
+};
+
 

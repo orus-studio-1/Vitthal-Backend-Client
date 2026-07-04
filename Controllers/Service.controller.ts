@@ -777,7 +777,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
 
         if (isClient) {
             quotationResult = await client.query(
-                `SELECT sq.id, sq.status, sq.vendor_id, v.user_id AS vendor_user_id 
+                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, v.user_id AS vendor_user_id 
                  FROM service_quotations sq 
                  LEFT JOIN vendors v ON v.id = sq.vendor_id 
                  WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
@@ -794,7 +794,9 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                 return res.status(403).json({ message: "Vendor profile not found" });
             }
             quotationResult = await client.query(
-                `SELECT id, status, user_id FROM service_quotations WHERE id = $1 AND vendor_id = $2 LIMIT 1`,
+                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id 
+                 FROM service_quotations sq 
+                 WHERE sq.id = $1 AND sq.vendor_id = $2 LIMIT 1`,
                 [id, vendorId]
             );
             senderRole = "vendor";
@@ -875,6 +877,27 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                 senderRole
             ]
         );
+
+        if (newStatus === "client_accepted") {
+            const vsResult = await client.query(
+                `SELECT id FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
+                [quotation.vendor_id, quotation.service_id]
+            );
+            if (vsResult.rows.length > 0) {
+                const vendorServiceId = vsResult.rows[0].id;
+                const bookingResult = await client.query(
+                    `INSERT INTO service_bookings (user_id, vendor_id, vendor_service_id, total_amount, status, payment_status, booking_notes, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, 'confirmed', 'pending', $5, NOW(), NOW())
+                     RETURNING id`,
+                    [quotation.user_id, quotation.vendor_id, vendorServiceId, agreedPrice || priceVal || 0, quotation.scope_of_work]
+                );
+                const bookingId = bookingResult.rows[0].id;
+                await client.query(
+                    `UPDATE service_quotations SET booking_id = $1 WHERE id = $2`,
+                    [bookingId, id]
+                );
+            }
+        }
 
         await client.query(
             `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note, reason)
@@ -1078,11 +1101,13 @@ export const getVendorServiceBookingsController = async (req: Request, res: Resp
                 sb.vendor_service_id,
                 s.name AS service_name,
                 u.name AS client_name, u.email AS client_email,
-                vs.pricing_type
+                vs.pricing_type,
+                sq.id AS service_quotation_id
              FROM service_bookings sb
              JOIN vendor_services vs ON vs.id = sb.vendor_service_id
              JOIN services s ON s.id = vs.service_id
              JOIN users u ON u.id = sb.user_id
+             LEFT JOIN service_quotations sq ON sq.booking_id = sb.id
              WHERE sb.vendor_id = $1
              ORDER BY sb.created_at DESC`,
             [vendorId]

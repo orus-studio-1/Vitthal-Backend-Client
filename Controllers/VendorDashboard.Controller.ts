@@ -242,35 +242,35 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         return res.status(403).json({ message: "Unauthorized! Only vendors can access analytics!" });
     }
 
-    // Get timeframe from query params (default: 'year')
     const timeframe = (req.query.timeframe as string) || 'year';
 
     try {
-        // Get vendor id from user_id
-        const vendorResult = await pool.query('SELECT id FROM vendors WHERE user_id = $1', [userId]);
+        const vendorResult = await pool.query('SELECT id, vendor_type FROM vendors WHERE user_id = $1', [userId]);
         if (vendorResult.rows.length === 0) {
             return res.status(404).json({ message: "Vendor not found. Please setup your profile first." });
         }
         const vendorId = vendorResult.rows[0].id;
+        const isService = vendorResult.rows[0].vendor_type === 'service';
 
-        // Determine date range based on timeframe
         let dateFilter = '';
         let previousDateFilter = '';
-        const now = new Date();
         
         if (timeframe === 'month') {
-            dateFilter = `AND o.created_at >= DATE_TRUNC('month', NOW())`;
-            previousDateFilter = `AND o.created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month') AND o.created_at < DATE_TRUNC('month', NOW())`;
+            dateFilter = isService ? `AND sb.created_at >= DATE_TRUNC('month', NOW())` : `AND o.created_at >= DATE_TRUNC('month', NOW())`;
+            previousDateFilter = isService ? `AND sb.created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month') AND sb.created_at < DATE_TRUNC('month', NOW())` : `AND o.created_at >= DATE_TRUNC('month', NOW() - INTERVAL '1 month') AND o.created_at < DATE_TRUNC('month', NOW())`;
         } else if (timeframe === '6months') {
-            dateFilter = `AND o.created_at >= NOW() - INTERVAL '6 months'`;
-            previousDateFilter = `AND o.created_at >= NOW() - INTERVAL '12 months' AND o.created_at < NOW() - INTERVAL '6 months'`;
+            dateFilter = isService ? `AND sb.created_at >= NOW() - INTERVAL '6 months'` : `AND o.created_at >= NOW() - INTERVAL '6 months'`;
+            previousDateFilter = isService ? `AND sb.created_at >= NOW() - INTERVAL '12 months' AND sb.created_at < NOW() - INTERVAL '6 months'` : `AND o.created_at >= NOW() - INTERVAL '12 months' AND o.created_at < NOW() - INTERVAL '6 months'`;
         } else if (timeframe === 'year') {
-            dateFilter = `AND o.created_at >= DATE_TRUNC('year', NOW())`;
-            previousDateFilter = `AND o.created_at >= DATE_TRUNC('year', NOW() - INTERVAL '1 year') AND o.created_at < DATE_TRUNC('year', NOW())`;
+            dateFilter = isService ? `AND sb.created_at >= DATE_TRUNC('year', NOW())` : `AND o.created_at >= DATE_TRUNC('year', NOW())`;
+            previousDateFilter = isService ? `AND sb.created_at >= DATE_TRUNC('year', NOW() - INTERVAL '1 year') AND sb.created_at < DATE_TRUNC('year', NOW())` : `AND o.created_at >= DATE_TRUNC('year', NOW() - INTERVAL '1 year') AND o.created_at < DATE_TRUNC('year', NOW())`;
         }
 
-        // 1. Total Tonnage/Quantity Sold (current period)
-        const tonnageQuery = `
+        const tonnageQuery = isService ? `
+            SELECT COUNT(sb.id) AS total_quantity
+            FROM service_bookings sb
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+        ` : `
             SELECT COALESCE(SUM(oi.quantity), 0) AS total_quantity
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
@@ -279,8 +279,11 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         const tonnageResult = await pool.query(tonnageQuery, [vendorId]);
         const totalQuantity = parseInt(tonnageResult.rows[0].total_quantity) || 0;
 
-        // Previous period tonnage for growth calculation
-        const prevTonnageQuery = `
+        const prevTonnageQuery = isService ? `
+            SELECT COUNT(sb.id) AS total_quantity
+            FROM service_bookings sb
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${previousDateFilter}
+        ` : `
             SELECT COALESCE(SUM(oi.quantity), 0) AS total_quantity
             FROM order_items oi
             JOIN orders o ON oi.order_id = o.id
@@ -290,8 +293,13 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         const prevTotalQuantity = parseInt(prevTonnageResult.rows[0].total_quantity) || 0;
         const tonnageGrowth = prevTotalQuantity > 0 ? ((totalQuantity - prevTotalQuantity) / prevTotalQuantity * 100) : 0;
 
-        // 2. Average Order Value (current period)
-        const aovQuery = `
+        const aovQuery = isService ? `
+            SELECT COALESCE(AVG(sb.total_amount), 0) AS avg_order_value,
+                   COUNT(sb.id) AS order_count,
+                   COALESCE(SUM(sb.total_amount), 0) AS total_revenue
+            FROM service_bookings sb
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+        ` : `
             SELECT COALESCE(AVG(o.total_amount), 0) AS avg_order_value,
                    COUNT(o.id) AS order_count,
                    COALESCE(SUM(o.total_amount), 0) AS total_revenue
@@ -302,8 +310,12 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         const avgOrderValue = parseFloat(aovResult.rows[0].avg_order_value) || 0;
         const currentRevenue = parseFloat(aovResult.rows[0].total_revenue) || 0;
 
-        // Previous period AOV for growth
-        const prevAovQuery = `
+        const prevAovQuery = isService ? `
+            SELECT COALESCE(AVG(sb.total_amount), 0) AS avg_order_value,
+                   COALESCE(SUM(sb.total_amount), 0) AS total_revenue
+            FROM service_bookings sb
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${previousDateFilter}
+        ` : `
             SELECT COALESCE(AVG(o.total_amount), 0) AS avg_order_value,
                    COALESCE(SUM(o.total_amount), 0) AS total_revenue
             FROM orders o
@@ -314,8 +326,18 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         const prevRevenue = parseFloat(prevAovResult.rows[0].total_revenue) || 0;
         const aovGrowth = prevAvgOrderValue > 0 ? ((avgOrderValue - prevAvgOrderValue) / prevAvgOrderValue * 100) : 0;
 
-        // 3. Category/Segment Distribution (by product category)
-        const categoryQuery = `
+        const categoryQuery = isService ? `
+            SELECT 
+                s.name AS category,
+                COUNT(sb.id) AS total_quantity,
+                COALESCE(SUM(sb.total_amount), 0) AS total_revenue
+            FROM service_bookings sb
+            JOIN vendor_services vs ON sb.vendor_service_id = vs.id
+            JOIN services s ON vs.service_id = s.id
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+            GROUP BY s.name
+            ORDER BY total_quantity DESC
+        ` : `
             SELECT 
                 pc.label AS category,
                 COALESCE(SUM(oi.quantity), 0) AS total_quantity,
@@ -330,15 +352,20 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         `;
         const categoryResult = await pool.query(categoryQuery, [vendorId]);
 
-        // Find top segment
         const topSegment = categoryResult.rows.length > 0 ? categoryResult.rows[0] : null;
         const totalCategoryQuantity = categoryResult.rows.reduce((sum, cat) => sum + parseInt(cat.total_quantity), 0);
 
-        // 4. Monthly Revenue Chart Data
         let monthlyQuery = '';
         if (timeframe === 'month') {
-            // Daily data for current month
-            monthlyQuery = `
+            monthlyQuery = isService ? `
+                SELECT 
+                    EXTRACT(DAY FROM sb.created_at)::integer AS day_num,
+                    COALESCE(SUM(sb.total_amount), 0) AS revenue
+                FROM service_bookings sb
+                WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+                GROUP BY EXTRACT(DAY FROM sb.created_at)
+                ORDER BY day_num ASC
+            ` : `
                 SELECT 
                     EXTRACT(DAY FROM o.created_at)::integer AS day_num,
                     COALESCE(SUM(o.total_amount), 0) AS revenue
@@ -348,8 +375,16 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                 ORDER BY day_num ASC
             `;
         } else {
-            // Monthly data
-            monthlyQuery = `
+            monthlyQuery = isService ? `
+                SELECT 
+                    TO_CHAR(sb.created_at, 'Mon') AS month_name,
+                    EXTRACT(MONTH FROM sb.created_at)::integer AS month_num,
+                    COALESCE(SUM(sb.total_amount), 0) AS revenue
+                FROM service_bookings sb
+                WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+                GROUP BY TO_CHAR(sb.created_at, 'Mon'), EXTRACT(MONTH FROM sb.created_at)
+                ORDER BY month_num ASC
+            ` : `
                 SELECT 
                     TO_CHAR(o.created_at, 'Mon') AS month_name,
                     EXTRACT(MONTH FROM o.created_at)::integer AS month_num,
@@ -362,12 +397,11 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         }
         const monthlyResult = await pool.query(monthlyQuery, [vendorId]);
 
-        // Build chart data
         let chartLabels: string[] = [];
         let chartData: number[] = [];
 
         if (timeframe === 'month') {
-            // Fill all days of current month
+            const now = new Date();
             const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
             const revenueMap = new Map<number, number>();
             for (const row of monthlyResult.rows) {
@@ -378,7 +412,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                 chartData.push(revenueMap.get(i) || 0);
             }
         } else {
-            // Fill months based on timeframe
+            const now = new Date();
             const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
             const revenueMap = new Map<string, number>();
             for (const row of monthlyResult.rows) {
@@ -392,9 +426,6 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
                 startMonth = now.getMonth() - 5;
                 monthsToShow = 6;
                 if (startMonth < 0) startMonth += 12;
-            } else if (timeframe === 'year') {
-                startMonth = 0;
-                monthsToShow = 12;
             }
 
             for (let i = 0; i < monthsToShow; i++) {
@@ -404,8 +435,22 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             }
         }
 
-        // 5. Top Selling Products with growth calculation
-        const topProductsQuery = `
+        const topProductsQuery = isService ? `
+            SELECT 
+                s.id AS product_id,
+                s.name AS product_name,
+                pc.label AS category,
+                COUNT(sb.id) AS total_sales,
+                COALESCE(SUM(sb.total_amount), 0) AS total_revenue
+            FROM service_bookings sb
+            JOIN vendor_services vs ON sb.vendor_service_id = vs.id
+            JOIN services s ON vs.service_id = s.id
+            JOIN product_category pc ON s.category_id = pc.id
+            WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
+            GROUP BY s.id, s.name, pc.label
+            ORDER BY total_sales DESC
+            LIMIT 5
+        ` : `
             SELECT 
                 p.id AS product_id,
                 p.name AS product_name,
@@ -422,10 +467,13 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         `;
         const topProductsResult = await pool.query(topProductsQuery, [vendorId]);
 
-        // Calculate growth for each product
         const topProducts = await Promise.all(topProductsResult.rows.map(async (row: any) => {
-            // Get previous period sales for this product
-            const prevProductQuery = `
+            const prevProductQuery = isService ? `
+                SELECT COUNT(sb.id) AS prev_sales
+                FROM service_bookings sb
+                JOIN vendor_services vs ON sb.vendor_service_id = vs.id
+                WHERE sb.vendor_id = $1 AND vs.service_id = $2 AND sb.status != 'cancelled' ${previousDateFilter}
+            ` : `
                 SELECT COALESCE(SUM(oi.quantity), 0) AS prev_sales
                 FROM order_items oi
                 JOIN orders o ON oi.order_id = o.id
@@ -449,6 +497,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         return res.status(200).json({
             message: "Analytics data fetched successfully",
             data: {
+                vendorType: isService ? 'service' : 'product',
                 kpi: {
                     totalQuantity: totalQuantity,
                     tonnageGrowth: parseFloat(tonnageGrowth.toFixed(1)),

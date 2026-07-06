@@ -54,7 +54,7 @@ const corsOptions: CorsOptions = {
             return;
         }
 
-        const isLocalhost = /^http:\/\/localhost:\d+$/.test(origin);
+        const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
         const isLanIp = /^http:\/\/192\.168\.\d+\.\d+:\d+$/.test(origin);
         const isVercelPreview = /^https:\/\/.*\.vercel\.app$/.test(origin);
 

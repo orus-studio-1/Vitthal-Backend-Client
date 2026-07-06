@@ -1,3 +1,0 @@
-ALTER TABLE service_bookings 
-    ADD COLUMN IF NOT EXISTS completion_otp VARCHAR(6) DEFAULT NULL,
-    ADD COLUMN IF NOT EXISTS completion_otp_expires_at TIMESTAMPTZ DEFAULT NULL;

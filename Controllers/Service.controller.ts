@@ -207,7 +207,11 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                       AND v.is_blocked = false
                       AND v.vendor_type IN ('service', 'both')
                   JOIN users u ON u.id = v.user_id AND u.is_active = true
-                  LEFT JOIN addresses va ON v.user_id = va.user_id
+                  LEFT JOIN (
+                      SELECT DISTINCT ON (user_id) user_id, latitude, longitude, city, state
+                      FROM addresses
+                      ORDER BY user_id, is_default DESC, created_at DESC
+                  ) va ON v.user_id = va.user_id
                   WHERE vs.service_id = $1 AND vs.is_active = true`,
                 [id]
             ),
@@ -329,7 +333,7 @@ export const createServiceBookingController = async (req: Request, res: Response
 
         const vsResult = await client.query(
             `SELECT vs.id, vs.service_id, vs.vendor_id, vs.price, vs.pricing_type, vs.moq, vs.is_active,
-                    v.approval_status
+                    v.approval_status, v.user_id AS vendor_user_id
              FROM vendor_services vs
              JOIN vendors v ON v.id = vs.vendor_id
              WHERE vs.id = $1 LIMIT 1`,
@@ -364,6 +368,20 @@ export const createServiceBookingController = async (req: Request, res: Response
         );
 
         await client.query("COMMIT");
+
+        // Trigger notification to vendor
+        if (vs.vendor_user_id) {
+            await createNotification({
+                userId: vs.vendor_user_id,
+                type: "general",
+                title: "New Service Booking",
+                body: "You received a new service booking",
+                referenceType: "service_booking",
+                referenceId: bookingResult.rows[0].id,
+            }).catch((err) => {
+                console.error("Error sending booking creation notification:", err);
+            });
+        }
 
         return res.status(201).json({
             message: "Service booking created successfully",
@@ -601,7 +619,7 @@ export const createServiceQuotationController = async (req: Request, res: Respon
                 type: "quotation_request_received",
                 title: "New service quotation request",
                 body: `You received a service quotation request for ${serviceName}`,
-                referenceType: "quotation",
+                referenceType: "service_quotation",
                 referenceId: quotation.id,
             });
         }
@@ -774,6 +792,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
         let senderRole: string;
         let vendorUserId: string | null = null;
         let vendorId: string | null = null;
+        let createdBookingId: string | null = null;
 
         if (isClient) {
             quotationResult = await client.query(
@@ -832,11 +851,18 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
         } else if (action === "accept" && isClient) {
             // Use the vendor's offered price from the DB row
             const currentPriceResult = await client.query(
-                `SELECT agreed_price FROM service_quotations WHERE id = $1`,
+                `SELECT agreed_price, current_offer_price FROM service_quotations WHERE id = $1`,
                 [id]
             );
             const rawPrice = currentPriceResult.rows[0]?.agreed_price;
-            agreedPrice = rawPrice != null ? String(rawPrice) : null;
+            const currentOfferPrice = currentPriceResult.rows[0]?.current_offer_price;
+
+            if (rawPrice == null && currentOfferPrice == null) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ message: "Cannot accept a quotation with no offer price set by vendor." });
+            }
+
+            agreedPrice = rawPrice != null ? String(rawPrice) : (currentOfferPrice != null ? String(currentOfferPrice) : null);
         }
 
         // On vendor first offer, delivery_days and token_percentage are required
@@ -892,6 +918,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     [quotation.user_id, quotation.vendor_id, vendorServiceId, agreedPrice || priceVal || 0, quotation.scope_of_work]
                 );
                 const bookingId = bookingResult.rows[0].id;
+                createdBookingId = bookingId;
                 await client.query(
                     `UPDATE service_quotations SET booking_id = $1 WHERE id = $2`,
                     [bookingId, id]
@@ -973,7 +1000,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     : action === "accept"
                     ? "Client accepted your service request"
                     : "Client rejected your service request",
-                referenceType: "quotation",
+                referenceType: "service_quotation",
                 referenceId: id as string,
             });
         } else if (isVendor && quotation.user_id) {
@@ -988,8 +1015,22 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     : action === "accept"
                     ? "Vendor accepted your service request"
                     : "Vendor rejected your service request",
-                referenceType: "quotation",
+                referenceType: "service_quotation",
                 referenceId: id as string,
+            });
+        }
+
+        // Trigger real-time notification to vendor for service booking creation
+        if (createdBookingId && vendorUserId) {
+            await createNotification({
+                userId: vendorUserId,
+                type: "general",
+                title: "New Service Booking",
+                body: "A new service booking was created from your accepted quotation",
+                referenceType: "service_booking",
+                referenceId: createdBookingId,
+            }).catch((err) => {
+                console.error(`[Notification] Failed to send service booking notification for ${createdBookingId}:`, err);
             });
         }
 
@@ -1189,7 +1230,7 @@ export const vendorCompleteBookingController = async (req: Request, res: Respons
         await client.query("BEGIN");
 
         const bookingResult = await client.query(
-            `SELECT id, status, completion_otp_hash, completion_otp_expires_at, completion_otp_failed_attempts
+            `SELECT id, user_id, status, completion_otp_hash, completion_otp_expires_at, completion_otp_failed_attempts
              FROM service_bookings
              WHERE id = $1 AND vendor_id = $2 LIMIT 1`,
             [id, vendorId]
@@ -1249,6 +1290,20 @@ export const vendorCompleteBookingController = async (req: Request, res: Respons
         );
 
         await client.query("COMMIT");
+
+        // Trigger notification to client
+        if (booking.user_id) {
+            await createNotification({
+                userId: booking.user_id,
+                type: "general",
+                title: "Service Booking Completed",
+                body: "Your service booking has been marked as completed",
+                referenceType: "service_booking",
+                referenceId: id as string,
+            }).catch((err) => {
+                console.error("Error sending booking completion notification:", err);
+            });
+        }
 
         return res.status(200).json({ message: "Service booking marked as completed" });
     } catch (error) {

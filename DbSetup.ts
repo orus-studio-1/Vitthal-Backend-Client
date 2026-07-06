@@ -286,12 +286,19 @@ export async function ensureMarketplaceSchema() {
         CREATE TABLE IF NOT EXISTS wishlist_items (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             wishlist_id UUID NOT NULL,
-            product_id UUID NOT NULL,
-            product_variant_id UUID NOT NULL,
+            product_id UUID,
+            product_variant_id UUID,
+            service_id UUID REFERENCES services(id) ON DELETE CASCADE,
             vendor_id UUID,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id),
+            CONSTRAINT unique_wishlist_service UNIQUE (wishlist_id, service_id),
+            CONSTRAINT chk_wishlist_item_type CHECK (
+                (product_id IS NOT NULL AND product_variant_id IS NOT NULL AND service_id IS NULL)
+                OR
+                (service_id IS NOT NULL AND product_id IS NULL AND product_variant_id IS NULL)
+            ),
             CONSTRAINT fk_wishlist_items_wishlist
                 FOREIGN KEY (wishlist_id)
                 REFERENCES wishlists(id)
@@ -570,6 +577,7 @@ export async function ensureMarketplaceSchema() {
             razorpay_payment_id VARCHAR(255),
             razorpay_signature TEXT,
             order_ids UUID[] DEFAULT '{}',
+            booking_ids UUID[] DEFAULT '{}',
             quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
             split_number INTEGER DEFAULT 1,
             split_percentage NUMERIC(5, 2) DEFAULT 100.00,
@@ -724,5 +732,45 @@ export async function ensureMarketplaceSchema() {
         -- Add default timeline and token money to vendor service offerings
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+
+        -- Add booking_ids column to payments table
+        ALTER TABLE payments ADD COLUMN IF NOT EXISTS booking_ids UUID[] DEFAULT '{}';
+
+        -- Wishlist items service support
+        ALTER TABLE wishlist_items ALTER COLUMN product_id DROP NOT NULL;
+        ALTER TABLE wishlist_items ALTER COLUMN product_variant_id DROP NOT NULL;
+        ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS service_id UUID REFERENCES services(id) ON DELETE CASCADE;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'chk_wishlist_item_type'
+                  AND table_name = 'wishlist_items'
+            ) THEN
+                ALTER TABLE wishlist_items
+                    ADD CONSTRAINT chk_wishlist_item_type
+                    CHECK (
+                        (product_id IS NOT NULL AND product_variant_id IS NOT NULL AND service_id IS NULL)
+                        OR
+                        (service_id IS NOT NULL AND product_id IS NULL AND product_variant_id IS NULL)
+                    );
+            END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'unique_wishlist_service'
+                  AND table_name = 'wishlist_items'
+            ) THEN
+                ALTER TABLE wishlist_items
+                    ADD CONSTRAINT unique_wishlist_service
+                    UNIQUE (wishlist_id, service_id);
+            END IF;
+        END $$;
     `);
 }

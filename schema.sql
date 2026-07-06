@@ -423,12 +423,19 @@ CREATE TABLE IF NOT EXISTS wishlists (
 CREATE TABLE IF NOT EXISTS wishlist_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     wishlist_id UUID NOT NULL,
-    product_id UUID NOT NULL,
-    product_variant_id UUID NOT NULL,
+    product_id UUID,
+    product_variant_id UUID,
+    service_id UUID REFERENCES services(id) ON DELETE CASCADE,
     vendor_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id),
+    CONSTRAINT unique_wishlist_service UNIQUE (wishlist_id, service_id),
+    CONSTRAINT chk_wishlist_item_type CHECK (
+        (product_id IS NOT NULL AND product_variant_id IS NOT NULL AND service_id IS NULL)
+        OR
+        (service_id IS NOT NULL AND product_id IS NULL AND product_variant_id IS NULL)
+    ),
     CONSTRAINT fk_wishlist_items_wishlist
         FOREIGN KEY (wishlist_id)
         REFERENCES wishlists(id)
@@ -733,6 +740,7 @@ CREATE TABLE IF NOT EXISTS payments (
     razorpay_payment_id VARCHAR(255),
     razorpay_signature TEXT,
     order_ids UUID[] DEFAULT '{}',
+    booking_ids UUID[] DEFAULT '{}',
     quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
     split_number INTEGER DEFAULT 1,
     split_percentage NUMERIC(5, 2) DEFAULT 100.00,

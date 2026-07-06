@@ -1,6 +1,4 @@
-DROP TABLE IF EXISTS services_media CASCADE;
-
-CREATE TABLE services_media (
+CREATE TABLE IF NOT EXISTS services_media (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     service_id UUID NOT NULL,
     media_url TEXT NOT NULL,

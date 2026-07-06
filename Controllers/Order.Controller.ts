@@ -1,6 +1,8 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { getPresignedUrlOrOriginal } from "../services/s3.service";
+import { createNotification } from "./Notification.controller";
+import { generateInvoicePDFBuffer } from "../services/invoiceDocument.service";
 
 // Helper: resolve S3 image URLs inside order items arrays
 async function resolveItemImages(items: any[] | null): Promise<any[] | null> {
@@ -34,6 +36,7 @@ function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 // ──────────────────────────────────────────────────────────────────────────────
 interface FcRow {
     id: string;
+    user_id: string;
     name: string;
     city: string;
     state: string;
@@ -77,7 +80,7 @@ function computeRouteStops(
 async function generateAndSaveRoutePlan(orderId: string): Promise<void> {
     // 1. Get the order's destination + vendor info
     const orderQ = await pool.query(
-        `SELECT o.vendor_id, o.latitude, o.langitude,
+        `SELECT o.vendor_id, o.latitude, o.langitude, o.order_reference,
                 CAST(o.latitude AS DOUBLE PRECISION) AS buyer_lat,
                 CAST(o.langitude AS DOUBLE PRECISION) AS buyer_lon,
                 o.city AS buyer_city, o.state AS buyer_state,
@@ -97,32 +100,66 @@ async function generateAndSaveRoutePlan(orderId: string): Promise<void> {
     const buyerLat  = parseFloat(ord.buyer_lat) || null;
     const buyerLon  = parseFloat(ord.buyer_lon) || null;
 
-    // Cache vendor location on the order for display
-    await pool.query(
-        `UPDATE orders SET vendor_city = $1, vendor_state = $2, vendor_latitude = $3, vendor_longitude = $4
-         WHERE id = $5`,
-        [ord.vendor_city_val, ord.vendor_state_val, sellerLat, sellerLon, orderId]
-    );
+    // Generate verification keys (OTP and QR tokens)
+    const pickupOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const randomHex = Math.random().toString(36).substring(2, 10).toUpperCase();
+    const pickupQr = `PICKUP-${orderId.substring(0, 8).toUpperCase()}-${randomHex}`;
+    const deliveryQr = `DELIVERY-${orderId.substring(0, 8).toUpperCase()}-${randomHex}`;
 
-    // 2. If we don't have both coordinates, skip route generation
-    if (!sellerLat || !sellerLon || !buyerLat || !buyerLon) return;
+    // Cache vendor location + verification codes on the order for display
+    await pool.query(
+        `UPDATE orders 
+         SET vendor_city = $1, vendor_state = $2, vendor_latitude = $3, vendor_longitude = $4,
+             pickup_otp = $5, pickup_qr_token = $6, delivery_otp = $7, delivery_qr_token = $8
+         WHERE id = $9`,
+        [ord.vendor_city_val, ord.vendor_state_val, sellerLat, sellerLon, pickupOtp, pickupQr, deliveryOtp, deliveryQr, orderId]
+    );
 
     // 3. Get all active fulfillment centers
     const fcQ = await pool.query(
-        `SELECT id, name, city, state, pincode, latitude, longitude
+        `SELECT id, user_id, name, city, state, pincode, latitude, longitude
          FROM fulfillment_centers
-         WHERE is_active = TRUE AND latitude IS NOT NULL AND longitude IS NOT NULL`
+         WHERE status = 'active'`
     );
     const allFcs: FcRow[] = fcQ.rows;
 
     // 4. Compute route
-    const routeStops = computeRouteStops(sellerLat, sellerLon, buyerLat, buyerLon, allFcs);
+    let routeStops: any[] = [];
+    if (sellerLat && sellerLon && buyerLat && buyerLon) {
+        routeStops = computeRouteStops(sellerLat, sellerLon, buyerLat, buyerLon, allFcs.filter(f => f.latitude && f.longitude));
+    }
+
+    // Fallback: If no intermediate FC is found on the route (or coordinates are missing),
+    // assign the closest active FC to the seller (or just the first active FC)
+    if (routeStops.length === 0 && allFcs.length > 0) {
+        let selectedFc = allFcs[0];
+        if (sellerLat && sellerLon) {
+            // Find the closest FC to the vendor (only checking FCs with valid coordinates)
+            const fcsWithCoords = allFcs.filter(f => f.latitude && f.longitude);
+            if (fcsWithCoords.length > 0) {
+                selectedFc = fcsWithCoords.reduce((closest, current) => {
+                    const currentDist = haversineKm(sellerLat, sellerLon, current.latitude, current.longitude);
+                    const closestDist = haversineKm(sellerLat, sellerLon, closest.latitude, closest.longitude);
+                    return currentDist < closestDist ? current : closest;
+                }, fcsWithCoords[0]);
+            }
+        }
+        
+        routeStops = [{
+            ...selectedFc,
+            distFromSeller: sellerLat && sellerLon && selectedFc.latitude && selectedFc.longitude 
+                ? haversineKm(sellerLat, sellerLon, selectedFc.latitude, selectedFc.longitude) 
+                : 0,
+            estimatedDays: 1
+        }];
+    }
 
     // 5. Delete any existing route plan for this order (idempotent)
     await pool.query(`DELETE FROM order_route_plan WHERE order_id = $1`, [orderId]);
 
     // 6. Insert planned stops
-    if (routeStops.length === 0) return; // direct delivery, no FCs on route
+    if (routeStops.length === 0) return; // no active FCs available in system
 
     const orderAcceptedAt = new Date();
     for (let i = 0; i < routeStops.length; i++) {
@@ -151,6 +188,19 @@ async function generateAndSaveRoutePlan(orderId: string): Promise<void> {
                 estimatedArrival.toISOString(),
             ]
         );
+    }
+
+    // Notify the first fulfillment center (assigned to handle pickup)
+    const firstStopFc = routeStops[0];
+    if (firstStopFc && firstStopFc.user_id) {
+        await createNotification({
+            userId: firstStopFc.user_id,
+            type: 'general',
+            title: 'New Pickup Assigned',
+            body: `Order ${ord.order_reference || 'N/A'} has been accepted by the vendor. Please assign a delivery agent for pickup.`,
+            referenceType: 'order',
+            referenceId: orderId
+        });
     }
 }
 
@@ -333,6 +383,7 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                 o.status,
                 o.payment_status,
                 o.total_amount,
+                o.pickup_otp,
                 o.created_at,
                 o.updated_at,
                 o.address_line,
@@ -415,9 +466,11 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
     if (!id) return res.status(400).json({ message: "Order ID is required" });
     if (!status) return res.status(400).json({ message: "Status is required" });
 
-    const validStatuses = ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded', 'handed_over', 'received', 'dispatched'];
-    if (!validStatuses.includes(status.toLowerCase())) {
-        return res.status(400).json({ message: "Invalid status" });
+    // Vendor can only accept (processing) or cancel orders.
+    // Shipped/delivered are controlled by the FC/rider pipeline.
+    const validVendorStatuses = ['processing', 'cancelled'];
+    if (!validVendorStatuses.includes(status.toLowerCase())) {
+        return res.status(400).json({ message: "Vendors can only accept or cancel orders. Shipping and delivery are handled by the fulfillment center." });
     }
 
     try {
@@ -485,10 +538,7 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
 
         // Create status history entry
         const statusNotes: Record<string, string> = {
-            'pending': 'Order placed by customer',
-            'processing': 'Order accepted and being processed by vendor',
-            'shipped': 'Order shipped by vendor',
-            'delivered': 'Order delivered to customer',
+            'processing': 'Order accepted by vendor — awaiting fulfillment center pickup',
             'cancelled': 'Order cancelled by vendor',
         };
         await pool.query(
@@ -497,54 +547,30 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
             [id, status.toLowerCase(), statusNotes[status.toLowerCase()] || `Status updated to ${status} by vendor`]
         );
 
-        // Create fulfillment tracking entry
-        if (['processing', 'shipped', 'delivered'].includes(status.toLowerCase())) {
-            const fulfillmentNotes: Record<string, string> = {
-                'processing': 'Order accepted and processing started',
-                'shipped': 'Order dispatched from fulfillment center',
-                'delivered': 'Order successfully delivered to customer',
-            };
+        // Create fulfillment tracking entry for vendor acceptance
+        if (status.toLowerCase() === 'processing') {
             await pool.query(
                 `INSERT INTO order_fulfillment_tracking (order_id, status, note, created_at)
                  VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
-                [id, status.toLowerCase(), fulfillmentNotes[status.toLowerCase()] || `Order ${status} by vendor`]
-            );
-        }
-
-        if (status.toLowerCase() === 'delivered') {
-            await pool.query(
-                `INSERT INTO vendor_payouts (order_id, vendor_id, status, delivered_at, due_date)
-                 SELECT 
-                     o.id,
-                     o.vendor_id,
-                     'pending',
-                     NOW(),
-                     NOW() + (
-                         COALESCE(
-                             CASE 
-                                 WHEN LOWER(v.credit_cycle) LIKE '%immediate%' THEN 0
-                                 WHEN substring(v.credit_cycle from '\\d+') IS NOT NULL THEN substring(v.credit_cycle from '\\d+')::integer
-                                 ELSE 15
-                             END, 
-                             15
-                         ) * INTERVAL '1 day'
-                     )
-                 FROM orders o
-                 JOIN vendors v ON o.vendor_id = v.id
-                 WHERE o.id = $1
-                 ON CONFLICT (order_id) DO UPDATE SET
-                     delivered_at = EXCLUDED.delivered_at,
-                     due_date = EXCLUDED.due_date,
-                     updated_at = NOW()`,
-                [id]
+                [id, 'processing', 'Order accepted by vendor — ready for pickup by fulfillment center rider']
             );
         }
 
         // ── Route plan generation ─────────────────────────────────────────────
-        // When vendor accepts (processing), compute the planned FC route.
+        // When vendor accepts (processing), compute the planned FC route
+        // and set the first stop to pickup_pending so the FC gets notified.
         if (status.toLowerCase() === 'processing') {
             try {
                 await generateAndSaveRoutePlan(id);
+
+                // Set the first FC stop to pickup_pending — this is how the FC
+                // sees "a vendor has a package ready for pickup" in their dashboard.
+                await pool.query(
+                    `UPDATE order_route_plan 
+                     SET status = 'pickup_pending', updated_at = NOW()
+                     WHERE order_id = $1 AND stop_sequence = 1`,
+                    [id]
+                );
             } catch (routeErr) {
                 // Non-fatal — tracking still works without a route plan
                 if (process.env.Production !== 'true' && process.env.NODE_ENV !== 'production') {
@@ -836,6 +862,54 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
         return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: result.rows });
     } catch (error) {
         console.error("Error fetching vendor payouts:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const getOrderInvoiceController = async (req: Request, res: Response): Promise<Response | void> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || !authUser?.role) {
+        return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const rawOrderId = req.params.orderId;
+    const orderId = Array.isArray(rawOrderId) ? rawOrderId[0] : rawOrderId;
+
+    if (!orderId) {
+        return res.status(400).json({ message: "Order ID is required" });
+    }
+
+    try {
+        // Query to check if the order exists and get vendor info
+        const orderQ = await pool.query(
+            `SELECT id, vendor_id, (SELECT id FROM vendors WHERE user_id = $1 LIMIT 1) as request_vendor_id 
+             FROM orders 
+             WHERE id = $2`,
+            [authUser.userId, orderId]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(404).json({ message: "Order not found" });
+        }
+
+        const order = orderQ.rows[0];
+
+        // Access check: only admins, or the vendor who owns the order can access the invoice
+        const isAdmin = authUser.role === 'admin' || authUser.role === 'super_admin';
+        const isOwnerVendor = authUser.role === 'vendor' && order.vendor_id === order.request_vendor_id;
+
+        if (!isAdmin && !isOwnerVendor) {
+            return res.status(403).json({ message: "Forbidden. You do not have permission to view this invoice." });
+        }
+
+        const pdfBuffer = await generateInvoicePDFBuffer(orderId);
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename=invoice-${orderId}.pdf`);
+        res.send(pdfBuffer);
+
+    } catch (error) {
+        console.error("Error generating invoice PDF:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };

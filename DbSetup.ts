@@ -700,4 +700,26 @@ export async function ensureMarketplaceSchema() {
             END IF;
         END $$;
     `);
+
+    // Pickup flow migration (2026-07-04)
+    await pool.query(`
+        ALTER TABLE order_route_plan 
+            DROP CONSTRAINT IF EXISTS chk_orp_status;
+
+        ALTER TABLE order_route_plan 
+            ADD CONSTRAINT chk_orp_status
+            CHECK (status IN ('upcoming', 'pickup_pending', 'pickup_assigned', 'in_transit', 'arrived', 'departed'));
+
+        ALTER TABLE order_route_plan 
+            ADD COLUMN IF NOT EXISTS pickup_rider_id UUID REFERENCES delivery_agents(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_orp_pickup_status 
+            ON order_route_plan(fulfillment_center_id, status) 
+            WHERE status IN ('pickup_pending', 'pickup_assigned');
+
+        ALTER TABLE delivery_agents
+            ADD COLUMN IF NOT EXISTS current_latitude DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
+    `);
 }

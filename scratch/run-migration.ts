@@ -23,7 +23,7 @@ if (!databaseUrl) {
 const pool = new pg.Pool({ connectionString: databaseUrl });
 
 async function main() {
-    const migrationPath = path.resolve(__dirname, '../migrations/2026-06-16_product_variants.sql');
+    const migrationPath = path.resolve(__dirname, '../migrations/2026-07-06_verification_keys.sql');
     console.log("Reading migration file from:", migrationPath);
     
     if (!fs.existsSync(migrationPath)) {

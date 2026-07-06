@@ -2649,3 +2649,128 @@ export const getProductVariantsController = async (req: Request, res: Response):
         return res.status(500).json({ message: "Internal Server Error" });
     }
 };
+
+export const getLatestOrOrderedProducts = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const latestQuery = `
+            SELECT
+                p.id AS product_id,
+                p.name AS product_name,
+                p.category,
+                p.product_type,
+                p.rating,
+                p.review_count,
+                pImg.image_url AS primary_image,
+                COALESCE(vc.vendor_count, 0)::int AS seller_count,
+                COALESCE(pr.min_price, 0)::numeric AS min_price,
+                COALESCE(pr.max_price, 0)::numeric AS max_price,
+                COALESCE(pr.min_moq, 1)::int AS min_moq
+            FROM products p
+            LEFT JOIN products_images pImg
+                ON p.id = pImg.product_id AND pImg.is_primary = true AND pImg.approval_status = 'approved'
+            LEFT JOIN LATERAL (
+                SELECT COUNT(DISTINCT vendor_id)::int AS vendor_count
+                FROM vendor_products vp
+                JOIN vendors v ON v.id = vp.vendor_id
+                JOIN users u ON u.id = v.user_id
+                WHERE vp.product_id = p.id
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            ) vc ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    MIN(price)::numeric AS min_price,
+                    MAX(price)::numeric AS max_price,
+                    MIN(moq)::int AS min_moq
+                FROM vendor_products vp
+                JOIN vendors v ON v.id = vp.vendor_id
+                JOIN users u ON u.id = v.user_id
+                WHERE vp.product_id = p.id
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            ) pr ON true
+            WHERE p.approval_status = 'approved'
+              AND p.is_active = TRUE
+            ORDER BY p.created_at DESC
+            LIMIT 8
+        `;
+
+        const orderedQuery = `
+            SELECT DISTINCT ON (p.id)
+                p.id AS product_id,
+                p.name AS product_name,
+                p.category,
+                p.product_type,
+                p.rating,
+                p.review_count,
+                pImg.image_url AS primary_image,
+                COALESCE(vc.vendor_count, 0)::int AS seller_count,
+                COALESCE(pr.min_price, 0)::numeric AS min_price,
+                COALESCE(pr.max_price, 0)::numeric AS max_price,
+                COALESCE(pr.min_moq, 1)::int AS min_moq,
+                o.created_at AS order_date
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            JOIN products p ON oi.product_id = p.id
+            LEFT JOIN products_images pImg
+                ON p.id = pImg.product_id AND pImg.is_primary = true AND pImg.approval_status = 'approved'
+            LEFT JOIN LATERAL (
+                SELECT COUNT(DISTINCT vendor_id)::int AS vendor_count
+                FROM vendor_products vp
+                JOIN vendors v ON v.id = vp.vendor_id
+                JOIN users u ON u.id = v.user_id
+                WHERE vp.product_id = p.id
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            ) vc ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    MIN(price)::numeric AS min_price,
+                    MAX(price)::numeric AS max_price,
+                    MIN(moq)::int AS min_moq
+                FROM vendor_products vp
+                JOIN vendors v ON v.id = vp.vendor_id
+                JOIN users u ON u.id = v.user_id
+                WHERE vp.product_id = p.id
+                  AND vp.is_active = true
+                  AND v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND u.is_active = true
+            ) pr ON true
+            WHERE p.approval_status = 'approved'
+              AND p.is_active = TRUE
+            ORDER BY p.id, o.created_at DESC
+            LIMIT 8
+        `;
+
+        const [latestRes, orderedRes] = await Promise.all([
+            pool.query(latestQuery),
+            pool.query(orderedQuery)
+        ]);
+
+        const orderedRows = orderedRes.rows;
+        orderedRows.sort((a: any, b: any) => new Date(b.order_date).getTime() - new Date(a.order_date).getTime());
+
+        return res.status(200).json({
+            message: "Latest and ordered products fetched successfully",
+            data: {
+                latest: latestRes.rows,
+                ordered: orderedRows
+            }
+        });
+    } catch (e) {
+        console.error("Error fetching latest or ordered products:", e);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+

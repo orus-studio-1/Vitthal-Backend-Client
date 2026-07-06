@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
+import { respondServiceQuotationController } from "./Service.controller";
 import { sendQuotationRequestEmail, sendQuotationUpdateEmail } from "../helpers/emailService.helper";
 import { createNotification, notifyAllAdmins } from "./Notification.controller";
 import { generateBaseQuotationDocument, generateVendorQuotationDocument } from "../services/quotationDocument.service";
@@ -100,12 +101,31 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             [cartId]
         );
 
-        if (cartItemsResult.rows.length === 0) {
+        // Get service cart items
+        const serviceCartItemsResult = await client.query(
+            `
+                SELECT 
+                    sci.id AS service_cart_item_id,
+                    sci.service_id,
+                    sci.vendor_id,
+                    sci.quantity,
+                    sci.price_at_added,
+                    s.name AS service_name,
+                    s.description AS service_description
+                FROM service_cart_items sci
+                JOIN services s ON sci.service_id = s.id
+                WHERE sci.cart_id = $1
+            `,
+            [cartId]
+        );
+
+        if (cartItemsResult.rows.length === 0 && serviceCartItemsResult.rows.length === 0) {
             await client.query("ROLLBACK");
             return res.status(400).json({ message: "Quotation cart is empty" });
         }
 
         const createdQuotationIds: string[] = [];
+        const createdServiceQuotationIds: string[] = [];
 
         for (const item of cartItemsResult.rows) {
             // Find ALL vendors serving this product variant with quotation_enabled = true
@@ -127,6 +147,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                       AND v.approval_status = 'approved'
                       AND v.is_active = true
                       AND v.is_blocked = false
+                      AND v.vendor_type IN ('product', 'both')
                       AND u.is_active = true
                       AND (p.quotation_limit IS NULL OR vp.stock_quantity >= p.quotation_limit)
                 `,
@@ -222,12 +243,58 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             }
         }
 
-        if (createdQuotationIds.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "No eligible vendors found for the products in your quotation cart." });
+        // Process Service Quotations
+        for (const item of serviceCartItemsResult.rows) {
+            const [serviceCheck, vendorCheck] = await Promise.all([
+                client.query(`SELECT id FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`, [item.service_id]),
+                client.query(`SELECT id, user_id FROM vendors WHERE id = $1 AND approval_status = 'approved' AND is_active = true AND vendor_type IN ('service', 'both') LIMIT 1`, [item.vendor_id]),
+            ]);
+
+            if (serviceCheck.rows.length === 0 || vendorCheck.rows.length === 0) {
+                continue;
+            }
+
+            const vendorUser = vendorCheck.rows[0];
+
+            const quotationResult = await client.query(
+                `INSERT INTO service_quotations (user_id, vendor_id, service_id, scope_of_work, requested_price, status)
+                 VALUES ($1, $2, $3, $4, $5, 'pending_vendor')
+                 RETURNING id`,
+                [userId, item.vendor_id, item.service_id, requestNote || `Request quote for service: ${item.service_name}`, item.price_at_added]
+            );
+
+            const serviceQuotationId = quotationResult.rows[0].id as string;
+            createdServiceQuotationIds.push(serviceQuotationId);
+
+            await client.query(
+                `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
+                 VALUES ($1, $2, 'client', 'request', $3, $4)`,
+                [serviceQuotationId, userId, item.price_at_added, requestNote || `Request quote for service: ${item.service_name}`]
+            );
+
+            if (vendorUser.user_id) {
+                await createNotification({
+                    userId: vendorUser.user_id,
+                    type: "quotation_request_received",
+                    title: "New service quotation request",
+                    body: `You received a service quotation request for ${item.service_name}`,
+                    referenceType: "service_quotation",
+                    referenceId: serviceQuotationId,
+                });
+            }
         }
 
-        await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+        if (createdQuotationIds.length === 0 && createdServiceQuotationIds.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "No eligible vendors found for the items in your quotation cart." });
+        }
+
+        if (cartItemsResult.rows.length > 0) {
+            await client.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+        }
+        if (serviceCartItemsResult.rows.length > 0) {
+            await client.query(`DELETE FROM service_cart_items WHERE cart_id = $1`, [cartId]);
+        }
 
         await client.query("COMMIT");
 
@@ -434,6 +501,168 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
         }
 
         if (vendorQuotations.rows.length === 0) {
+            const serviceQuoteResult = await pool.query(
+                `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name
+                 FROM service_quotations sq
+                 JOIN services s ON s.id = sq.service_id
+                 JOIN vendors v ON v.id = sq.vendor_id
+                 WHERE sq.id = $1 AND sq.user_id = $2`,
+                [id, authUser.userId]
+            );
+
+            if (serviceQuoteResult.rows.length > 0) {
+                const mainQuote = serviceQuoteResult.rows[0];
+                const createdAt = new Date(mainQuote.created_at);
+
+                const groupResult = await pool.query(
+                    `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name
+                     FROM service_quotations sq
+                     JOIN services s ON s.id = sq.service_id
+                     JOIN vendors v ON v.id = sq.vendor_id
+                     WHERE sq.service_id = $1 AND sq.user_id = $2
+                       AND sq.created_at >= $3 AND sq.created_at <= $4`,
+                    [
+                        mainQuote.service_id,
+                        authUser.userId,
+                        new Date(createdAt.getTime() - 15000),
+                        new Date(createdAt.getTime() + 15000)
+                    ]
+                );
+
+                const serviceGroupQuotes = groupResult.rows;
+                const serviceGroupQuoteIds = serviceGroupQuotes.map(q => q.id);
+
+                const messagesRes = await pool.query(
+                    `SELECT sqm.id, sqm.quotation_id, sqm.sender_role, sqm.action, sqm.offer_price, sqm.note, sqm.reason, sqm.created_at,
+                            u.name AS sender_name
+                     FROM service_quotation_messages sqm
+                     JOIN users u ON u.id = sqm.sender_user_id
+                     WHERE sqm.quotation_id = ANY($1)
+                     ORDER BY sqm.created_at ASC`,
+                    [serviceGroupQuoteIds]
+                );
+
+                const messagesByQuotation: Record<string, any[]> = {};
+                for (const msg of messagesRes.rows) {
+                    if (!messagesByQuotation[msg.quotation_id]) {
+                        messagesByQuotation[msg.quotation_id] = [];
+                    }
+                    messagesByQuotation[msg.quotation_id].push({
+                        id: msg.id,
+                        quotation_id: msg.quotation_id,
+                        sender_role: msg.sender_role,
+                        action: msg.action,
+                        offer_price: msg.offer_price,
+                        offer_quantity: null,
+                        note: msg.note,
+                        reason: msg.reason,
+                        created_at: msg.created_at,
+                        vendor_name: msg.sender_name
+                    });
+                }
+
+                const vendor_quotations = [];
+                for (const q of serviceGroupQuotes) {
+                    // Determine current_offer_by based on status
+                    let current_offer_by: string | null = null;
+                    if (["vendor_offered", "vendor_countered"].includes(q.status)) {
+                        current_offer_by = "vendor";
+                    } else if (["client_countered"].includes(q.status)) {
+                        current_offer_by = "client";
+                    }
+                    // Only show agreed_price as current offer when vendor has responded
+                    const current_offer_price = q.agreed_price ?? null;
+
+                    let vendorDocUrl = q.vendor_document_url ?? null;
+                    if (q.vendor_document_s3_key) {
+                        try {
+                            vendorDocUrl = await getPresignedUrl(q.vendor_document_s3_key);
+                        } catch (s3Err) {
+                            console.error(`Failed to generate presigned URL for service vendor doc ${q.id}:`, s3Err);
+                        }
+                    }
+
+                    vendor_quotations.push({
+                        id: q.id,
+                        status: q.status,
+                        vendor_id: q.vendor_id,
+                        vendor_name: q.vendor_name,
+                        product_name: q.service_name,
+                        requested_quantity: 1,
+                        requested_price: q.requested_price,
+                        current_offer_price,
+                        current_offer_quantity: null,
+                        current_offer_by,
+                        accepted_price: q.status === "client_accepted" ? q.agreed_price : null,
+                        accepted_quantity: null,
+                        rejection_reason: q.status === "client_rejected" ? "Rejected" : null,
+                        admin_confirmation_status: null,
+                        admin_confirmation_message: null,
+                        admin_confirmed_at: null,
+                        quotation_group_id: q.id,
+                        delivery_days: q.delivery_days ?? null,
+                        token_percentage: q.token_percentage ?? null,
+                        token_amount: q.token_amount ?? null,
+                        vendor_document_url: vendorDocUrl,
+                        created_at: q.created_at,
+                        updated_at: q.updated_at,
+                        messages: messagesByQuotation[q.id] || []
+                    });
+                }
+
+                const docResult = await pool.query(
+                    `SELECT quotation_number, document_url, s3_key, valid_until, created_at
+                     FROM service_quotation_documents
+                     WHERE service_quotation_id = $1 LIMIT 1`,
+                    [mainQuote.id]
+                );
+
+                let document = null;
+                if (docResult.rows.length > 0) {
+                    const docRow = docResult.rows[0];
+                    let documentUrl = docRow.document_url;
+                    if (docRow.s3_key) {
+                        try {
+                            documentUrl = await getPresignedUrl(docRow.s3_key);
+                        } catch (s3Err) {
+                            console.error("Failed to generate presigned URL for service base doc:", s3Err);
+                        }
+                    }
+                    document = {
+                        quotation_number: docRow.quotation_number,
+                        document_url: documentUrl,
+                        valid_until: docRow.valid_until,
+                        created_at: docRow.created_at,
+                    };
+                }
+
+                const serviceImageResult = await pool.query(
+                    `SELECT COALESCE(
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                        (SELECT pc.image FROM product_category pc WHERE pc.id = s.category_id LIMIT 1)
+                     ) AS media_url
+                     FROM services s WHERE s.id = $1`,
+                    [mainQuote.service_id]
+                );
+                const serviceImage = serviceImageResult.rows[0]?.media_url || null;
+
+                const data = {
+                    product_id: mainQuote.service_id,
+                    product_name: mainQuote.service_name,
+                    product_image: serviceImage,
+                    quotation_limit: null,
+                    requested_quantity: 1,
+                    requested_price: mainQuote.requested_price,
+                    quotation_group_id: mainQuote.id,
+                    document,
+                    isService: true,
+                    vendor_quotations
+                };
+
+                return res.status(200).json({ data });
+            }
+
             return res.status(404).json({ message: "Quotation not found" });
         }
 
@@ -561,6 +790,17 @@ export const respondClientQuotationController = async (req: Request, res: Respon
         );
 
         if (quotationResult.rows.length === 0) {
+            const serviceQuoteResult = await client.query(
+                `SELECT id FROM service_quotations WHERE id = $1 AND user_id = $2 LIMIT 1`,
+                [id, authUser.userId]
+            );
+
+            if (serviceQuoteResult.rows.length > 0) {
+                await client.query("ROLLBACK");
+                client.release();
+                return respondServiceQuotationController(req, res);
+            }
+
             await client.query("ROLLBACK");
             return res.status(404).json({ message: "Quotation not found" });
         }

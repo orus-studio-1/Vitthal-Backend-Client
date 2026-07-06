@@ -251,7 +251,10 @@ export function startAbandonedReminderJob() {
         }
     };
 
-    void runJob();
+    // Delay startup run to allow schema setup/migrations to finish and avoid database lock contention/deadlocks
+    setTimeout(() => {
+        void runJob();
+    }, 10000);
 
     const scheduleExpression = "0 * * * *";
     const cronJob = new CronJob(scheduleExpression, () => {

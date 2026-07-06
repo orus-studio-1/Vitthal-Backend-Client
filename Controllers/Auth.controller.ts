@@ -215,9 +215,15 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
 
         }
 
-        const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
+        let vendorType: string | undefined;
+        if (user.role === 'vendor') {
+            const vendorResult = await pool.query('SELECT vendor_type FROM vendors WHERE user_id = $1 LIMIT 1', [user.id]);
+            vendorType = vendorResult.rows[0]?.vendor_type || 'product';
+        }
 
-        const accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+        const refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role, vendorType);
+
+        const accessToken = generateAccessToken(user.id, user.name, user.email, user.role, vendorType);
 
         // Store refresh token in database for revocation and session tracking
         await pool.query('UPDATE users SET refresh_token = $1 WHERE id = $2', [refreshToken, user.id]);
@@ -253,7 +259,29 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
     if (!user) {
         return res.status(401).json({ message: 'Unauthorized' });
     }
-    return res.status(200).json({ user: { userId: user.userId, username: user.username, email: user.email, role: user.role } });
+    let vendorType: string | null = null;
+    if (user.role === "vendor") {
+        try {
+            const vendorRes = await pool.query(
+                `SELECT vendor_type FROM vendors WHERE user_id = $1`,
+                [user.userId]
+            );
+            if (vendorRes.rows.length > 0) {
+                vendorType = vendorRes.rows[0].vendor_type;
+            }
+        } catch (err) {
+            console.error("Error fetching vendor_type for getCurrentUser:", err);
+        }
+    }
+    return res.status(200).json({
+        user: {
+            userId: user.userId,
+            username: user.username,
+            email: user.email,
+            role: user.role,
+            vendorType
+        }
+    });
 }
 
 export async function logoutUser(req: Request, res: Response): Promise<Response> {
@@ -492,6 +520,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
         const normalizedCompanyName = normalizeRequiredText(req.body.companyName);
         const normalizedBusinessType = normalizeRequiredText(req.body.businessType);
+        const normalizedVendorType = req.body.vendorType === "service" ? "service" : "product";
         const normalizedGstNumber = normalizeRequiredText(req.body.gstNumber);
         const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
         const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
@@ -589,6 +618,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         let userRole = user.role;
         let refreshToken = "";
         let accessToken = "";
+        let vendorType: string | undefined;
 
         try {
             await client.query("BEGIN");
@@ -640,9 +670,10 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 approval_status,
                                 approval_notes,
                                 application_number,
+                                vendor_type,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, $15, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
@@ -660,6 +691,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 approval_status = EXCLUDED.approval_status,
                                 approval_notes = EXCLUDED.approval_notes,
                                 application_number = COALESCE(vendors.application_number, EXCLUDED.application_number),
+                                vendor_type = EXCLUDED.vendor_type,
                                 updated_at = NOW()
                         `,
                     [
@@ -676,7 +708,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         normalizedCreditCycle,
                         parsedMinCommission,
                         parsedMaxCommission,
-                        appNumber
+                        appNumber,
+                        normalizedVendorType
                     ]
                 );
 
@@ -699,12 +732,13 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
 
                 // Get the vendor record to link categories
                 const vendorResult = await client.query(
-                    `SELECT id FROM vendors WHERE user_id = $1`,
+                    `SELECT id, vendor_type FROM vendors WHERE user_id = $1`,
                     [user.id]
                 );
 
                 if (vendorResult.rows.length > 0) {
                     const vendorId = vendorResult.rows[0].id;
+                    vendorType = vendorResult.rows[0].vendor_type || 'product';
 
                     // Delete existing vendor categories first (for updates)
                     await client.query(
@@ -736,8 +770,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 }
             }
 
-            refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role);
-            accessToken = generateAccessToken(user.id, user.name, user.email, user.role);
+            refreshToken = generateRefreshToken(user.id, user.name, user.email, user.role, vendorType);
+            accessToken = generateAccessToken(user.id, user.name, user.email, user.role, vendorType);
 
             const tokenResult = await client.query('UPDATE users SET refresh_token = $1 WHERE id = $2 RETURNING role', [refreshToken, user.id]);
             userRole = tokenResult.rows[0]?.role || userRole;

@@ -6,8 +6,8 @@ import pool from "../DbConnect";
 const generateNewAccessToken = (refreshToken: string) => {
     try {
         const decoded = verifyToken(refreshToken, "refresh", { logErrors: false });
-        const { userId, username, email, role } = decoded;
-        const newAccessToken = generateAccessToken(userId, username, email, role);
+        const { userId, username, email, role, vendorType } = decoded;
+        const newAccessToken = generateAccessToken(userId, username, email, role, vendorType);
         return newAccessToken;
     }
     catch (error) {

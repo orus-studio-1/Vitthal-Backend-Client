@@ -804,13 +804,52 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
     }
 
     try {
-        // Resolve vendor id
-        const vendorQ = await pool.query(`SELECT id FROM vendors WHERE user_id = $1`, [userId]);
+        // Resolve vendor id and type
+        const vendorQ = await pool.query(`SELECT id, vendor_type FROM vendors WHERE user_id = $1`, [userId]);
         if (vendorQ.rows.length === 0) {
             return res.status(404).json({ message: "Vendor not found" });
         }
         const vendorId = vendorQ.rows[0].id;
+        const isService = vendorQ.rows[0].vendor_type === 'service';
 
+        if (isService) {
+            // ─── SERVICE VENDOR: return service_bookings as payout records ───────
+            const serviceQuery = `
+                SELECT 
+                    sb.id AS payout_id,
+                    sb.id AS order_id,
+                    sb.vendor_id,
+                    100 AS payout_percentage,
+                    sb.total_amount AS payout_amount,
+                    CASE
+                        WHEN sb.payment_status = 'paid' THEN 'paid'
+                        WHEN sb.status = 'completed' THEN 'pending'
+                        ELSE 'pending'
+                    END AS payout_status,
+                    CASE WHEN sb.status = 'completed' THEN sb.updated_at ELSE NULL END AS delivered_at,
+                    NULL AS due_date,
+                    CASE WHEN sb.payment_status = 'paid' THEN sb.updated_at ELSE NULL END AS last_paid_at,
+                    sb.booking_notes AS payout_notes,
+                    sb.total_amount AS order_total_amount,
+                    sb.status AS order_status,
+                    sb.payment_status AS client_payment_status,
+                    u.name AS customer_name,
+                    v.company_name AS vendor_name,
+                    v.credit_cycle AS vendor_credit_cycle,
+                    CASE WHEN sb.payment_status = 'paid' THEN sb.total_amount ELSE 0 END AS client_paid_amount,
+                    CASE WHEN sb.payment_status = 'paid' THEN 100 ELSE 0 END AS client_paid_percentage
+                FROM service_bookings sb
+                JOIN users u ON sb.user_id = u.id
+                JOIN vendors v ON v.id = sb.vendor_id
+                WHERE sb.vendor_id = $1
+                  AND sb.status NOT IN ('cancelled', 'pending')
+                ORDER BY sb.created_at DESC
+            `;
+            const serviceResult = await pool.query(serviceQuery, [vendorId]);
+            return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: serviceResult.rows });
+        }
+
+        // ─── PRODUCT VENDOR: original vendor_payouts logic ───────────────────
         const query = `
             SELECT 
                 vp.id AS payout_id,

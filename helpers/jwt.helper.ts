@@ -8,6 +8,7 @@ type TokenPayload = JwtPayload & {
     email: string;
     role: string;
     type: TokenType;
+    vendorType?: string;
 };
 
 function isTokenPayload(decoded: string | JwtPayload): decoded is TokenPayload {
@@ -18,9 +19,9 @@ function isTokenPayload(decoded: string | JwtPayload): decoded is TokenPayload {
         && (decoded.type === 'access' || decoded.type === 'refresh');
 }
 
-export function generateRefreshToken(userId: string, username: string, email: string, role: string): string {
+export function generateRefreshToken(userId: string, username: string, email: string, role: string, vendorType?: string): string {
     try {
-        const payload: TokenPayload = { userId, username, email, role, type: 'refresh' };
+        const payload: TokenPayload = { userId, username, email, role, type: 'refresh', vendorType };
         const secretKey = process.env.REFRESH_TOKEN_SECRET;
         if (!secretKey) {
             throw new Error('Refresh token secret key is not defined');
@@ -36,9 +37,9 @@ export function generateRefreshToken(userId: string, username: string, email: st
     }
 }
 
-export function generateAccessToken(userId: string, username: string, email: string, role: string): string {
+export function generateAccessToken(userId: string, username: string, email: string, role: string, vendorType?: string): string {
     try {
-        const payload: TokenPayload = { userId, username, email, role, type: 'access' };
+        const payload: TokenPayload = { userId, username, email, role, type: 'access', vendorType };
         const secretKey = process.env.ACCESS_TOKEN_SECRET;
         if (!secretKey) {
             throw new Error('Access token secret key is not defined');
@@ -54,7 +55,7 @@ export function generateAccessToken(userId: string, username: string, email: str
     }
 }
 
-export function verifyToken(token: string, type: TokenType, options: { logErrors?: boolean } = {}): { userId: string, username: string, email: string, role: string } {
+export function verifyToken(token: string, type: TokenType, options: { logErrors?: boolean } = {}): { userId: string, username: string, email: string, role: string, vendorType?: string | undefined } {
     try {
         const secretKey = type === 'access' ? process.env.ACCESS_TOKEN_SECRET : process.env.REFRESH_TOKEN_SECRET;
         if (!secretKey) {
@@ -70,7 +71,7 @@ export function verifyToken(token: string, type: TokenType, options: { logErrors
             throw new Error('Invalid token type');
         }
 
-        return { userId: decoded.userId, username: decoded.username, email: decoded.email, role: decoded.role };
+        return { userId: decoded.userId, username: decoded.username, email: decoded.email, role: decoded.role, vendorType: decoded.vendorType };
     }
     catch (error) {
         if (options.logErrors !== false) {

@@ -1060,14 +1060,23 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
     }
 };
 
-export const getCategories = async (_req: Request, res: Response): Promise<Response> => {
+export const getCategories = async (req: Request, res: Response): Promise<Response> => {
+    const { type } = req.query;
     try {
-        const result = await pool.query(
-            `SELECT id, code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order
+        let query = `
+             SELECT id, code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, category_type
              FROM product_category
              WHERE is_active = TRUE
-             ORDER BY sort_order ASC, label ASC`
-        );
+        `;
+        const params: any[] = [];
+        if (type === 'service') {
+            query += ` AND category_type IN ('service', 'both')`;
+        } else if (type === 'product') {
+            query += ` AND category_type IN ('product', 'both')`;
+        }
+        query += ` ORDER BY sort_order ASC, label ASC`;
+
+        const result = await pool.query(query, params);
         for (const row of result.rows) {
             const originalImage = typeof row.image === "string" ? row.image.trim() : "";
             if (

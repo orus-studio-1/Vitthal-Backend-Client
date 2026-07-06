@@ -64,7 +64,15 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         );
         const cartItems = cartItemsQuery.rows;
 
-        if (cartItems.length === 0) {
+        const serviceCartItemsQuery = await pool.query(
+            `SELECT sci.service_id, sci.vendor_service_id, sci.vendor_id, sci.quantity, sci.price_at_added
+             FROM service_cart_items sci
+             WHERE sci.cart_id = $1`,
+            [cartId]
+        );
+        const serviceCartItems = serviceCartItemsQuery.rows;
+
+        if (cartItems.length === 0 && serviceCartItems.length === 0) {
             await pool.query('ROLLBACK');
             return res.status(400).json({ message: "Cart is empty" });
         }
@@ -140,9 +148,24 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             }
         }
 
+        // 4b. Create service bookings (direct checkout)
+        for (const item of serviceCartItems) {
+            const amount = Number(item.price_at_added) * Number(item.quantity);
+            await pool.query(
+                `INSERT INTO service_bookings (
+                    user_id, vendor_id, vendor_service_id, total_amount, status, payment_status
+                ) VALUES ($1, $2, $3, $4, 'pending', 'pending')`,
+                [userId, item.vendor_id, item.vendor_service_id, amount]
+            );
+        }
+
         // 5. Clear the cart items since they are now ordered
         await pool.query(
             `DELETE FROM cart_items WHERE cart_id = $1`,
+            [cartId]
+        );
+        await pool.query(
+            `DELETE FROM service_cart_items WHERE cart_id = $1`,
             [cartId]
         );
 
@@ -206,18 +229,30 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             [cartId]
         );
         const cartItems = cartItemsQuery.rows;
-        if (cartItems.length === 0) {
+
+        // Fetch service cart items
+        const serviceCartItemsQuery = await pool.query(
+            `SELECT sci.service_id, sci.vendor_service_id, sci.vendor_id, sci.quantity, sci.price_at_added
+             FROM service_cart_items sci
+             WHERE sci.cart_id = $1`,
+            [cartId]
+        );
+        const serviceCartItems = serviceCartItemsQuery.rows;
+
+        if (cartItems.length === 0 && serviceCartItems.length === 0) {
             await pool.query('ROLLBACK');
             return res.status(400).json({ message: "Cart is empty" });
         }
 
-        // 4. Verify stock quantity
-        for (const item of cartItems) {
-            if (Number(item.quantity) > Number(item.stock_quantity)) {
-                await pool.query('ROLLBACK');
-                return res.status(400).json({ 
-                    message: `Insufficient stock for product "${item.product_name}". Available: ${item.stock_quantity}, Requested: ${item.quantity}.` 
-                });
+        // 4. Verify stock quantity (products only)
+        if (cartItems.length > 0) {
+            for (const item of cartItems) {
+                if (Number(item.quantity) > Number(item.stock_quantity)) {
+                    await pool.query('ROLLBACK');
+                    return res.status(400).json({ 
+                        message: `Insufficient stock for product "${item.product_name}". Available: ${item.stock_quantity}, Requested: ${item.quantity}.` 
+                    });
+                }
             }
         }
 
@@ -291,6 +326,23 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             }
         }
 
+        // 5b. Create service bookings (pending payment)
+        const bookingIds: string[] = [];
+        let totalServiceAmount = 0;
+
+        for (const item of serviceCartItems) {
+            const amount = Number(item.price_at_added) * Number(item.quantity);
+            totalServiceAmount += amount;
+
+            const bookingResult = await pool.query(
+                `INSERT INTO service_bookings (
+                    user_id, vendor_id, vendor_service_id, total_amount, status, payment_status
+                ) VALUES ($1, $2, $3, $4, 'pending', 'pending') RETURNING id`,
+                [userId, item.vendor_id, item.vendor_service_id, amount]
+            );
+            bookingIds.push(bookingResult.rows[0].id);
+        }
+
         // Calculate taxes dynamically based on each item's actual gst_percentage
         let taxes = 0;
         for (const item of cartItems) {
@@ -301,7 +353,7 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             const itemGstPercent = item.gst_percentage !== null && item.gst_percentage !== undefined ? Number(item.gst_percentage) : 0;
             taxes += (effectivePrice * Number(item.quantity)) * (itemGstPercent / 100);
         }
-        const subtotal = totalCheckoutAmount;
+        const subtotal = totalCheckoutAmount + totalServiceAmount;
         const finalTotal = subtotal + taxes;
 
         // 6. Create Razorpay order
@@ -324,15 +376,16 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             notes: {
                 userId,
                 orderIds: orderIds.join(","),
+                bookingIds: bookingIds.join(","),
             }
         }) as any);
 
         // 7. Store payment record as pending
         await pool.query(
             `INSERT INTO payments (
-                user_id, amount, status, payment_method, razorpay_order_id, order_ids, split_percentage
-            ) VALUES ($1, $2, 'pending', 'razorpay', $3, $4, 100.00)`,
-            [userId, finalTotal, razorpayOrder.id, orderIds]
+                user_id, amount, status, payment_method, razorpay_order_id, order_ids, booking_ids, split_percentage
+            ) VALUES ($1, $2, 'pending', 'razorpay', $3, $4, $5, 100.00)`,
+            [userId, finalTotal, razorpayOrder.id, orderIds, bookingIds]
         );
 
         await pool.query('COMMIT');
@@ -394,9 +447,9 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
 
         await pool.query('BEGIN');
 
-        // 2. Fetch payment details to get order_ids and user_id
+        // 2. Fetch payment details to get order_ids, booking_ids, and user_id
         const paymentQuery = await pool.query(
-            `SELECT order_ids, user_id, amount FROM payments WHERE razorpay_order_id = $1`,
+            `SELECT order_ids, booking_ids, user_id, amount FROM payments WHERE razorpay_order_id = $1`,
             [razorpay_order_id]
         );
 
@@ -405,7 +458,7 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
             return res.status(404).json({ message: "Payment record not found." });
         }
 
-        const { order_ids, user_id } = paymentQuery.rows[0];
+        const { order_ids, booking_ids, user_id } = paymentQuery.rows[0];
 
         // 3. Update payment record to successful
         await pool.query(
@@ -416,23 +469,35 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
         );
 
         // 4. Update orders status and deduct stock
-        for (const orderId of order_ids) {
-            // Update order status to 'pending' and payment_status to 'paid'
-            await pool.query(
-                `UPDATE orders 
-                 SET status = 'pending', payment_status = 'paid', updated_at = NOW() 
-                 WHERE id = $1`,
-                [orderId]
-            );
+        if (order_ids && order_ids.length > 0) {
+            for (const orderId of order_ids) {
+                // Update order status to 'pending' and payment_status to 'paid'
+                await pool.query(
+                    `UPDATE orders 
+                     SET status = 'pending', payment_status = 'paid', updated_at = NOW() 
+                     WHERE id = $1`,
+                    [orderId]
+                );
 
-            // Add history entry
-            await pool.query(
-                `INSERT INTO order_status_history (order_id, status, note, created_at)
-                 VALUES ($1, 'pending', 'Payment verified successfully. Awaiting vendor confirmation.', CURRENT_TIMESTAMP)`,
-                [orderId]
-            );
+                // Add history entry
+                await pool.query(
+                    `INSERT INTO order_status_history (order_id, status, note, created_at)
+                     VALUES ($1, 'pending', 'Payment verified successfully. Awaiting vendor confirmation.', CURRENT_TIMESTAMP)`,
+                    [orderId]
+                );
+            }
+        }
 
-            // Stock deduction removed from here - it is now performed when vendor accepts the order
+        // 4b. Update service bookings status and payment status
+        if (booking_ids && booking_ids.length > 0) {
+            for (const bookingId of booking_ids) {
+                await pool.query(
+                    `UPDATE service_bookings 
+                     SET status = 'confirmed', payment_status = 'paid', updated_at = NOW() 
+                     WHERE id = $1`,
+                    [bookingId]
+                );
+            }
         }
 
         // 5. Clear user's active direct cart
@@ -443,6 +508,7 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
         if (cartQuery.rows.length > 0) {
             const cartId = cartQuery.rows[0].id;
             await pool.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+            await pool.query(`DELETE FROM service_cart_items WHERE cart_id = $1`, [cartId]);
         }
 
         await pool.query('COMMIT');

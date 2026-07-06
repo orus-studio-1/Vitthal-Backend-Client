@@ -210,7 +210,7 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                   LEFT JOIN (
                       SELECT DISTINCT ON (user_id) user_id, latitude, longitude, city, state
                       FROM addresses
-                      ORDER BY user_id, is_default DESC, created_at DESC
+                      ORDER BY user_id, created_at DESC
                   ) va ON v.user_id = va.user_id
                   WHERE vs.service_id = $1 AND vs.is_active = true`,
                 [id]

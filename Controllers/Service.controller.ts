@@ -172,7 +172,6 @@ export const getServiceDetailController = async (req: Request, res: Response): P
         const serviceResult = await pool.query(
             `SELECT
                 s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id,
-                s.specifications,
                 pc.label AS category_label,
                 pc.code AS category_code,
                 pc.image AS category_image
@@ -210,7 +209,7 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                   LEFT JOIN (
                       SELECT DISTINCT ON (user_id) user_id, latitude, longitude, city, state
                       FROM addresses
-                      ORDER BY user_id, is_default DESC, created_at DESC
+                      ORDER BY user_id, created_at DESC
                   ) va ON v.user_id = va.user_id
                   WHERE vs.service_id = $1 AND vs.is_active = true`,
                 [id]

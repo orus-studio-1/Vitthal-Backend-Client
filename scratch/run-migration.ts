@@ -23,26 +23,41 @@ if (!databaseUrl) {
 const pool = new pg.Pool({ connectionString: databaseUrl });
 
 async function main() {
-    const migrationPath = path.resolve(__dirname, '../migrations/2026-07-06_verification_keys.sql');
-    console.log("Reading migration file from:", migrationPath);
-    
-    if (!fs.existsSync(migrationPath)) {
-        console.error("Migration file does not exist at:", migrationPath);
-        process.exit(1);
-    }
-    
-    const sql = fs.readFileSync(migrationPath, 'utf8');
+    const migrations = [
+        '2026-07-02_vendor_type.sql',
+        '2026-07-02_services_subsystem.sql',
+        '2026-07-02_secure_booking_otp.sql',
+        '2026-07-02_service_quotation_messages.sql',
+        '2026-07-02_service_reviews.sql',
+        '2026-07-02_services_media.sql',
+        '2026-07-03_service_notification_types.sql',
+        'add_service_cart.sql',
+        'add_service_wishlist.sql',
+        '2026-07-04_pickup_flow.sql',
+        '2026-07-06_verification_keys.sql'
+    ];
     
     const client = await pool.connect();
     try {
-        console.log("Running migration SQL against database...");
-        await client.query('BEGIN');
-        await client.query(sql);
-        await client.query('COMMIT');
-        console.log("Migration executed successfully! 🎉");
+        for (const migration of migrations) {
+            const migrationPath = path.resolve(__dirname, `../migrations/${migration}`);
+            console.log("Reading migration file from:", migrationPath);
+            
+            if (!fs.existsSync(migrationPath)) {
+                console.error("Migration file does not exist at:", migrationPath);
+                continue;
+            }
+            
+            const sql = fs.readFileSync(migrationPath, 'utf8');
+            console.log(`Running migration SQL (${migration}) against database...`);
+            await client.query('BEGIN');
+            await client.query(sql);
+            await client.query('COMMIT');
+            console.log(`Migration ${migration} executed successfully! 🎉`);
+        }
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error("Error executing migration:", error);
+        console.error("Error executing migrations:", error);
     } finally {
         client.release();
         await pool.end();

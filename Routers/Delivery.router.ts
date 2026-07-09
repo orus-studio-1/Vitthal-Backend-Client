@@ -15,7 +15,17 @@ import {
     getRiderTasksController,
     postRiderDeliverController,
     postRelocateItemController,
-    postRiderFailDeliveryController
+    postRiderFailDeliveryController,
+    getRiderDashboardStatsController,
+    getRiderCompletedDeliveriesController,
+    getPendingPickupsController,
+    postAssignPickupController,
+    postRiderConfirmPickupController,
+    getRiderPickupTasksController,
+    patchRiderLocationController,
+    getRiderLiveDetailsController,
+    verifyPickupController,
+    verifyDeliveryController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -29,6 +39,8 @@ deliveryRouter.patch("/hub/inventory/:packageId/status", authMiddleware, patchIn
 deliveryRouter.get("/hub/pending-outbound", authMiddleware, getPendingOutboundController);
 deliveryRouter.post("/hub/handover-scan", authMiddleware, postHandoverScanController);
 deliveryRouter.post("/hub/relocate", authMiddleware, postRelocateItemController);
+deliveryRouter.get("/hub/pending-pickups", authMiddleware, getPendingPickupsController);
+deliveryRouter.post("/hub/assign-pickup", authMiddleware, postAssignPickupController);
 
 // Rider CRUD / management for Hub Manager
 deliveryRouter.get("/riders", authMiddleware, getRidersController);
@@ -37,8 +49,19 @@ deliveryRouter.patch("/riders/:riderId", authMiddleware, patchRiderController);
 
 // Rider dashboard operations (used by delivery agent role)
 deliveryRouter.patch("/rider/status", authMiddleware, patchRiderStatusController);
+deliveryRouter.patch("/rider/location", authMiddleware, patchRiderLocationController);
+deliveryRouter.get("/rider/stats", authMiddleware, getRiderDashboardStatsController);
 deliveryRouter.get("/rider/tasks", authMiddleware, getRiderTasksController);
+deliveryRouter.get("/rider/completed-deliveries", authMiddleware, getRiderCompletedDeliveriesController);
+deliveryRouter.get("/rider/pickup-tasks", authMiddleware, getRiderPickupTasksController);
 deliveryRouter.post("/rider/deliver", authMiddleware, postRiderDeliverController);
+deliveryRouter.post("/rider/confirm-pickup", authMiddleware, postRiderConfirmPickupController);
 deliveryRouter.post("/rider/fail-delivery", authMiddleware, postRiderFailDeliveryController);
+
+deliveryRouter.post("/rider/verify-pickup", authMiddleware, verifyPickupController);
+deliveryRouter.post("/rider/verify-delivery", authMiddleware, verifyDeliveryController);
+
+// Hub/Admin Live tracking query
+deliveryRouter.get("/riders/:riderId/live", authMiddleware, getRiderLiveDetailsController);
 
 export default deliveryRouter;

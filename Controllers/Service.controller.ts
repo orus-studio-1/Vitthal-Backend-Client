@@ -172,7 +172,6 @@ export const getServiceDetailController = async (req: Request, res: Response): P
         const serviceResult = await pool.query(
             `SELECT
                 s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id,
-                s.specifications,
                 pc.label AS category_label,
                 pc.code AS category_code,
                 pc.image AS category_image

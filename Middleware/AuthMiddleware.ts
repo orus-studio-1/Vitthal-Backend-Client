@@ -35,8 +35,8 @@ const handleRoleTokens = async (
                 }
 
                 // Query database to verify if user's session is still active (refresh_token is not null/revoked)
-                const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
-                if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+                const userResult = await pool.query("SELECT refresh_token, is_active, deletion_requested_at FROM users WHERE id = $1", [decoded.userId]);
+                if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token || (!userResult.rows[0].is_active && !userResult.rows[0].deletion_requested_at)) {
                     throw new Error("Session has been logged out or is invalid");
                 }
 
@@ -55,8 +55,8 @@ const handleRoleTokens = async (
             }
 
             // Query database to verify if user's session is still active (refresh_token is not null/revoked)
-            const userResult = await pool.query("SELECT refresh_token FROM users WHERE id = $1", [decoded.userId]);
-            if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token) {
+            const userResult = await pool.query("SELECT refresh_token, is_active, deletion_requested_at FROM users WHERE id = $1", [decoded.userId]);
+            if (userResult.rows.length === 0 || !userResult.rows[0].refresh_token || (!userResult.rows[0].is_active && !userResult.rows[0].deletion_requested_at)) {
                 throw new Error("Session has been logged out or is invalid");
             }
 

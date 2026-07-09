@@ -485,7 +485,8 @@ export const getRidersController = async (req: Request, res: Response): Promise<
 
         const query = `
             SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, 
-                   da.status, da.is_online, u.name as rider_name, u.email as rider_email
+                   da.status, da.is_online, da.current_latitude, da.current_longitude, da.last_located_at,
+                   u.name as rider_name, u.email as rider_email
             FROM delivery_agents da
             JOIN users u ON da.user_id = u.id
             WHERE da.fulfillment_center_id = $1 AND da.status != 'deleted'
@@ -536,8 +537,8 @@ export const createRiderController = async (req: Request, res: Response): Promis
         // Create User account for Rider
         const hashedPassword = await bcrypt.hash(password, 10);
         const userRes = await client.query(
-            `INSERT INTO users (name, email, password_hash, role, is_active)
-             VALUES ($1, $2, $3, 'delivery_agent', TRUE)
+            `INSERT INTO users (name, email, password_hash, role, is_active, is_verified)
+             VALUES ($1, $2, $3, 'delivery_agent', TRUE, TRUE)
              RETURNING id`,
             [name.trim(), normalizedEmail, hashedPassword]
         );
@@ -700,7 +701,7 @@ export const getRiderTasksController = async (req: Request, res: Response): Prom
 
         const query = `
             SELECT o.id as order_id, o.order_reference, o.customer_name, o.customer_phone,
-                   o.address_line, o.city, o.state, o.pincode,
+                   o.address_line, o.city, o.state, o.pincode, o.latitude, o.langitude,
                    (
                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
                        FROM order_items oi
@@ -725,6 +726,51 @@ export const getRiderTasksController = async (req: Request, res: Response): Prom
         });
     } catch (error) {
         console.error("Error fetching rider tasks:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 12.5 GET /api/delivery/rider/completed-deliveries (Rider gets completed drop history)
+export const getRiderCompletedDeliveriesController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    try {
+        const riderRes = await pool.query(
+            "SELECT id FROM delivery_agents WHERE user_id = $1 AND status = 'active'",
+            [user.userId]
+        );
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+        const riderId = riderRes.rows[0].id;
+
+        const result = await pool.query(
+            `SELECT o.id as order_id, o.order_reference, o.customer_name, 
+                    o.address_line, o.city, o.state, o.pincode,
+                    oft.created_at as delivered_at,
+                    (
+                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                        FROM order_items oi
+                        JOIN products p ON oi.product_id = p.id
+                        WHERE oi.order_id = o.id AND oi.vendor_id = o.vendor_id
+                    ) as items
+             FROM orders o
+             JOIN order_fulfillment_tracking oft ON o.id = oft.order_id
+             WHERE oft.delivery_agent_id = $1 AND oft.status = 'delivered'
+             ORDER BY oft.created_at DESC`,
+            [riderId]
+        );
+
+        return res.status(200).json({
+            message: "Completed deliveries history retrieved",
+            data: result.rows
+        });
+    } catch (error) {
+        console.error("Error fetching completed deliveries history:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };
@@ -872,4 +918,669 @@ export const postRiderFailDeliveryController = async (req: Request, res: Respons
     }
 };
 
+// 15. GET /api/delivery/rider/dashboard-stats (Rider gets dashboard metrics summary)
+export const getRiderDashboardStatsController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
 
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    try {
+        // Fetch Rider Profile
+        const riderRes = await pool.query(
+            `SELECT id, special_rider_id, contact_phone, vehicle_type, vehicle_number, is_online, status
+             FROM delivery_agents
+             WHERE user_id = $1 AND status = 'active'`,
+            [user.userId]
+        );
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+        const rider = riderRes.rows[0];
+
+        // Count completed deliveries today
+        const completedRes = await pool.query(
+            `SELECT COUNT(DISTINCT order_id) FROM order_fulfillment_tracking
+             WHERE delivery_agent_id = $1 AND status = 'delivered' 
+             AND created_at >= CURRENT_DATE`,
+            [rider.id]
+        );
+
+        // Count pending assigned tasks
+        const pendingRes = await pool.query(
+            `SELECT COUNT(DISTINCT oft.order_id)
+             FROM order_fulfillment_tracking oft
+             WHERE oft.delivery_agent_id = $1 
+               AND oft.status = 'handed_over'
+               AND NOT EXISTS (
+                   SELECT 1 FROM order_fulfillment_tracking oft2 
+                   WHERE oft2.order_id = oft.order_id AND oft2.status = 'delivered'
+               )`,
+            [rider.id]
+        );
+
+        const completedTripsToday = parseInt(completedRes.rows[0].count, 10) || 0;
+        const pendingTasksCount = parseInt(pendingRes.rows[0].count, 10) || 0;
+
+        return res.status(200).json({
+            message: "Rider dashboard stats retrieved successfully",
+            data: {
+                riderInfo: {
+                    id: rider.id,
+                    specialRiderId: rider.special_rider_id,
+                    contactPhone: rider.contact_phone,
+                    vehicleType: rider.vehicle_type,
+                    vehicleNumber: rider.vehicle_number,
+                    isOnline: rider.is_online,
+                    status: rider.status
+                },
+                completedTripsToday,
+                pendingTasksCount
+            }
+        });
+    } catch (error) {
+        console.error("Error retrieving rider dashboard stats:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VENDOR PICKUP FLOW — FC sends rider to vendor to collect package
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 15. GET /api/delivery/hub/pending-pickups
+// FC Manager sees all orders where a vendor has accepted but the package
+// hasn't been collected yet. Shows vendor details, not customer details.
+export const getPendingPickupsController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "fulfillment_center") {
+        return res.status(403).json({ message: "Unauthorized. Hub Manager access only." });
+    }
+
+    try {
+        const hub = await resolveHubDetails(user.userId);
+        if (!hub) {
+            return res.status(404).json({ message: "Fulfillment center profile not found." });
+        }
+
+        const query = `
+            SELECT orp.id as stop_id, orp.order_id, orp.stop_sequence, orp.status as pickup_status,
+                   orp.pickup_rider_id, orp.estimated_arrival,
+                   o.order_reference, o.total_amount, o.customer_name,
+                   o.vendor_city, o.vendor_state, o.vendor_latitude, o.vendor_longitude,
+                   v.company_name as vendor_name,
+                   a.address as vendor_address, a.city as vendor_address_city, 
+                   a.state as vendor_address_state, a.pincode as vendor_pincode,
+                   a.latitude as vendor_lat, a.longitude as vendor_lng,
+                   u_vendor.email as vendor_email,
+                   (SELECT phone FROM client WHERE user_id = v.user_id LIMIT 1) as vendor_phone,
+                   da.special_rider_id as assigned_rider_name,
+                   (
+                       SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                       FROM order_items oi
+                       JOIN products p ON oi.product_id = p.id
+                       WHERE oi.order_id = orp.order_id
+                   ) as items
+            FROM order_route_plan orp
+            JOIN orders o ON orp.order_id = o.id
+            JOIN vendors v ON o.vendor_id = v.id
+            JOIN users u_vendor ON v.user_id = u_vendor.id
+            LEFT JOIN addresses a ON a.user_id = v.user_id
+            LEFT JOIN delivery_agents da ON orp.pickup_rider_id = da.id
+            WHERE orp.fulfillment_center_id = $1 
+              AND orp.status IN ('pickup_pending', 'pickup_assigned')
+            ORDER BY orp.created_at ASC
+        `;
+        const result = await pool.query(query, [hub.id]);
+
+        return res.status(200).json({
+            message: "Pending pickups retrieved",
+            data: result.rows
+        });
+    } catch (error) {
+        console.error("Error retrieving pending pickups:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 16. POST /api/delivery/hub/assign-pickup
+// FC Manager assigns a rider to go pick up the package from the vendor location.
+export const postAssignPickupController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId, riderSpecialId } = req.body;
+
+    if (!user || user.role !== "fulfillment_center") {
+        return res.status(403).json({ message: "Unauthorized." });
+    }
+    if (!orderId || !riderSpecialId) {
+        return res.status(400).json({ message: "Order ID and Rider Special ID are required." });
+    }
+
+    const client = await pool.connect();
+    try {
+        const hub = await resolveHubDetails(user.userId);
+        if (!hub) {
+            return res.status(404).json({ message: "Hub not found." });
+        }
+
+        await client.query("BEGIN");
+
+        // Verify the rider exists and is active under this FC
+        const riderRes = await client.query(
+            `SELECT id, user_id FROM delivery_agents 
+             WHERE special_rider_id = $1 AND fulfillment_center_id = $2 AND status = 'active'`,
+            [riderSpecialId, hub.id]
+        );
+        if (riderRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ message: "Active Rider not found under this hub." });
+        }
+        const rider = riderRes.rows[0];
+
+        // Find the pickup_pending stop for this order at this FC
+        const stopRes = await client.query(
+            `SELECT id, stop_sequence FROM order_route_plan 
+             WHERE order_id = $1 AND fulfillment_center_id = $2 AND status = 'pickup_pending'`,
+            [orderId, hub.id]
+        );
+        if (stopRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "No pending pickup found for this order at this hub." });
+        }
+
+        // Update stop to pickup_assigned and record the pickup rider
+        await client.query(
+            `UPDATE order_route_plan 
+             SET status = 'pickup_assigned', pickup_rider_id = $1, updated_at = NOW()
+             WHERE id = $2`,
+            [rider.id, stopRes.rows[0].id]
+        );
+
+        // Insert tracking entry
+        const locationLabel = `${hub.name} (${hub.code})`;
+        await client.query(
+            `INSERT INTO order_fulfillment_tracking 
+             (order_id, fulfillment_center_id, delivery_agent_id, status, note, location_label, stop_sequence)
+             VALUES ($1, $2, $3, 'dispatched', $4, $5, $6)`,
+            [orderId, hub.id, rider.id, 
+             `Rider ${riderSpecialId} assigned for vendor pickup`, 
+             locationLabel, stopRes.rows[0].stop_sequence]
+        );
+
+        await client.query("COMMIT");
+        return res.status(200).json({
+            message: "Rider assigned for vendor pickup successfully.",
+            data: { orderId, riderSpecialId }
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Error assigning pickup rider:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
+    }
+};
+
+// 17. POST /api/delivery/rider/confirm-pickup
+// Rider confirms they have physically collected the package from the vendor.
+// This marks the order as "shipped" and sets the route stop to "in_transit".
+export const postRiderConfirmPickupController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId } = req.body;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+    if (!orderId) {
+        return res.status(400).json({ message: "Order ID is required." });
+    }
+
+    const client = await pool.connect();
+    try {
+        // Resolve rider profile
+        const riderRes = await client.query(
+            "SELECT id, fulfillment_center_id FROM delivery_agents WHERE user_id = $1 AND status = 'active'",
+            [user.userId]
+        );
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+        const rider = riderRes.rows[0];
+
+        await client.query("BEGIN");
+
+        // Verify this rider was assigned to this pickup
+        const stopRes = await client.query(
+            `SELECT id, stop_sequence, fulfillment_center_id FROM order_route_plan 
+             WHERE order_id = $1 AND pickup_rider_id = $2 AND status = 'pickup_assigned'`,
+            [orderId, rider.id]
+        );
+        if (stopRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "You are not assigned to pick up this order, or it has already been picked up." });
+        }
+        const stop = stopRes.rows[0];
+
+        // Set the route stop to in_transit (package is now traveling to FC)
+        await client.query(
+            `UPDATE order_route_plan 
+             SET status = 'in_transit', updated_at = NOW()
+             WHERE id = $1`,
+            [stop.id]
+        );
+
+        // Update order status to shipped (picked up from vendor)
+        await client.query(
+            `UPDATE orders SET status = 'shipped', updated_at = NOW() WHERE id = $1`,
+            [orderId]
+        );
+
+        // Insert order status history
+        await client.query(
+            `INSERT INTO order_status_history (order_id, status, note, created_at)
+             VALUES ($1, 'shipped', 'Package picked up from vendor by delivery rider', CURRENT_TIMESTAMP)`,
+            [orderId]
+        );
+
+        // Insert fulfillment tracking entry
+        const hubRes = await client.query(
+            `SELECT name, code FROM fulfillment_centers WHERE id = $1`,
+            [stop.fulfillment_center_id]
+        );
+        const hubInfo = hubRes.rows[0];
+        const locationLabel = hubInfo ? `${hubInfo.name} (${hubInfo.code})` : 'Hub';
+
+        await client.query(
+            `INSERT INTO order_fulfillment_tracking 
+             (order_id, fulfillment_center_id, delivery_agent_id, status, note, location_label, stop_sequence)
+             VALUES ($1, $2, $3, 'shipped', $4, $5, $6)`,
+            [orderId, stop.fulfillment_center_id, rider.id,
+             'Package picked up from vendor \u2014 in transit to fulfillment center',
+             locationLabel, stop.stop_sequence]
+        );
+
+        await client.query("COMMIT");
+        return res.status(200).json({
+            message: "Pickup confirmed! Package is now in transit to the fulfillment center.",
+            data: { orderId, status: 'shipped' }
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Error confirming pickup:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
+    }
+};
+
+// 18. GET /api/delivery/rider/pickup-tasks
+// Rider sees all orders they've been assigned to pick up from vendors.
+export const getRiderPickupTasksController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    try {
+        const riderRes = await pool.query(
+            "SELECT id FROM delivery_agents WHERE user_id = $1 AND status = 'active'",
+            [user.userId]
+        );
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+        const riderId = riderRes.rows[0].id;
+
+        const query = `
+            SELECT orp.id as stop_id, orp.order_id, orp.stop_sequence, orp.status,
+                   o.order_reference, o.customer_name, o.total_amount,
+                   v.company_name as vendor_name,
+                   a.address as vendor_address, a.city as vendor_city, 
+                   a.state as vendor_state, a.pincode as vendor_pincode,
+                   a.latitude as vendor_lat, a.longitude as vendor_lng,
+                   fc.name as fc_name,
+                   fca.address as fc_address, fca.city as fc_city,
+                   fca.state as fc_state, fca.pincode as fc_pincode,
+                   fca.latitude as fc_lat, fca.longitude as fc_lng,
+                   (
+                       SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                       FROM order_items oi
+                       JOIN products p ON oi.product_id = p.id
+                       WHERE oi.order_id = orp.order_id
+                   ) as items
+            FROM order_route_plan orp
+            JOIN orders o ON orp.order_id = o.id
+            JOIN vendors v ON o.vendor_id = v.id
+            LEFT JOIN addresses a ON a.user_id = v.user_id
+            LEFT JOIN fulfillment_centers fc ON orp.fulfillment_center_id = fc.id
+            LEFT JOIN addresses fca ON fca.user_id = fc.user_id
+            WHERE orp.pickup_rider_id = $1 AND orp.status IN ('pickup_assigned', 'in_transit')
+            ORDER BY orp.updated_at ASC
+        `;
+        const result = await pool.query(query, [riderId]);
+
+        return res.status(200).json({
+            message: "Pickup tasks retrieved",
+            data: result.rows
+        });
+    } catch (error) {
+        console.error("Error retrieving rider pickup tasks:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 16. PATCH /api/delivery/rider/location (Rider updates current coordinates)
+export const patchRiderLocationController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { latitude, longitude } = req.body;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+    if (latitude === undefined || longitude === undefined) {
+        return res.status(400).json({ message: "latitude and longitude are required." });
+    }
+
+    try {
+        const parsedLat = parseFloat(latitude);
+        const parsedLng = parseFloat(longitude);
+
+        if (isNaN(parsedLat) || isNaN(parsedLng)) {
+            return res.status(400).json({ message: "Invalid latitude or longitude numbers." });
+        }
+
+        const result = await pool.query(
+            `UPDATE delivery_agents 
+             SET current_latitude = $1, current_longitude = $2, last_located_at = NOW(), updated_at = NOW() 
+             WHERE user_id = $3 AND status = 'active'
+             RETURNING id`,
+            [parsedLat, parsedLng, user.userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "Rider profile not found or inactive." });
+        }
+
+        return res.status(200).json({
+            message: "Rider location updated successfully",
+            data: { latitude: parsedLat, longitude: parsedLng }
+        });
+    } catch (error) {
+        console.error("Error updating rider location:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 17. GET /api/delivery/riders/:riderId/live (Admin/FC gets active status and job information)
+export const getRiderLiveDetailsController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { riderId } = req.params;
+
+    if (!user || (user.role !== "fulfillment_center" && user.role !== "admin" && user.role !== "super_admin")) {
+        return res.status(403).json({ message: "Unauthorized. Access restricted." });
+    }
+
+    try {
+        // 1. Fetch Rider details
+        const riderRes = await pool.query(
+            `SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, 
+                    da.status, da.is_online, da.current_latitude, da.current_longitude, da.last_located_at,
+                    u.name as rider_name, u.email as rider_email
+             FROM delivery_agents da
+             JOIN users u ON da.user_id = u.id
+             WHERE da.id = $1`,
+            [riderId]
+        );
+
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Rider not found." });
+        }
+
+        const rider = riderRes.rows[0];
+
+        // 2. Fetch Active Drop-off Job
+        const activeDeliveryRes = await pool.query(
+            `SELECT o.id as order_id, o.order_reference, o.customer_name, o.customer_phone,
+                    o.address_line, o.city, o.state, o.pincode, o.latitude as destination_lat, o.langitude as destination_lng,
+                    (
+                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                        FROM order_items oi
+                        JOIN products p ON oi.product_id = p.id
+                        WHERE oi.order_id = o.id
+                    ) as items
+             FROM orders o
+             JOIN order_fulfillment_tracking oft ON o.id = oft.order_id
+             WHERE oft.delivery_agent_id = $1 
+               AND oft.status = 'handed_over'
+               AND NOT EXISTS (
+                   SELECT 1 FROM order_fulfillment_tracking oft2 
+                   WHERE oft2.order_id = o.id AND oft2.status = 'delivered'
+               )
+             LIMIT 1`,
+            [riderId]
+        );
+
+        let activeJob = null;
+        if (activeDeliveryRes.rows.length > 0) {
+            const job = activeDeliveryRes.rows[0];
+            activeJob = {
+                type: 'delivery',
+                order_id: job.order_id,
+                order_reference: job.order_reference,
+                destination_name: job.customer_name,
+                destination_phone: job.customer_phone,
+                destination_address: `${job.address_line || ''}, ${job.city || ''}, ${job.state || ''} - ${job.pincode || ''}`,
+                destination_lat: job.destination_lat,
+                destination_lng: job.destination_lng,
+                items: job.items
+            };
+        } else {
+            // 3. Fetch Active Pickup Job (if no active delivery job)
+            const activePickupRes = await pool.query(
+                `SELECT orp.id as stop_id, orp.order_id,
+                        o.order_reference, o.customer_name,
+                        v.company_name as vendor_name,
+                        (SELECT phone FROM client WHERE user_id = v.user_id LIMIT 1) as vendor_phone,
+                        a.address as vendor_address, a.city as vendor_city, 
+                        a.state as vendor_state, a.pincode as vendor_pincode,
+                        a.latitude as vendor_lat, a.longitude as vendor_lng,
+                        (
+                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                            FROM order_items oi
+                            JOIN products p ON oi.product_id = p.id
+                            WHERE oi.order_id = orp.order_id
+                        ) as items
+                 FROM order_route_plan orp
+                 JOIN orders o ON orp.order_id = o.id
+                 JOIN vendors v ON o.vendor_id = v.id
+                 LEFT JOIN addresses a ON a.user_id = v.user_id
+                 WHERE orp.pickup_rider_id = $1 AND orp.status = 'pickup_assigned'
+                 LIMIT 1`,
+                [riderId]
+            );
+            if (activePickupRes.rows.length > 0) {
+                const job = activePickupRes.rows[0];
+                activeJob = {
+                    type: 'pickup',
+                    order_id: job.order_id,
+                    order_reference: job.order_reference,
+                    destination_name: job.vendor_name,
+                    destination_phone: job.vendor_phone,
+                    destination_address: `${job.vendor_address || ''}, ${job.vendor_city || ''}, ${job.vendor_state || ''} - ${job.vendor_pincode || ''}`,
+                    destination_lat: job.vendor_lat,
+                    destination_lng: job.vendor_lng,
+                    items: job.items
+                };
+            }
+        }
+
+        return res.status(200).json({
+            message: "Rider live details retrieved",
+            data: {
+                rider,
+                activeJob
+            }
+        });
+    } catch (error) {
+        console.error("Error retrieving rider live details:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 18. POST /api/delivery/verify-pickup (Verify vendor pickup via OTP or QR)
+export const verifyPickupController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    const { orderId, code } = req.body;
+    console.log("[verifyPickup] Incoming verification request:", { orderId, code });
+    if (!orderId || !code) {
+        return res.status(400).json({ message: "Order ID and verification code/QR are required." });
+    }
+
+    try {
+        // Query to check if the code matches the order's pickup details
+        const orderQ = await pool.query(
+            `SELECT id, order_reference 
+             FROM orders 
+             WHERE id = $1 AND (pickup_otp = $2 OR pickup_qr_token = $3)`,
+            [orderId, String(code).trim(), String(code).trim()]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(400).json({ message: "Invalid verification code or QR code scanned." });
+        }
+
+        const order = orderQ.rows[0];
+
+        // Begin verification updates
+        await pool.query("BEGIN");
+
+        // 1. Update order route plan first sequence stop status to 'in_transit'
+        await pool.query(
+            `UPDATE order_route_plan 
+             SET status = 'in_transit', actual_arrival = NOW(), updated_at = NOW()
+             WHERE order_id = $1 AND status = 'pickup_assigned'`,
+            [orderId]
+        );
+
+        // 2. Add tracking entry
+        await pool.query(
+            `INSERT INTO order_fulfillment_tracking (order_id, status, note, created_at)
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+            [orderId, 'handed_over', 'Package collected from vendor by delivery partner.']
+        );
+
+        // 3. Clear verification tokens from order
+        await pool.query(
+            `UPDATE orders 
+             SET pickup_otp = NULL, pickup_qr_token = NULL 
+             WHERE id = $1`,
+            [orderId]
+        );
+
+        await pool.query("COMMIT");
+
+        return res.status(200).json({
+            message: "Pickup verified successfully! Status updated to in-transit.",
+            data: {
+                orderId,
+                orderReference: order.order_reference
+            }
+        });
+
+    } catch (error) {
+        await pool.query("ROLLBACK");
+        console.error("Error verifying order pickup:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 19. POST /api/delivery/verify-delivery (Verify customer delivery via OTP or QR)
+export const verifyDeliveryController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    const { orderId, code } = req.body;
+    console.log("[verifyDelivery] Incoming verification request:", { orderId, code });
+    if (!orderId || !code) {
+        return res.status(400).json({ message: "Order ID and verification code/QR are required." });
+    }
+
+    try {
+        // Query to check if the code matches the order's delivery details
+        const orderQ = await pool.query(
+            `SELECT id, order_reference 
+             FROM orders 
+             WHERE id = $1 AND (delivery_otp = $2 OR delivery_qr_token = $3)`,
+            [orderId, String(code).trim(), String(code).trim()]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(400).json({ message: "Invalid verification code or QR code scanned." });
+        }
+
+        const order = orderQ.rows[0];
+
+        // Begin verification updates
+        await pool.query("BEGIN");
+
+        // 1. Update order status to delivered
+        await pool.query(
+            `UPDATE orders 
+             SET status = 'delivered', updated_at = CURRENT_TIMESTAMP 
+             WHERE id = $1`,
+            [orderId]
+        );
+
+        // 2. Add history record
+        await pool.query(
+            `INSERT INTO order_status_history (order_id, status, note, created_at)
+             VALUES ($1, 'delivered', 'Order delivered successfully to customer', CURRENT_TIMESTAMP)`,
+            [orderId]
+        );
+
+        // 3. Add tracking entry
+        await pool.query(
+            `INSERT INTO order_fulfillment_tracking (order_id, status, note, created_at)
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+            [orderId, 'delivered', 'Order delivered successfully to customer.']
+        );
+
+        // 4. Update route stops to departed
+        await pool.query(
+            `UPDATE order_route_plan 
+             SET status = 'departed', actual_arrival = NOW(), updated_at = NOW()
+             WHERE order_id = $1`,
+            [orderId]
+        );
+
+        // 5. Clear verification tokens from order
+        await pool.query(
+            `UPDATE orders 
+             SET delivery_otp = NULL, delivery_qr_token = NULL 
+             WHERE id = $1`,
+            [orderId]
+        );
+
+        await pool.query("COMMIT");
+
+        return res.status(200).json({
+            message: "Delivery verified successfully! Order marked as completed.",
+            data: {
+                orderId,
+                orderReference: order.order_reference
+            }
+        });
+
+    } catch (error) {
+        await pool.query("ROLLBACK");
+        console.error("Error verifying order delivery:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};

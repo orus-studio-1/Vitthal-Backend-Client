@@ -286,12 +286,19 @@ export async function ensureMarketplaceSchema() {
         CREATE TABLE IF NOT EXISTS wishlist_items (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             wishlist_id UUID NOT NULL,
-            product_id UUID NOT NULL,
-            product_variant_id UUID NOT NULL,
+            product_id UUID,
+            product_variant_id UUID,
+            service_id UUID REFERENCES services(id) ON DELETE CASCADE,
             vendor_id UUID,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id),
+            CONSTRAINT unique_wishlist_service UNIQUE (wishlist_id, service_id),
+            CONSTRAINT chk_wishlist_item_type CHECK (
+                (product_id IS NOT NULL AND product_variant_id IS NOT NULL AND service_id IS NULL)
+                OR
+                (service_id IS NOT NULL AND product_id IS NULL AND product_variant_id IS NULL)
+            ),
             CONSTRAINT fk_wishlist_items_wishlist
                 FOREIGN KEY (wishlist_id)
                 REFERENCES wishlists(id)
@@ -570,6 +577,7 @@ export async function ensureMarketplaceSchema() {
             razorpay_payment_id VARCHAR(255),
             razorpay_signature TEXT,
             order_ids UUID[] DEFAULT '{}',
+            booking_ids UUID[] DEFAULT '{}',
             quotation_request_id UUID REFERENCES quotation_requests(id) ON DELETE SET NULL,
             split_number INTEGER DEFAULT 1,
             split_percentage NUMERIC(5, 2) DEFAULT 100.00,
@@ -699,5 +707,92 @@ export async function ensureMarketplaceSchema() {
                     UNIQUE (cart_id, product_variant_id, vendor_id);
             END IF;
         END $$;
+
+        -- Service quotation S3 documents and signature updates
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS vendor_document_url TEXT;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS vendor_document_s3_key TEXT;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS token_amount NUMERIC(12,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS current_offer_price NUMERIC(12,2);
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS current_offer_by TEXT CHECK (current_offer_by IN ('client', 'vendor'));
+
+        CREATE TABLE IF NOT EXISTS service_quotation_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            service_quotation_id UUID NOT NULL REFERENCES service_quotations(id) ON DELETE CASCADE,
+            quotation_number TEXT NOT NULL UNIQUE,
+            document_url TEXT NOT NULL,
+            s3_key TEXT NOT NULL,
+            valid_until DATE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_service_quotation_documents_quote_id ON service_quotation_documents(service_quotation_id);
+
+        -- Add default timeline and token money to vendor service offerings
+        ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
+        ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+
+        -- Add booking_ids column to payments table
+        ALTER TABLE payments ADD COLUMN IF NOT EXISTS booking_ids UUID[] DEFAULT '{}';
+
+        -- Wishlist items service support
+        ALTER TABLE wishlist_items ALTER COLUMN product_id DROP NOT NULL;
+        ALTER TABLE wishlist_items ALTER COLUMN product_variant_id DROP NOT NULL;
+        ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS service_id UUID REFERENCES services(id) ON DELETE CASCADE;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'chk_wishlist_item_type'
+                  AND table_name = 'wishlist_items'
+            ) THEN
+                ALTER TABLE wishlist_items
+                    ADD CONSTRAINT chk_wishlist_item_type
+                    CHECK (
+                        (product_id IS NOT NULL AND product_variant_id IS NOT NULL AND service_id IS NULL)
+                        OR
+                        (service_id IS NOT NULL AND product_id IS NULL AND product_variant_id IS NULL)
+                    );
+            END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints
+                WHERE constraint_name = 'unique_wishlist_service'
+                  AND table_name = 'wishlist_items'
+            ) THEN
+                ALTER TABLE wishlist_items
+                    ADD CONSTRAINT unique_wishlist_service
+                    UNIQUE (wishlist_id, service_id);
+            END IF;
+        END $$;
+    `);
+
+    // Pickup flow migration (2026-07-04)
+    await pool.query(`
+        ALTER TABLE order_route_plan 
+            DROP CONSTRAINT IF EXISTS chk_orp_status;
+
+        ALTER TABLE order_route_plan 
+            ADD CONSTRAINT chk_orp_status
+            CHECK (status IN ('upcoming', 'pickup_pending', 'pickup_assigned', 'in_transit', 'arrived', 'departed'));
+
+        ALTER TABLE order_route_plan 
+            ADD COLUMN IF NOT EXISTS pickup_rider_id UUID REFERENCES delivery_agents(id) ON DELETE SET NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_orp_pickup_status 
+            ON order_route_plan(fulfillment_center_id, status) 
+            WHERE status IN ('pickup_pending', 'pickup_assigned');
+
+        ALTER TABLE delivery_agents
+            ADD COLUMN IF NOT EXISTS current_latitude DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
     `);
 }

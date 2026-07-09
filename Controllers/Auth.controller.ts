@@ -207,6 +207,10 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
             return res.status(403).json({ message: 'Please verify your email before logging in.' });
         }
 
+        if (!user.is_active && !user.deletion_requested_at) {
+            return res.status(403).json({ message: 'User account is inactive' });
+        }
+
         const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
         if (!isPasswordValid) {
@@ -244,7 +248,7 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
             token: accessToken,
             accessToken,
             refreshToken,
-            user: { userId: user.id, username: user.name, email: user.email, role: user.role }
+            user: { userId: user.id, username: user.name, email: user.email, role: user.role, deletion_requested_at: user.deletion_requested_at }
         });
 
     }
@@ -260,8 +264,17 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
         return res.status(401).json({ message: 'Unauthorized' });
     }
     let vendorType: string | null = null;
-    if (user.role === "vendor") {
-        try {
+    let deletion_requested_at: string | null = null;
+    try {
+        const userDbRes = await pool.query(
+            "SELECT deletion_requested_at FROM users WHERE id = $1",
+            [user.userId]
+        );
+        if (userDbRes.rows.length > 0) {
+            deletion_requested_at = userDbRes.rows[0].deletion_requested_at;
+        }
+
+        if (user.role === "vendor") {
             const vendorRes = await pool.query(
                 `SELECT vendor_type FROM vendors WHERE user_id = $1`,
                 [user.userId]
@@ -269,9 +282,9 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
             if (vendorRes.rows.length > 0) {
                 vendorType = vendorRes.rows[0].vendor_type;
             }
-        } catch (err) {
-            console.error("Error fetching vendor_type for getCurrentUser:", err);
         }
+    } catch (err) {
+        console.error("Error fetching user details in getCurrentUser:", err);
     }
     return res.status(200).json({
         user: {
@@ -279,7 +292,8 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
             username: user.username,
             email: user.email,
             role: user.role,
-            vendorType
+            vendorType,
+            deletion_requested_at
         }
     });
 }
@@ -888,3 +902,58 @@ export const updateUserNameController = async (req: Request, res: Response): Pro
         return res.status(500).json({ message: "Internal Server Error" });
     }
 }
+
+export const requestAccountDeletionController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user) {
+        return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+        const result = await pool.query(
+            "UPDATE users SET is_active = FALSE, deletion_requested_at = NOW(), refresh_token = NULL WHERE id = $1 RETURNING id",
+            [user.userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        const requestFrom = req.headers["x-request-from"];
+        const accessTokenCookie = requestFrom === "vendor" ? "vendorAccessToken" : requestFrom === "client" ? "clientAccessToken" : "accessToken";
+        const refreshTokenCookie = requestFrom === "vendor" ? "vendorRefreshToken" : requestFrom === "client" ? "clientRefreshToken" : "refreshToken";
+
+        res.clearCookie(accessTokenCookie, COOKIE_OPTIONS);
+        res.clearCookie(refreshTokenCookie, COOKIE_OPTIONS);
+
+        return res.status(200).json({
+            message: "Account deletion requested successfully. Your account has been deactivated and scheduled for permanent deletion in 14 days."
+        });
+    } catch (e) {
+        console.error("Error requesting account deletion:", e);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+}
+
+export const recoverAccountController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user) {
+        return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    try {
+        const result = await pool.query(
+            "UPDATE users SET is_active = TRUE, deletion_requested_at = NULL WHERE id = $1 RETURNING id",
+            [user.userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        return res.status(200).json({ message: "Account recovered successfully. Welcome back!" });
+    } catch (e) {
+        console.error("Error recovering account:", e);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};;

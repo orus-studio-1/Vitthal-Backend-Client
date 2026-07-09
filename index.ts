@@ -20,6 +20,7 @@ import notificationRouter from './Routers/Notification.router';
 import uploadRouter from './Routers/Upload.router';
 import deliveryRouter from './Routers/Delivery.router';
 import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
+import { startAccountDeletionJob } from './jobs/accountDeletion.job';
 import { createServer } from 'http';
 import { initSocket } from './socket';
 
@@ -119,6 +120,7 @@ async function startServer() {
             console.warn("Non-fatal: Schema sync bypassed or completed concurrently in another process:", schemaError);
         }
         startAbandonedReminderJob();
+        startAccountDeletionJob();
 
         httpServer.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}🚀🚀`);

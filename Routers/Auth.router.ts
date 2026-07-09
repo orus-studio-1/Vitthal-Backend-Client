@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { loginUser, logoutUser, registerUser, getCurrentUser, OTPSendingController, OTPVerificationController, verifyRegisteredUser, resetPasswordController, updateUserNameController } from "../Controllers/Auth.controller";
+import { loginUser, logoutUser, registerUser, getCurrentUser, OTPSendingController, OTPVerificationController, verifyRegisteredUser, resetPasswordController, updateUserNameController, requestAccountDeletionController, recoverAccountController } from "../Controllers/Auth.controller";
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 
 const authRouter = Router();
@@ -29,5 +29,7 @@ authRouter.post("/verify-registration", upload.fields([
 // Protected route - get current user
 authRouter.get("/me", authMiddleware, getCurrentUser);
 authRouter.patch("/update-name", authMiddleware, updateUserNameController);
+authRouter.post("/delete-account", authMiddleware, requestAccountDeletionController);
+authRouter.post("/recover-account", authMiddleware, recoverAccountController);
 
 export default authRouter;

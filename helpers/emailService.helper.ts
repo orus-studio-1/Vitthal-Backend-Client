@@ -237,3 +237,42 @@ export async function sendQuotationUpdateEmail(payload: {
         textContent,
     });
 }
+
+/**
+ * Send public account deletion request email to support/admin
+ */
+export async function sendPublicAccountDeletionEmail(
+    email: string,
+    phone: string,
+    reason: string
+) {
+    const supportEmail = process.env.EMAIL_REPLY_TO || 'support@mtwo.in';
+    const htmlContent = `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: #d9534f; border-bottom: 2px solid #d9534f; padding-bottom: 10px;">New Account Deletion Request</h2>
+            <p>A user has requested their account to be deleted via the public website form.</p>
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <tr style="background-color: #f9f9f9;">
+                    <td style="padding: 10px; font-weight: bold; width: 30%; border: 1px solid #ddd;">Email:</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">\${email}</td>
+                </tr>
+                <tr>
+                    <td style="padding: 10px; font-weight: bold; border: 1px solid #ddd;">Phone:</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">\${phone}</td>
+                </tr>
+                <tr style="background-color: #f9f9f9;">
+                    <td style="padding: 10px; font-weight: bold; border: 1px solid #ddd;">Reason:</td>
+                    <td style="padding: 10px; border: 1px solid #ddd;">\${reason || 'No reason provided'}</td>
+                </tr>
+            </table>
+            <p style="color: #666; font-size: 12px; margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px;">This request was generated from the public website delete account page.</p>
+        </div>
+    `;
+
+    return sendEmail({
+        to: supportEmail,
+        subject: `⚠️ Account Deletion Request - \${email}`,
+        htmlContent,
+    });
+}
+

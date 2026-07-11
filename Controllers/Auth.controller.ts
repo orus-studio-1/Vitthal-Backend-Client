@@ -4,7 +4,7 @@ import type { DatabaseError } from 'pg';
 import { generateAccessToken, generateRefreshToken, verifyToken } from "../helpers/jwt.helper";
 import pool from "../DbConnect";
 import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
-import { sendOTPEmail } from "../helpers/emailService.helper";
+import { sendOTPEmail, sendPublicAccountDeletionEmail } from "../helpers/emailService.helper";
 import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 
 const validUserRoles = new Set(["client", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
@@ -956,4 +956,28 @@ export const recoverAccountController = async (req: Request, res: Response): Pro
         console.error("Error recovering account:", e);
         return res.status(500).json({ message: "Internal Server Error" });
     }
-};;
+};
+
+export const requestPublicAccountDeletionController = async (req: Request, res: Response): Promise<Response> => {
+    const { email, phone, reason } = req.body;
+
+    if (!email || !phone) {
+        return res.status(400).json({ message: "Email and Phone number are required." });
+    }
+
+    try {
+        const result = await sendPublicAccountDeletionEmail(email.trim(), phone.trim(), reason?.trim() || "");
+
+        if (!result.success) {
+            console.error("Failed to send deletion request email:", result.error);
+            return res.status(500).json({ message: "Failed to send deletion request. Please try again later." });
+        }
+
+        return res.status(200).json({
+            message: "Your account deletion request has been submitted successfully. Our support team will process it shortly."
+        });
+    } catch (e) {
+        console.error("Error submitting public account deletion request:", e);
+        return res.status(500).json({ message: "Internal Server Error" });
+    }
+};

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { loginUser, logoutUser, registerUser, getCurrentUser, OTPSendingController, OTPVerificationController, verifyRegisteredUser, resetPasswordController, updateUserNameController, requestAccountDeletionController, recoverAccountController } from "../Controllers/Auth.controller";
+import { loginUser, logoutUser, registerUser, getCurrentUser, OTPSendingController, OTPVerificationController, verifyRegisteredUser, resetPasswordController, updateUserNameController, requestAccountDeletionController, recoverAccountController, requestPublicAccountDeletionController } from "../Controllers/Auth.controller";
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 
 const authRouter = Router();
@@ -15,7 +15,8 @@ const upload = multer({
 authRouter.post("/register", registerUser);
 authRouter.post("/login", loginUser);
 authRouter.post("/logout", logoutUser);
-authRouter.post("/reset-password", resetPasswordController)
+authRouter.post("/reset-password", resetPasswordController);
+authRouter.post("/request-deletion-public", requestPublicAccountDeletionController);
 
 //OTP ROUTES : 
 authRouter.post("/otp/send", OTPSendingController);

@@ -16,10 +16,12 @@ import {
     getVendorServiceBookingByIdController,
     vendorCompleteBookingController,
     getVendorServiceQuotationsController,
+    getSubcategoriesController,
 } from "../Controllers/Service.controller";
 
 const serviceRouter = Router();
 
+serviceRouter.get("/subcategories", getSubcategoriesController);
 serviceRouter.get("/", browseServicesController);
 serviceRouter.get("/:id", getServiceDetailController);
 

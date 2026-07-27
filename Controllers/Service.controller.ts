@@ -70,7 +70,7 @@ async function updateVendorAggregate(client: PoolClient, vendorId: string, ratin
 }
 
 export const browseServicesController = async (req: Request, res: Response): Promise<Response> => {
-    const { category, search, page, limit } = req.query;
+    const { category, subcategory, search, page, limit } = req.query;
     const pageNum = Math.max(1, parseInt(String(page || "1"), 10));
     const limitNum = Math.min(50, Math.max(1, parseInt(String(limit || "20"), 10)));
     const offset = (pageNum - 1) * limitNum;
@@ -82,6 +82,11 @@ export const browseServicesController = async (req: Request, res: Response): Pro
     if (category && typeof category === "string") {
         conditions.push(`s.category_id = $${idx++}`);
         values.push(category);
+    }
+
+    if (subcategory && typeof subcategory === "string") {
+        conditions.push(`s.subcategory_id = $${idx++}`);
+        values.push(subcategory);
     }
 
     if (search && typeof search === "string" && search.trim().length > 0) {
@@ -96,8 +101,9 @@ export const browseServicesController = async (req: Request, res: Response): Pro
         const [dataResult, countResult] = await Promise.all([
             pool.query(
                 `SELECT
-                    s.id, s.name, s.description, s.rating, s.review_count, s.category_id,
+                    s.id, s.name, s.description, s.rating, s.review_count, s.category_id, s.subcategory_id,
                     pc.label AS category_label,
+                    ss.name AS subcategory_name,
                     COUNT(DISTINCT vs.id) AS vendor_count,
                     MIN(vs.price) AS starting_price,
                     COALESCE(
@@ -107,6 +113,7 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                     ) AS image_url
                  FROM services s
                  LEFT JOIN product_category pc ON pc.id = s.category_id
+                 LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
                  LEFT JOIN vendor_services vs ON vs.service_id = s.id AND vs.is_active = true AND EXISTS (
                      SELECT 1 FROM vendors v
                      JOIN users u ON u.id = v.user_id
@@ -118,7 +125,7 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                        AND u.is_active = true
                  )
                  ${where}
-                 GROUP BY s.id, pc.label, pc.image
+                 GROUP BY s.id, pc.label, pc.image, ss.name
                  ORDER BY s.rating DESC NULLS LAST, s.review_count DESC
                  LIMIT $${idx} OFFSET $${idx + 1}`,
                 [...values, limitNum, offset]
@@ -171,12 +178,14 @@ export const getServiceDetailController = async (req: Request, res: Response): P
     try {
         const serviceResult = await pool.query(
             `SELECT
-                s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id,
+                s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id, s.subcategory_id,
                 pc.label AS category_label,
                 pc.code AS category_code,
-                pc.image AS category_image
+                pc.image AS category_image,
+                ss.name AS subcategory_name
              FROM services s
              LEFT JOIN product_category pc ON pc.id = s.category_id
+             LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
              WHERE s.id = $1 AND s.status = 'approved'
              LIMIT 1`,
             [id]
@@ -1342,6 +1351,24 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
         return res.status(200).json({ data: result.rows });
     } catch (error) {
         console.error("Error fetching vendor service quotations:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const getSubcategoriesController = async (req: Request, res: Response): Promise<Response> => {
+    const { categoryId } = req.query;
+    try {
+        let query = `SELECT id, category_id, name, description FROM service_subcategories`;
+        const params: any[] = [];
+        if (categoryId && typeof categoryId === "string") {
+            query += ` WHERE category_id = $1`;
+            params.push(categoryId);
+        }
+        query += ` ORDER BY name ASC`;
+        const result = await pool.query(query, params);
+        return res.status(200).json({ data: result.rows });
+    } catch (error) {
+        console.error("Error fetching subcategories:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };

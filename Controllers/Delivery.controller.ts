@@ -120,6 +120,28 @@ export const getExpectedInboundController = async (req: Request, res: Response):
                    o.order_reference, o.customer_name, o.customer_phone,
                    v.company_name as vendor_name,
                    (
+                       SELECT u.name 
+                       FROM order_fulfillment_tracking oft
+                       JOIN delivery_agents da ON oft.delivery_agent_id = da.id
+                       JOIN users u ON da.user_id = u.id
+                       WHERE oft.order_id = orp.order_id AND oft.delivery_agent_id IS NOT NULL
+                       ORDER BY oft.created_at DESC LIMIT 1
+                   ) as assigned_rider_name,
+                   (
+                       SELECT da.special_rider_id
+                       FROM order_fulfillment_tracking oft
+                       JOIN delivery_agents da ON oft.delivery_agent_id = da.id
+                       WHERE oft.order_id = orp.order_id AND oft.delivery_agent_id IS NOT NULL
+                       ORDER BY oft.created_at DESC LIMIT 1
+                   ) as assigned_special_rider_id,
+                   (
+                       SELECT da.contact_phone 
+                       FROM order_fulfillment_tracking oft
+                       JOIN delivery_agents da ON oft.delivery_agent_id = da.id
+                       WHERE oft.order_id = orp.order_id AND oft.delivery_agent_id IS NOT NULL
+                       ORDER BY oft.created_at DESC LIMIT 1
+                   ) as assigned_rider_phone,
+                   (
                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
                        FROM order_items oi
                        JOIN products p ON oi.product_id = p.id
@@ -183,7 +205,7 @@ export const postInboundScanController = async (req: Request, res: Response): Pr
 
         // Find the active stop for this hub on the order path
         const stopRes = await client.query(
-            `SELECT id, stop_sequence FROM order_route_plan 
+            `SELECT id, stop_sequence, pickup_rider_id FROM order_route_plan 
              WHERE order_id = $1 AND fulfillment_center_id = $2 AND status = 'in_transit'`,
             [order.id, hub.id]
         );
@@ -203,13 +225,13 @@ export const postInboundScanController = async (req: Request, res: Response): Pr
             [stop.id]
         );
 
-        // Insert into tracking log
+        // Insert into tracking log with the pickup rider ID attached
         const locationLabel = `${hub.name} (${hub.code})`;
         const note = shelfLocation ? `Shelved at Location: ${shelfLocation}` : "Received at hub";
         await client.query(
-            `INSERT INTO order_fulfillment_tracking (order_id, fulfillment_center_id, status, note, location_label, stop_sequence)
-             VALUES ($1, $2, 'received', $3, $4, $5)`,
-            [order.id, hub.id, note, locationLabel, stop.stop_sequence]
+            `INSERT INTO order_fulfillment_tracking (order_id, fulfillment_center_id, status, note, location_label, stop_sequence, delivery_agent_id)
+             VALUES ($1, $2, 'received', $3, $4, $5, $6)`,
+            [order.id, hub.id, note, locationLabel, stop.stop_sequence, stop.pickup_rider_id || null]
         );
 
         await client.query("COMMIT");
@@ -241,7 +263,7 @@ export const getHubInventoryController = async (req: Request, res: Response): Pr
 
         const query = `
             SELECT orp.id as stop_id, orp.order_id, orp.actual_arrival, orp.stop_sequence,
-                   o.order_reference, o.customer_name,
+                   o.order_reference, o.customer_name, o.customer_phone, o.address_line, o.city, o.state, o.pincode,
                    v.company_name as vendor_name,
                    (
                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
@@ -486,12 +508,40 @@ export const getRidersController = async (req: Request, res: Response): Promise<
         const query = `
             SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, 
                    da.status, da.is_online, da.current_latitude, da.current_longitude, da.last_located_at,
-                   u.name as rider_name, u.email as rider_email
-            FROM delivery_agents da
-            JOIN users u ON da.user_id = u.id
-            WHERE da.fulfillment_center_id = $1 AND da.status != 'deleted'
-            ORDER BY da.created_at DESC
-        `;
+                   u.name as rider_name, u.email as rider_email,
+                    COALESCE((
+                        SELECT COUNT(DISTINCT sub.order_id)::int 
+                        FROM (
+                            SELECT oft.order_id 
+                            FROM order_fulfillment_tracking oft
+                            WHERE oft.delivery_agent_id = da.id 
+                              AND oft.status IN ('delivered', 'received', 'handed_over')
+                            UNION
+                            SELECT orp.order_id 
+                            FROM order_route_plan orp
+                            WHERE orp.pickup_rider_id = da.id
+                        ) sub
+                    ), 0) as completed_deliveries_count,
+                    COALESCE((
+                        SELECT COUNT(DISTINCT sub.order_id)::int 
+                        FROM (
+                            SELECT oft.order_id, oft.created_at 
+                            FROM order_fulfillment_tracking oft
+                            WHERE oft.delivery_agent_id = da.id 
+                              AND oft.status IN ('delivered', 'received', 'handed_over')
+                              AND oft.created_at >= CURRENT_DATE
+                            UNION
+                            SELECT orp.order_id, orp.updated_at as created_at
+                            FROM order_route_plan orp
+                            WHERE orp.pickup_rider_id = da.id
+                              AND orp.updated_at >= CURRENT_DATE
+                        ) sub
+                    ), 0) as deliveries_today_count
+             FROM delivery_agents da
+             JOIN users u ON da.user_id = u.id
+             WHERE da.fulfillment_center_id = $1 AND da.status != 'deleted'
+             ORDER BY da.created_at DESC
+         `;
         const result = await pool.query(query, [hub.id]);
 
         return res.status(200).json({
@@ -500,6 +550,94 @@ export const getRidersController = async (req: Request, res: Response): Promise<
         });
     } catch (error) {
         console.error("Error fetching riders list:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 8.5 GET /api/delivery/riders/:riderId/deliveries (FC Manager gets specific rider completed deliveries)
+export const getSpecificRiderDeliveriesController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { riderId } = req.params;
+
+    if (!user || (user.role !== "fulfillment_center" && user.role !== "admin")) {
+        return res.status(403).json({ message: "Unauthorized." });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT sub.tracking_id,
+                    sub.order_id,
+                    sub.order_reference,
+                    sub.customer_name,
+                    sub.address_line, sub.city, sub.state, sub.pincode,
+                    sub.vendor_name, sub.vendor_city, sub.vendor_state,
+                    sub.delivered_at,
+                    sub.delivery_status,
+                    sub.delivery_leg_title,
+                    sub.items
+             FROM (
+                 SELECT oft.id::text as tracking_id,
+                        o.id as order_id, 
+                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference, 
+                        COALESCE(o.customer_name, 'Valued Customer') as customer_name, 
+                        o.address_line, o.city, o.state, o.pincode,
+                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
+                        o.vendor_city, o.vendor_state,
+                        oft.created_at as delivered_at, 
+                        oft.status as delivery_status,
+                        CASE 
+                            WHEN oft.status = 'received' THEN 'Vendor ➔ Fulfillment Center Hub'
+                            ELSE 'Fulfillment Center Hub ➔ Client Dropoff'
+                        END as delivery_leg_title,
+                        (
+                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                            FROM order_items oi
+                            JOIN products p ON oi.product_id = p.id
+                            WHERE oi.order_id = o.id
+                        ) as items
+                 FROM order_fulfillment_tracking oft
+                 JOIN orders o ON oft.order_id = o.id
+                 LEFT JOIN vendors v ON o.vendor_id = v.id
+                 WHERE oft.delivery_agent_id = $1
+                   AND oft.status IN ('delivered', 'received', 'handed_over')
+
+                 UNION ALL
+
+                 SELECT orp.id::text as tracking_id,
+                        o.id as order_id,
+                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference,
+                        COALESCE(o.customer_name, 'Valued Customer') as customer_name,
+                        o.address_line, o.city, o.state, o.pincode,
+                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
+                        o.vendor_city, o.vendor_state,
+                        COALESCE(orp.actual_arrival, orp.updated_at, orp.created_at) as delivered_at,
+                        'received' as delivery_status,
+                        'Vendor ➔ Fulfillment Center Hub' as delivery_leg_title,
+                        (
+                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                            FROM order_items oi
+                            JOIN products p ON oi.product_id = p.id
+                            WHERE oi.order_id = o.id
+                        ) as items
+                 FROM order_route_plan orp
+                 JOIN orders o ON orp.order_id = o.id
+                 LEFT JOIN vendors v ON o.vendor_id = v.id
+                 WHERE orp.pickup_rider_id = $1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM order_fulfillment_tracking oft2 
+                       WHERE oft2.order_id = o.id AND oft2.delivery_agent_id = $1 AND oft2.status = 'received'
+                   )
+             ) sub
+             ORDER BY sub.delivered_at DESC`,
+            [riderId]
+        );
+
+        return res.status(200).json({
+            message: "Rider completed deliveries retrieved",
+            data: result.rows
+        });
+    } catch (error) {
+        console.error("Error fetching specific rider completed deliveries:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };
@@ -749,24 +887,103 @@ export const getRiderCompletedDeliveriesController = async (req: Request, res: R
         const riderId = riderRes.rows[0].id;
 
         const result = await pool.query(
-            `SELECT o.id as order_id, o.order_reference, o.customer_name, 
-                    o.address_line, o.city, o.state, o.pincode,
-                    oft.created_at as delivered_at,
-                    (
-                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
-                        FROM order_items oi
-                        JOIN products p ON oi.product_id = p.id
-                        WHERE oi.order_id = o.id AND oi.vendor_id = o.vendor_id
-                    ) as items
-             FROM orders o
-             JOIN order_fulfillment_tracking oft ON o.id = oft.order_id
-             WHERE oft.delivery_agent_id = $1 AND oft.status = 'delivered'
-             ORDER BY oft.created_at DESC`,
+            `SELECT sub.tracking_id,
+                    sub.order_id,
+                    sub.order_reference,
+                    sub.customer_name,
+                    sub.address_line, sub.city, sub.state, sub.pincode,
+                    sub.vendor_name, sub.vendor_city, sub.vendor_state,
+                    sub.delivered_at,
+                    sub.delivery_status,
+                    sub.delivery_leg_title,
+                    sub.items
+             FROM (
+                 SELECT oft.id::text as tracking_id,
+                        o.id as order_id, 
+                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference, 
+                        COALESCE(o.customer_name, 'Valued Customer') as customer_name, 
+                        o.address_line, o.city, o.state, o.pincode,
+                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
+                        o.vendor_city, o.vendor_state,
+                        oft.created_at as delivered_at, 
+                        oft.status as delivery_status,
+                        CASE 
+                            WHEN oft.status = 'received' THEN 'Vendor ➔ Fulfillment Center Hub'
+                            ELSE 'Fulfillment Center Hub ➔ Client Dropoff'
+                        END as delivery_leg_title,
+                        (
+                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                            FROM order_items oi
+                            JOIN products p ON oi.product_id = p.id
+                            WHERE oi.order_id = o.id
+                        ) as items
+                 FROM order_fulfillment_tracking oft
+                 JOIN orders o ON oft.order_id = o.id
+                 LEFT JOIN vendors v ON o.vendor_id = v.id
+                 WHERE oft.delivery_agent_id = $1
+                   AND oft.status IN ('delivered', 'received', 'handed_over')
+
+                 UNION ALL
+
+                 SELECT orp.id::text as tracking_id,
+                        o.id as order_id,
+                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference,
+                        COALESCE(o.customer_name, 'Valued Customer') as customer_name,
+                        o.address_line, o.city, o.state, o.pincode,
+                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
+                        o.vendor_city, o.vendor_state,
+                        COALESCE(orp.actual_arrival, orp.updated_at, orp.created_at) as delivered_at,
+                        'received' as delivery_status,
+                        'Vendor ➔ Fulfillment Center Hub' as delivery_leg_title,
+                        (
+                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
+                            FROM order_items oi
+                            JOIN products p ON oi.product_id = p.id
+                            WHERE oi.order_id = o.id
+                        ) as items
+                 FROM order_route_plan orp
+                 JOIN orders o ON orp.order_id = o.id
+                 LEFT JOIN vendors v ON o.vendor_id = v.id
+                 WHERE orp.pickup_rider_id = $1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM order_fulfillment_tracking oft2 
+                       WHERE oft2.order_id = o.id AND oft2.delivery_agent_id = $1 AND oft2.status = 'received'
+                   )
+             ) sub
+             ORDER BY sub.delivered_at DESC`,
             [riderId]
         );
 
+        // Compute timeframe stats
+        const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - 7);
+
+        let todayCount = 0;
+        let weekCount = 0;
+        let totalUnits = 0;
+
+        result.rows.forEach((row: any) => {
+            const deliveredDate = new Date(row.delivered_at);
+            if (deliveredDate >= startOfToday) todayCount++;
+            if (deliveredDate >= startOfWeek) weekCount++;
+
+            if (Array.isArray(row.items)) {
+                row.items.forEach((item: any) => {
+                    totalUnits += Number(item.quantity || 0);
+                });
+            }
+        });
+
         return res.status(200).json({
             message: "Completed deliveries history retrieved",
+            stats: {
+                totalCount: result.rows.length,
+                todayCount,
+                weekCount,
+                totalUnits
+            },
             data: result.rows
         });
     } catch (error) {

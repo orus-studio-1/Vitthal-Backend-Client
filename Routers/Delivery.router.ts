@@ -25,7 +25,8 @@ import {
     patchRiderLocationController,
     getRiderLiveDetailsController,
     verifyPickupController,
-    verifyDeliveryController
+    verifyDeliveryController,
+    getSpecificRiderDeliveriesController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -44,6 +45,7 @@ deliveryRouter.post("/hub/assign-pickup", authMiddleware, postAssignPickupContro
 
 // Rider CRUD / management for Hub Manager
 deliveryRouter.get("/riders", authMiddleware, getRidersController);
+deliveryRouter.get("/riders/:riderId/deliveries", authMiddleware, getSpecificRiderDeliveriesController);
 deliveryRouter.post("/riders", authMiddleware, createRiderController);
 deliveryRouter.patch("/riders/:riderId", authMiddleware, patchRiderController);
 

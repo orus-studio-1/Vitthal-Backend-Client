@@ -617,6 +617,8 @@ async function fetchOrderTrackingData(orderId: string) {
             o.vendor_state,
             o.vendor_latitude,
             o.vendor_longitude,
+            o.pickup_otp,
+            o.delivery_otp,
             v.company_name AS vendor_name,
             v.id AS vendor_id
          FROM orders o

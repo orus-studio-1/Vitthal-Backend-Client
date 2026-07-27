@@ -34,7 +34,8 @@ async function main() {
         'add_service_cart.sql',
         'add_service_wishlist.sql',
         '2026-07-04_pickup_flow.sql',
-        '2026-07-06_verification_keys.sql'
+        '2026-07-06_verification_keys.sql',
+        '2026-07-16_service_subcategories.sql'
     ];
     
     const client = await pool.connect();

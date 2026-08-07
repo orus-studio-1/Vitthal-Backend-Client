@@ -188,7 +188,7 @@ export const updateCartItemController = async (req: Request, res: Response): Pro
     }
 
     const { cart_item_id, product_variant_id, vendor_id, quantity, cart_type } = req.body;
-    let product_id = req.body.product_id;
+    const product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
 
     if ((!cart_item_id && !product_variant_id && !product_id) || (!cart_item_id && !vendor_id) || !quantity || quantity < 1) {
@@ -288,7 +288,7 @@ export const removeCartItemController = async (req: Request, res: Response): Pro
     }
 
     const { cart_item_id, product_variant_id, vendor_id, cart_type } = req.body;
-    let product_id = req.body.product_id;
+    const product_id = req.body.product_id;
     const cartType = normalizeCartType(cart_type);
 
     if ((!cart_item_id && !product_variant_id && !product_id) || (!cart_item_id && !vendor_id)) {

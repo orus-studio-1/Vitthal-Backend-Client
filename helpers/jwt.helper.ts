@@ -33,7 +33,7 @@ export function generateRefreshToken(userId: string, username: string, email: st
     }
     catch (error) {
         console.error('Error generating refresh token:', error);
-        throw new Error('Failed to generate refresh token');
+        throw new Error('Failed to generate refresh token', { cause: error });
     }
 }
 
@@ -51,7 +51,7 @@ export function generateAccessToken(userId: string, username: string, email: str
     }
     catch (error) {
         console.error('Error generating access token:', error);
-        throw new Error('Failed to generate access token');
+        throw new Error('Failed to generate access token', { cause: error });
     }
 }
 
@@ -77,6 +77,6 @@ export function verifyToken(token: string, type: TokenType, options: { logErrors
         if (options.logErrors !== false) {
             console.error('Error verifying token:', error);
         }
-        throw new Error('Failed to verify token');
+        throw new Error('Failed to verify token', { cause: error });
     }
 }

@@ -397,8 +397,8 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
         }
         const monthlyResult = await pool.query(monthlyQuery, [vendorId]);
 
-        let chartLabels: string[] = [];
-        let chartData: number[] = [];
+        const chartLabels: string[] = [];
+        const chartData: number[] = [];
 
         if (timeframe === 'month') {
             const now = new Date();

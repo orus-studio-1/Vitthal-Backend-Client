@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import pool from "../DbConnect";
+import { sendExpoPushNotification } from "../services/pushNotification.service";
 
 // Helper to resolve the hub details using the authenticated user's ID
 async function resolveHubDetails(userId: string) {
@@ -362,7 +363,7 @@ export const postHandoverScanController = async (req: Request, res: Response): P
 
         // Verify the Rider exists, is active, and registered at this hub
         const riderRes = await client.query(
-            `SELECT id, user_id FROM delivery_agents 
+            `SELECT id, user_id, push_token FROM delivery_agents 
              WHERE special_rider_id = $1 AND fulfillment_center_id = $2 AND status = 'active'`,
             [riderSpecialId, hub.id]
         );
@@ -432,6 +433,16 @@ export const postHandoverScanController = async (req: Request, res: Response): P
         }
 
         await client.query("COMMIT");
+
+        if (rider.push_token) {
+            void sendExpoPushNotification({
+                to: rider.push_token,
+                title: "📦 New Delivery Task Assigned!",
+                body: `Package for Order #${orderId} has been handed over to your delivery queue. Tap to open.`,
+                data: { orderId, taskType: 'delivery' }
+            });
+        }
+
         return res.status(200).json({
             message: "Package successfully scanned and handed over to Rider.",
             data: { orderId, riderSpecialId, isOutForDirectDelivery: !isNextHubAvailable }
@@ -507,8 +518,9 @@ export const getRidersController = async (req: Request, res: Response): Promise<
 
         const query = `
             SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, 
-                   da.status, da.is_online, da.current_latitude, da.current_longitude, da.last_located_at,
-                   u.name as rider_name, u.email as rider_email,
+                   da.status, da.is_online, da.kyc_status, da.current_latitude, da.current_longitude, da.last_located_at,
+                   u.name as rider_name, u.email as rider_email, u.is_verified,
+                   k.id_doc_type, k.id_doc_number, k.bank_name, k.account_number, k.ifsc_code, k.account_holder_name, k.submitted_at as kyc_submitted_at, k.rejection_reason,
                     COALESCE((
                         SELECT COUNT(DISTINCT sub.order_id)::int 
                         FROM (
@@ -539,6 +551,7 @@ export const getRidersController = async (req: Request, res: Response): Promise<
                     ), 0) as deliveries_today_count
              FROM delivery_agents da
              JOIN users u ON da.user_id = u.id
+             LEFT JOIN delivery_agent_kyc k ON da.id = k.delivery_agent_id
              WHERE da.fulfillment_center_id = $1 AND da.status != 'deleted'
              ORDER BY da.created_at DESC
          `;
@@ -672,11 +685,11 @@ export const createRiderController = async (req: Request, res: Response): Promis
             return res.status(409).json({ message: "Email is already registered." });
         }
 
-        // Create User account for Rider
+        // Create User account for Rider (defaults to unverified: is_verified = FALSE)
         const hashedPassword = await bcrypt.hash(password, 10);
         const userRes = await client.query(
             `INSERT INTO users (name, email, password_hash, role, is_active, is_verified)
-             VALUES ($1, $2, $3, 'delivery_agent', TRUE, TRUE)
+             VALUES ($1, $2, $3, 'delivery_agent', TRUE, FALSE)
              RETURNING id`,
             [name.trim(), normalizedEmail, hashedPassword]
         );
@@ -701,12 +714,13 @@ export const createRiderController = async (req: Request, res: Response): Promis
         await client.query("COMMIT");
 
         return res.status(201).json({
-            message: "Rider registered successfully",
+            message: "Rider registered successfully (Pending verification)",
             data: {
                 id: riderProfileRes.rows[0].id,
                 specialRiderId: riderProfileRes.rows[0].special_rider_id,
                 name,
-                email: normalizedEmail
+                email: normalizedEmail,
+                is_verified: false
             }
         });
     } catch (error) {
@@ -722,7 +736,7 @@ export const createRiderController = async (req: Request, res: Response): Promis
 export const patchRiderController = async (req: Request, res: Response): Promise<Response> => {
     const user = (req as any).user;
     const { riderId } = req.params; // delivery_agents.id
-    const { contact_phone, vehicle_type, vehicle_number, status } = req.body;
+    const { contact_phone, vehicle_type, vehicle_number, status, is_verified } = req.body;
 
     if (!user || user.role !== "fulfillment_center") {
         return res.status(403).json({ message: "Unauthorized." });
@@ -748,7 +762,7 @@ export const patchRiderController = async (req: Request, res: Response): Promise
         }
         const riderUserId = riderCheck.rows[0].user_id;
 
-        // Perform updates
+        // Perform updates on delivery_agents
         await client.query(
             `UPDATE delivery_agents 
              SET contact_phone = COALESCE($1, contact_phone),
@@ -759,6 +773,14 @@ export const patchRiderController = async (req: Request, res: Response): Promise
              WHERE id = $5`,
             [contact_phone, vehicle_type, vehicle_number, status, riderId]
         );
+
+        // If is_verified boolean is passed, update user verification state
+        if (is_verified !== undefined) {
+            await client.query(
+                "UPDATE users SET is_verified = $1 WHERE id = $2",
+                [Boolean(is_verified), riderUserId]
+            );
+        }
 
         // If status is blocked or deleted, lock the credentials on user account
         if (status === "blocked" || status === "deleted") {
@@ -1285,7 +1307,7 @@ export const postAssignPickupController = async (req: Request, res: Response): P
 
         // Verify the rider exists and is active under this FC
         const riderRes = await client.query(
-            `SELECT id, user_id FROM delivery_agents 
+            `SELECT id, user_id, push_token FROM delivery_agents 
              WHERE special_rider_id = $1 AND fulfillment_center_id = $2 AND status = 'active'`,
             [riderSpecialId, hub.id]
         );
@@ -1326,6 +1348,16 @@ export const postAssignPickupController = async (req: Request, res: Response): P
         );
 
         await client.query("COMMIT");
+
+        if (rider.push_token) {
+            void sendExpoPushNotification({
+                to: rider.push_token,
+                title: "🚚 Vendor Pickup Job Assigned!",
+                body: `You have been assigned to collect Order #${orderId} from vendor. Tap to open pickup route.`,
+                data: { orderId, taskType: 'pickup' }
+            });
+        }
+
         return res.status(200).json({
             message: "Rider assigned for vendor pickup successfully.",
             data: { orderId, riderSpecialId }
@@ -1699,6 +1731,17 @@ export const verifyPickupController = async (req: Request, res: Response): Promi
             [orderId]
         );
 
+        // 4. Auto-credit ₹40 vendor pickup earning entry into rider_earnings
+        const riderRes = await pool.query(`SELECT id FROM delivery_agents WHERE user_id = $1`, [user.userId]);
+        if (riderRes.rows.length > 0) {
+            const riderId = riderRes.rows[0].id;
+            await pool.query(
+                `INSERT INTO rider_earnings (delivery_agent_id, order_id, order_reference, leg_type, amount, status)
+                 VALUES ($1, $2, $3, 'vendor_pickup', 40.00, 'credited')`,
+                [riderId, orderId, order.order_reference]
+            );
+        }
+
         await pool.query("COMMIT");
 
         return res.status(200).json({
@@ -1785,6 +1828,17 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
             [orderId]
         );
 
+        // 6. Auto-credit ₹50 client dropoff earning entry into rider_earnings
+        const riderRes = await pool.query(`SELECT id FROM delivery_agents WHERE user_id = $1`, [user.userId]);
+        if (riderRes.rows.length > 0) {
+            const riderId = riderRes.rows[0].id;
+            await pool.query(
+                `INSERT INTO rider_earnings (delivery_agent_id, order_id, order_reference, leg_type, amount, status)
+                 VALUES ($1, $2, $3, 'client_dropoff', 50.00, 'credited')`,
+                [riderId, orderId, order.order_reference]
+            );
+        }
+
         await pool.query("COMMIT");
 
         return res.status(200).json({
@@ -1801,3 +1855,274 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
         return res.status(500).json({ message: "Internal server error" });
     }
 };
+
+// 20. POST /api/delivery/rider/push-token (Save Rider Mobile Expo Push Token)
+export const saveRiderPushTokenController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { pushToken } = req.body;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+    if (!pushToken) {
+        return res.status(400).json({ message: "pushToken is required." });
+    }
+
+    try {
+        const updateRes = await pool.query(
+            `UPDATE delivery_agents 
+             SET push_token = $1, updated_at = NOW() 
+             WHERE user_id = $2 
+             RETURNING id, special_rider_id`,
+            [pushToken, user.userId]
+        );
+
+        if (updateRes.rows.length === 0) {
+            return res.status(404).json({ message: "Active Rider profile not found." });
+        }
+
+        console.log(`[PushToken] Saved push token for rider ${updateRes.rows[0].special_rider_id}`);
+        return res.status(200).json({
+            message: "Push notification token registered successfully.",
+            data: { riderId: updateRes.rows[0].id }
+        });
+    } catch (error) {
+        console.error("Error saving rider push token:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 21. POST /api/delivery/rider/kyc (Submit flexible Indian KYC document & bank details)
+export const submitRiderKYCController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    const { idDocType, idDocNumber, idDocImageUrl, bankName, accountNumber, ifscCode, accountHolderName } = req.body;
+
+    if (!idDocType || !['aadhaar', 'pan', 'driving_license'].includes(idDocType)) {
+        return res.status(400).json({ message: "Valid idDocType ('aadhaar' | 'pan' | 'driving_license') is required." });
+    }
+    if (!idDocNumber || !idDocNumber.trim()) {
+        return res.status(400).json({ message: "Document number is required." });
+    }
+    if (!bankName || !accountNumber || !ifscCode || !accountHolderName) {
+        return res.status(400).json({ message: "All bank payout details (Bank Name, Account Number, IFSC, Account Holder) are required." });
+    }
+
+    try {
+        const riderRes = await pool.query(`SELECT id FROM delivery_agents WHERE user_id = $1`, [user.userId]);
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Delivery Agent profile not found." });
+        }
+        const riderId = riderRes.rows[0].id;
+
+        // Upsert into delivery_agent_kyc table
+        await pool.query(
+            `INSERT INTO delivery_agent_kyc 
+             (delivery_agent_id, kyc_status, id_doc_type, id_doc_number, id_doc_image_url, bank_name, account_number, ifsc_code, account_holder_name, submitted_at, updated_at)
+             VALUES ($1, 'submitted', $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+             ON CONFLICT (delivery_agent_id) 
+             DO UPDATE SET 
+                kyc_status = 'submitted',
+                id_doc_type = EXCLUDED.id_doc_type,
+                id_doc_number = EXCLUDED.id_doc_number,
+                id_doc_image_url = EXCLUDED.id_doc_image_url,
+                bank_name = EXCLUDED.bank_name,
+                account_number = EXCLUDED.account_number,
+                ifsc_code = EXCLUDED.ifsc_code,
+                account_holder_name = EXCLUDED.account_holder_name,
+                submitted_at = NOW(),
+                updated_at = NOW()`,
+            [riderId, idDocType, idDocNumber.trim(), idDocImageUrl || null, bankName.trim(), accountNumber.trim(), ifscCode.trim().toUpperCase(), accountHolderName.trim()]
+        );
+
+        // Also update delivery_agents table status flag
+        await pool.query(`UPDATE delivery_agents SET kyc_status = 'submitted', updated_at = NOW() WHERE id = $1`, [riderId]);
+
+        return res.status(200).json({
+            message: "KYC profile and bank details submitted successfully for review.",
+            data: { kycStatus: 'submitted' }
+        });
+    } catch (error) {
+        console.error("Error submitting rider KYC:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 22. GET /api/delivery/rider/kyc (Get rider KYC submission status & data)
+export const getRiderKYCStatusController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    try {
+        const riderRes = await pool.query(
+            `SELECT da.id, da.kyc_status, 
+                    k.id_doc_type, k.id_doc_number, k.id_doc_image_url, k.bank_name, k.account_number, k.ifsc_code, k.account_holder_name, k.rejection_reason, k.submitted_at, k.reviewed_at
+             FROM delivery_agents da
+             LEFT JOIN delivery_agent_kyc k ON da.id = k.delivery_agent_id
+             WHERE da.user_id = $1`,
+            [user.userId]
+        );
+
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Rider profile not found." });
+        }
+
+        const row = riderRes.rows[0];
+        return res.status(200).json({
+            message: "KYC status fetched successfully",
+            data: {
+                kycStatus: row.kyc_status || 'pending',
+                idDocType: row.id_doc_type || null,
+                idDocNumber: row.id_doc_number || null,
+                idDocImageUrl: row.id_doc_image_url || null,
+                bankName: row.bank_name || null,
+                accountNumber: row.account_number || null,
+                ifscCode: row.ifsc_code || null,
+                accountHolderName: row.account_holder_name || null,
+                rejectionReason: row.rejection_reason || null,
+                submittedAt: row.submitted_at || null,
+                reviewedAt: row.reviewed_at || null
+            }
+        });
+    } catch (error) {
+        console.error("Error fetching rider KYC status:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 23. PATCH /api/delivery/riders/:riderId/kyc-status (FC Hub Manager approves/rejects rider KYC)
+export const patchRiderKYCApprovalController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { riderId } = req.params;
+    const { status, rejectionReason } = req.body;
+
+    if (!user || (user.role !== "fulfillment_center" && user.role !== "admin")) {
+        return res.status(403).json({ message: "Unauthorized. Hub Manager or Admin only." });
+    }
+    if (!status || !['approved', 'rejected'].includes(status)) {
+        return res.status(400).json({ message: "Status must be 'approved' or 'rejected'." });
+    }
+
+    try {
+        await pool.query("BEGIN");
+
+        // Update delivery_agent_kyc table
+        await pool.query(
+            `UPDATE delivery_agent_kyc 
+             SET kyc_status = $1, 
+                 reviewed_at = NOW(), 
+                 reviewed_by_user_id = $2, 
+                 rejection_reason = $3, 
+                 updated_at = NOW() 
+             WHERE delivery_agent_id = $4`,
+            [status, user.userId, status === 'rejected' ? (rejectionReason || 'Documents verification failed') : null, riderId]
+        );
+
+        // Update delivery_agents table flag & activate status
+        await pool.query(
+            `UPDATE delivery_agents 
+             SET kyc_status = $1, 
+                 status = $2, 
+                 updated_at = NOW() 
+             WHERE id = $3`,
+            [status, status === 'approved' ? 'active' : 'blocked', riderId]
+        );
+
+        await pool.query("COMMIT");
+
+        return res.status(200).json({
+            message: `Rider KYC status successfully updated to ${status}.`,
+            data: { riderId, kycStatus: status }
+        });
+    } catch (error) {
+        await pool.query("ROLLBACK");
+        console.error("Error approving/rejecting rider KYC:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// 24. GET /api/delivery/rider/earnings (Rider Earnings Summary & Transaction History)
+export const getRiderEarningsController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    try {
+        const riderRes = await pool.query(
+            `SELECT da.id, k.bank_name, k.account_number, k.ifsc_code, k.account_holder_name
+             FROM delivery_agents da
+             LEFT JOIN delivery_agent_kyc k ON da.id = k.delivery_agent_id
+             WHERE da.user_id = $1`,
+            [user.userId]
+        );
+
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({ message: "Rider profile not found." });
+        }
+        const rider = riderRes.rows[0];
+
+        // Total lifetime earnings
+        const totalRes = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0)::numeric(10,2) as total_earnings
+             FROM rider_earnings 
+             WHERE delivery_agent_id = $1`,
+            [rider.id]
+        );
+
+        // Today's earnings
+        const todayRes = await pool.query(
+            `SELECT COALESCE(SUM(amount), 0)::numeric(10,2) as today_earnings
+             FROM rider_earnings 
+             WHERE delivery_agent_id = $1 AND created_at >= CURRENT_DATE`,
+            [rider.id]
+        );
+
+        // Leg Counts
+        const legCountsRes = await pool.query(
+            `SELECT 
+                COUNT(*) FILTER (WHERE leg_type = 'vendor_pickup')::int as total_pickups,
+                COUNT(*) FILTER (WHERE leg_type = 'client_dropoff')::int as total_drops
+             FROM rider_earnings 
+             WHERE delivery_agent_id = $1`,
+            [rider.id]
+        );
+
+        // Transaction history (latest 50)
+        const historyRes = await pool.query(
+            `SELECT id, order_id, order_reference, leg_type, amount, status, created_at
+             FROM rider_earnings 
+             WHERE delivery_agent_id = $1 
+             ORDER BY created_at DESC 
+             LIMIT 50`,
+            [rider.id]
+        );
+
+        return res.status(200).json({
+            message: "Earnings summary retrieved successfully",
+            data: {
+                totalEarnings: parseFloat(totalRes.rows[0].total_earnings || '0'),
+                todayEarnings: parseFloat(todayRes.rows[0].today_earnings || '0'),
+                totalPickups: legCountsRes.rows[0].total_pickups || 0,
+                totalDrops: legCountsRes.rows[0].total_drops || 0,
+                bankDetails: {
+                    bankName: rider.bank_name || null,
+                    accountNumber: rider.account_number || null,
+                    ifscCode: rider.ifsc_code || null,
+                    accountHolderName: rider.account_holder_name || null,
+                },
+                history: historyRes.rows
+            }
+        });
+    } catch (error) {
+        console.error("Error fetching rider earnings:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+

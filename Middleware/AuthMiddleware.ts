@@ -12,7 +12,7 @@ const generateNewAccessToken = (refreshToken: string) => {
     }
     catch (error) {
         console.error("Error generating new access token:", error);
-        throw new Error("Failed to generate new access token");
+        throw new Error("Failed to generate new access token", { cause: error });
     }
 }
 
@@ -73,7 +73,7 @@ const handleRoleTokens = async (
         return res.status(401).json({ message: "Unauthorized! No valid tokens provided." });
 
     }
-    catch (error) {
+    catch (_error) {
         // Invalid or expired sessions are an expected authentication outcome.
         try { res.clearCookie(`${role}AccessToken`, COOKIE_OPTIONS); } catch { };
         try { res.clearCookie(`${role}RefreshToken`, COOKIE_OPTIONS); } catch { };

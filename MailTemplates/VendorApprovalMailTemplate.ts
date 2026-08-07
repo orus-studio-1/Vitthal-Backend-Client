@@ -132,7 +132,7 @@ export function buildVendorApprovalEmailText(payload: VendorApprovalEmailPayload
     const statusText = isApproved ? "Approved ✓" : "Rejected ✗";
     const statusIcon = isApproved ? "🎉" : "📋";
 
-    let text = `
+    const text = `
 MTWO Group - Vendor Application ${statusText}
 
 Hi ${payload.vendorName},

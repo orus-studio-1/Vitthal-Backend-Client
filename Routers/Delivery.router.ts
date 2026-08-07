@@ -26,7 +26,12 @@ import {
     getRiderLiveDetailsController,
     verifyPickupController,
     verifyDeliveryController,
-    getSpecificRiderDeliveriesController
+    getSpecificRiderDeliveriesController,
+    saveRiderPushTokenController,
+    submitRiderKYCController,
+    getRiderKYCStatusController,
+    patchRiderKYCApprovalController,
+    getRiderEarningsController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -59,6 +64,11 @@ deliveryRouter.get("/rider/pickup-tasks", authMiddleware, getRiderPickupTasksCon
 deliveryRouter.post("/rider/deliver", authMiddleware, postRiderDeliverController);
 deliveryRouter.post("/rider/confirm-pickup", authMiddleware, postRiderConfirmPickupController);
 deliveryRouter.post("/rider/fail-delivery", authMiddleware, postRiderFailDeliveryController);
+deliveryRouter.post("/rider/push-token", authMiddleware, saveRiderPushTokenController);
+deliveryRouter.post("/rider/kyc", authMiddleware, submitRiderKYCController);
+deliveryRouter.get("/rider/kyc", authMiddleware, getRiderKYCStatusController);
+deliveryRouter.patch("/riders/:riderId/kyc-status", authMiddleware, patchRiderKYCApprovalController);
+deliveryRouter.get("/rider/earnings", authMiddleware, getRiderEarningsController);
 
 deliveryRouter.post("/rider/verify-pickup", authMiddleware, verifyPickupController);
 deliveryRouter.post("/rider/verify-delivery", authMiddleware, verifyDeliveryController);

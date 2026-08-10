@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS delivery_agent_kyc (
     kyc_status VARCHAR(50) NOT NULL DEFAULT 'pending', -- 'pending' | 'submitted' | 'approved' | 'rejected'
     id_doc_type VARCHAR(50) NOT NULL, -- 'aadhaar' | 'pan' | 'driving_license'
     id_doc_number VARCHAR(100) NOT NULL,
+    id_doc_image_url TEXT,
     bank_name VARCHAR(100) NOT NULL,
     account_number VARCHAR(50) NOT NULL,
     ifsc_code VARCHAR(20) NOT NULL,
@@ -20,6 +21,10 @@ CREATE TABLE IF NOT EXISTS delivery_agent_kyc (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Ensure id_doc_image_url column exists if table already existed
+ALTER TABLE delivery_agent_kyc 
+    ADD COLUMN IF NOT EXISTS id_doc_image_url TEXT;
 
 -- Index for fast lookup of KYC per rider
 CREATE INDEX IF NOT EXISTS idx_delivery_agent_kyc_rider ON delivery_agent_kyc(delivery_agent_id);

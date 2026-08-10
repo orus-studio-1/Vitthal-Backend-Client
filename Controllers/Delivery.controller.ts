@@ -1166,15 +1166,16 @@ export const getRiderDashboardStatsController = async (req: Request, res: Respon
     }
 
     try {
-        // Fetch Rider Profile
+        // Fetch Rider Profile & User info
         const riderRes = await pool.query(
-            `SELECT id, special_rider_id, contact_phone, vehicle_type, vehicle_number, is_online, status
-             FROM delivery_agents
-             WHERE user_id = $1 AND status = 'active'`,
+            `SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, da.is_online, da.status, da.kyc_status, u.is_verified
+             FROM delivery_agents da
+             JOIN users u ON da.user_id = u.id
+             WHERE da.user_id = $1`,
             [user.userId]
         );
         if (riderRes.rows.length === 0) {
-            return res.status(404).json({ message: "Active Rider profile not found." });
+            return res.status(404).json({ message: "Rider profile not found." });
         }
         const rider = riderRes.rows[0];
 
@@ -1205,6 +1206,7 @@ export const getRiderDashboardStatsController = async (req: Request, res: Respon
         return res.status(200).json({
             message: "Rider dashboard stats retrieved successfully",
             data: {
+                is_verified: rider.is_verified,
                 riderInfo: {
                     id: rider.id,
                     specialRiderId: rider.special_rider_id,
@@ -1212,7 +1214,8 @@ export const getRiderDashboardStatsController = async (req: Request, res: Respon
                     vehicleType: rider.vehicle_type,
                     vehicleNumber: rider.vehicle_number,
                     isOnline: rider.is_online,
-                    status: rider.status
+                    status: rider.status,
+                    kyc_status: rider.kyc_status || 'pending'
                 },
                 completedTripsToday,
                 pendingTasksCount

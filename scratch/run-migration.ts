@@ -35,7 +35,9 @@ async function main() {
         'add_service_wishlist.sql',
         '2026-07-04_pickup_flow.sql',
         '2026-07-06_verification_keys.sql',
-        '2026-07-16_service_subcategories.sql'
+        '2026-07-16_service_subcategories.sql',
+        '2026-08-06_kyc_and_earnings.sql',
+        '2026-08-06_rider_push_token.sql'
     ];
     
     const client = await pool.connect();

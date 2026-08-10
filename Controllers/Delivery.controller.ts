@@ -685,11 +685,11 @@ export const createRiderController = async (req: Request, res: Response): Promis
             return res.status(409).json({ message: "Email is already registered." });
         }
 
-        // Create User account for Rider (defaults to unverified: is_verified = FALSE)
+        // Create User account for Rider (automatically verified: is_verified = TRUE)
         const hashedPassword = await bcrypt.hash(password, 10);
         const userRes = await client.query(
             `INSERT INTO users (name, email, password_hash, role, is_active, is_verified)
-             VALUES ($1, $2, $3, 'delivery_agent', TRUE, FALSE)
+             VALUES ($1, $2, $3, 'delivery_agent', TRUE, TRUE)
              RETURNING id`,
             [name.trim(), normalizedEmail, hashedPassword]
         );
@@ -714,13 +714,13 @@ export const createRiderController = async (req: Request, res: Response): Promis
         await client.query("COMMIT");
 
         return res.status(201).json({
-            message: "Rider registered successfully (Pending verification)",
+            message: "Rider registered successfully",
             data: {
                 id: riderProfileRes.rows[0].id,
                 specialRiderId: riderProfileRes.rows[0].special_rider_id,
                 name,
                 email: normalizedEmail,
-                is_verified: false
+                is_verified: true
             }
         });
     } catch (error) {

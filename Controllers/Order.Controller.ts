@@ -304,9 +304,9 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                 o.state,
                 o.pincode,
                 o.order_type AS order_type,
-                u.name AS customer_name,
-                u.email AS customer_email,
-                c.phone AS customer_phone,
+                COALESCE(o.customer_name, u.name) AS customer_name,
+                COALESCE(o.customer_email, u.email) AS customer_email,
+                COALESCE(o.customer_phone, c.phone) AS customer_phone,
                 (
                     SELECT json_agg(
                         json_build_object(
@@ -398,9 +398,9 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                 o.vendor_state,
                 o.vendor_latitude,
                 o.vendor_longitude,
-                u.name AS customer_name,
-                u.email AS customer_email,
-                c.phone AS customer_phone,
+                COALESCE(o.customer_name, u.name) AS customer_name,
+                COALESCE(o.customer_email, u.email) AS customer_email,
+                COALESCE(o.customer_phone, c.phone) AS customer_phone,
                 (
                     SELECT json_agg(
                         json_build_object(

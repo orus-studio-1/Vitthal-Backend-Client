@@ -265,12 +265,18 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
     }
     let vendorType: string | null = null;
     let deletion_requested_at: string | null = null;
+    let currentName: string = user.username;
+    let currentEmail: string = user.email;
+    let currentRole: string = user.role;
     try {
         const userDbRes = await pool.query(
-            "SELECT deletion_requested_at FROM users WHERE id = $1",
+            "SELECT name, email, role, deletion_requested_at FROM users WHERE id = $1",
             [user.userId]
         );
         if (userDbRes.rows.length > 0) {
+            currentName = userDbRes.rows[0].name || currentName;
+            currentEmail = userDbRes.rows[0].email || currentEmail;
+            currentRole = userDbRes.rows[0].role || currentRole;
             deletion_requested_at = userDbRes.rows[0].deletion_requested_at;
         }
 
@@ -289,9 +295,9 @@ export async function getCurrentUser(req: Request, res: Response): Promise<Respo
     return res.status(200).json({
         user: {
             userId: user.userId,
-            username: user.username,
-            email: user.email,
-            role: user.role,
+            username: currentName,
+            email: currentEmail,
+            role: currentRole,
             vendorType,
             deletion_requested_at
         }
@@ -884,7 +890,7 @@ export const updateUserNameController = async (req: Request, res: Response): Pro
 
     try {
         const result = await pool.query(
-            "UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2 RETURNING id, name, email, role",
+            "UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2 RETURNING id, name, email, role, deletion_requested_at",
             [name.trim(), user.userId]
         );
 
@@ -893,9 +899,35 @@ export const updateUserNameController = async (req: Request, res: Response): Pro
         }
 
         const updatedUser = result.rows[0];
+        const role = updatedUser.role;
+        const accessToken = generateAccessToken(updatedUser.id, updatedUser.name, updatedUser.email, updatedUser.role, user.vendorType);
+        const refreshToken = generateRefreshToken(updatedUser.id, updatedUser.name, updatedUser.email, updatedUser.role, user.vendorType);
+
+        await pool.query("UPDATE users SET refresh_token = $1 WHERE id = $2", [refreshToken, updatedUser.id]);
+
+        const requestFrom = req.headers["x-request-from"];
+        const cookiePrefix = typeof requestFrom === "string" && requestFrom.trim() ? requestFrom : role;
+        res.cookie(`${cookiePrefix}RefreshToken`, refreshToken, {
+            ...COOKIE_OPTIONS,
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+        res.cookie(`${cookiePrefix}AccessToken`, accessToken, {
+            ...COOKIE_OPTIONS,
+            maxAge: 30 * 60 * 1000,
+        });
+
         return res.status(200).json({
             message: "User name updated successfully",
-            user: { userId: updatedUser.id, username: updatedUser.name, email: updatedUser.email, role: updatedUser.role }
+            token: accessToken,
+            accessToken,
+            refreshToken,
+            user: {
+                userId: updatedUser.id,
+                username: updatedUser.name,
+                email: updatedUser.email,
+                role: updatedUser.role,
+                deletion_requested_at: updatedUser.deletion_requested_at
+            }
         });
     } catch (e) {
         console.error("Error updating user name:", e);

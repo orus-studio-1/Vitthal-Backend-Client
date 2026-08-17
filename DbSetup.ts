@@ -441,6 +441,16 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+        UPDATE orders o
+        SET 
+            customer_name = COALESCE(o.customer_name, u.name),
+            customer_email = COALESCE(o.customer_email, u.email),
+            customer_phone = COALESCE(o.customer_phone, c.phone)
+        FROM users u
+        LEFT JOIN client c ON u.id = c.user_id
+        WHERE o.user_id = u.id
+          AND (o.customer_name IS NULL OR o.customer_email IS NULL OR o.customer_phone IS NULL);
+
         ALTER TABLE carts
             ADD COLUMN IF NOT EXISTS cart_type cart_type NOT NULL DEFAULT 'direct';
 

@@ -154,7 +154,7 @@ export const getVendorDashboardController = async (req: Request, res: Response):
                 o.status,
                 o.total_amount,
                 o.created_at,
-                u.name AS customer_name,
+                COALESCE(o.customer_name, u.name) AS customer_name,
                 (
                     SELECT p.name
                     FROM order_items oi

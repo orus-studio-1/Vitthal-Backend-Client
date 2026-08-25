@@ -693,7 +693,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
 
 export const getAllProducts = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { offset, limit, search, category, productType } = req.query;
+        const { offset, limit, search, category, productType, brand } = req.query;
         if (offset === undefined || offset === null || isNaN(Number(offset))) {
             return res.status(400).json({ message: "Invalid offset value" });
         }
@@ -701,7 +701,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const offsetValue = Number(offset) * limitValue;
 
         let baseQuery = `
-            SELECT p.id, p.name, p.description, p.category, p.product_type
+            SELECT p.id, p.name, p.description, p.category, p.product_type, p.item_code, p.attributes
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -739,8 +739,16 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         let paramCount = 1;
 
         if (search && typeof search === 'string' && search.trim() !== '') {
-            baseQuery += ` AND p.name ILIKE $${paramCount}`;
-            countQuery += ` AND p.name ILIKE $${paramCount}`;
+            baseQuery += ` AND (
+                p.name ILIKE $${paramCount}
+                OR COALESCE(p.item_code, '') ILIKE $${paramCount}
+                OR COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
+            countQuery += ` AND (
+                p.name ILIKE $${paramCount}
+                OR COALESCE(p.item_code, '') ILIKE $${paramCount}
+                OR COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
             values.push(`%${search.trim()}%`);
             paramCount++;
         }
@@ -771,6 +779,13 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             paramCount++;
         }
 
+        if (brand && typeof brand === 'string' && brand.trim() !== '') {
+            baseQuery += ` AND COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}`;
+            countQuery += ` AND COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}`;
+            values.push(brand.trim());
+            paramCount++;
+        }
+
         baseQuery += ` ORDER BY p.created_at DESC, p.id ASC LIMIT $${paramCount + 1} OFFSET $${paramCount}`;
 
         // Snapshot count values (without offset/limit) BEFORE appending pagination params
@@ -784,6 +799,8 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 p.description,
                 pc.code AS category,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -1144,7 +1161,11 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
         let paramCount = 2;
 
         if (search && typeof search === 'string' && search.trim() !== '') {
-            filterConditions += ` AND name ILIKE $${paramCount}`;
+            filterConditions += ` AND (
+                name ILIKE $${paramCount}
+                OR COALESCE(item_code, '') ILIKE $${paramCount}
+                OR COALESCE(attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
             filterValues.push(`%${search.trim()}%`);
             paramCount++;
         }
@@ -1166,6 +1187,8 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 p.description,
                 pc.code AS category,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -1185,7 +1208,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
-                SELECT id, name, description, category, product_type
+                SELECT id, name, description, category, product_type, item_code, attributes
                 FROM products
                 WHERE ${filterConditions}
                 ORDER BY created_at DESC, id ASC
@@ -2370,6 +2393,8 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
                 p.name AS product_name,
                 p.category,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
                 p.rating,
                 p.review_count,
                 pImg.image_url AS primary_image,
@@ -2782,4 +2807,3 @@ export const getLatestOrOrderedProducts = async (req: Request, res: Response): P
         return res.status(500).json({ message: "Internal Server Error" });
     }
 };
-

@@ -801,6 +801,14 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 p.product_type,
                 p.item_code AS product_code,
                 p.attributes->>'brand' AS brand,
+                COALESCE(
+                    NULLIF(p.attributes->>'unit', ''),
+                    NULLIF(p.attributes->>'uom', ''),
+                    NULLIF(p.attributes->>'unit_of_measure', ''),
+                    NULLIF(specAgg.specifications->>'Unit', ''),
+                    NULLIF(specAgg.specifications->>'unit', ''),
+                    'Unit'
+                ) AS unit,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -921,6 +929,14 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.attributes->>'grade' AS grade,
                 p.attributes->>'application' AS application,
                 p.attributes->>'standard' AS standard,
+                COALESCE(
+                    NULLIF(p.attributes->>'unit', ''),
+                    NULLIF(p.attributes->>'uom', ''),
+                    NULLIF(p.attributes->>'unit_of_measure', ''),
+                    NULLIF(specAgg.specifications->>'Unit', ''),
+                    NULLIF(specAgg.specifications->>'unit', ''),
+                    'Unit'
+                ) AS unit,
                 p.rating,
                 p.review_count,
                 p.quotation_limit,

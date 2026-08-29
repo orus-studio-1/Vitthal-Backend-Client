@@ -541,7 +541,7 @@ export const addVendorProductController = async (req: Request, res: Response): P
             RETURNING *`;
         const values = [productId, resolvedVariantId, vendorId, price, moq, stockQuantity, Boolean(quotationEnabled), quotationMinQty ?? null, resolvedGst, discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null];
         const result = await client.query(query, values);
-        
+
         await client.query("COMMIT");
         return res.status(201).json({ message: "Vendor product details saved successfully", result: result.rows[0] });
     }
@@ -709,7 +709,7 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
 
 export const getAllProducts = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { offset, limit, search, category, subcategory, productType } = req.query;
+        const { offset, limit, search, category, subcategory, productType, brand } = req.query;
         if (offset === undefined || offset === null || isNaN(Number(offset))) {
             return res.status(400).json({ message: "Invalid offset value" });
         }
@@ -717,7 +717,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const offsetValue = Number(offset) * limitValue;
 
         let baseQuery = `
-            SELECT p.id, p.name, p.description, p.category, p.subcategory_id, p.product_type
+            SELECT p.id, p.name, p.description, p.category, p.product_type
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -755,8 +755,16 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         let paramCount = 1;
 
         if (search && typeof search === 'string' && search.trim() !== '') {
-            baseQuery += ` AND p.name ILIKE $${paramCount}`;
-            countQuery += ` AND p.name ILIKE $${paramCount}`;
+            baseQuery += ` AND (
+                p.name ILIKE $${paramCount}
+                OR COALESCE(p.item_code, '') ILIKE $${paramCount}
+                OR COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
+            countQuery += ` AND (
+                p.name ILIKE $${paramCount}
+                OR COALESCE(p.item_code, '') ILIKE $${paramCount}
+                OR COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
             values.push(`%${search.trim()}%`);
             paramCount++;
         }
@@ -794,6 +802,13 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             paramCount++;
         }
 
+        if (brand && typeof brand === 'string' && brand.trim() !== '') {
+            baseQuery += ` AND COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}`;
+            countQuery += ` AND COALESCE(p.attributes->>'brand', '') ILIKE $${paramCount}`;
+            values.push(brand.trim());
+            paramCount++;
+        }
+
         baseQuery += ` ORDER BY p.created_at DESC, p.id ASC LIMIT $${paramCount + 1} OFFSET $${paramCount}`;
 
         // Snapshot count values (without offset/limit) BEFORE appending pagination params
@@ -810,6 +825,16 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 p.subcategory_id,
                 psub.name AS subcategory_name,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
+                COALESCE(
+                    NULLIF(p.attributes->>'unit', ''),
+                    NULLIF(p.attributes->>'uom', ''),
+                    NULLIF(p.attributes->>'unit_of_measure', ''),
+                    NULLIF(specAgg.specifications->>'Unit', ''),
+                    NULLIF(specAgg.specifications->>'unit', ''),
+                    'Unit'
+                ) AS unit,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -895,8 +920,8 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
     }
 
     const isFromVendor = req.headers["x-request-from"] === "vendor";
-    const approvalCondition = isFromVendor 
-        ? "p.approval_status != 'rejected'" 
+    const approvalCondition = isFromVendor
+        ? "p.approval_status != 'rejected'"
         : "p.approval_status = 'approved' AND p.is_active = TRUE";
 
     const specApprovalCondition = isFromVendor
@@ -933,6 +958,14 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.attributes->>'grade' AS grade,
                 p.attributes->>'application' AS application,
                 p.attributes->>'standard' AS standard,
+                COALESCE(
+                    NULLIF(p.attributes->>'unit', ''),
+                    NULLIF(p.attributes->>'uom', ''),
+                    NULLIF(p.attributes->>'unit_of_measure', ''),
+                    NULLIF(specAgg.specifications->>'Unit', ''),
+                    NULLIF(specAgg.specifications->>'unit', ''),
+                    'Unit'
+                ) AS unit,
                 p.rating,
                 p.review_count,
                 p.quotation_limit,
@@ -1031,7 +1064,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
         }
 
         product.variants = variants;
-        
+
         if (variants.length === 0) {
             const fallbackVendorsQuery = `
                 SELECT 
@@ -1174,7 +1207,11 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
         let paramCount = 2;
 
         if (search && typeof search === 'string' && search.trim() !== '') {
-            filterConditions += ` AND name ILIKE $${paramCount}`;
+            filterConditions += ` AND (
+                name ILIKE $${paramCount}
+                OR COALESCE(item_code, '') ILIKE $${paramCount}
+                OR COALESCE(attributes->>'brand', '') ILIKE $${paramCount}
+            )`;
             filterValues.push(`%${search.trim()}%`);
             paramCount++;
         }
@@ -1205,6 +1242,8 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 p.subcategory_id,
                 psub.name AS subcategory_name,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -1224,7 +1263,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
-                SELECT id, name, description, category, subcategory_id, product_type
+                SELECT id, name, description, category, product_type
                 FROM products
                 WHERE ${filterConditions}
                 ORDER BY created_at DESC, id ASC
@@ -1945,7 +1984,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
         const result = await pool.query(updateQuery, queryParams);
 
         return res.status(200).json({
-            message: requiresApproval 
+            message: requiresApproval
                 ? "Product details updated. The price change request has been submitted to admin for approval."
                 : "Vendor product updated successfully",
             data: result.rows[0]
@@ -2410,6 +2449,8 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
                 p.name AS product_name,
                 p.category,
                 p.product_type,
+                p.item_code AS product_code,
+                p.attributes->>'brand' AS brand,
                 p.rating,
                 p.review_count,
                 pImg.image_url AS primary_image,
@@ -2477,7 +2518,7 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
 export const uploadProductImagesController = async (req: Request, res: Response): Promise<Response> => {
     const { productId, productVariantId } = req.body;
     const { userId, role } = (req as any).user;
-    
+
     if (!productId) {
         return res.status(400).json({ message: "Product ID is required" });
     }
@@ -2666,9 +2707,9 @@ export const addProductVariantController = async (req: Request, res: Response): 
             userId,
             !isVendor
         ];
-        
+
         const result = await pool.query(query, values);
-        
+
         return res.status(201).json({
             message: isVendor ? "Product variant submitted for approval successfully" : "Product variant added successfully",
             result: result.rows[0]
@@ -2851,4 +2892,3 @@ export const getSubcategoriesController = async (req: Request, res: Response): P
         return res.status(500).json({ message: "Internal server error" });
     }
 };
-

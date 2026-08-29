@@ -694,6 +694,13 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
 
     try {
         let quotationResult;
+        let vendorId: string | null = null;
+
+        if (isVendor) {
+            vendorId = await getVendorIdByUserId(authUser.userId);
+            if (!vendorId) return res.status(403).json({ message: "Vendor profile not found" });
+        }
+
         if (isClient) {
             quotationResult = await pool.query(
                 `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name, 
@@ -708,8 +715,6 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                 [id, authUser.userId]
             );
         } else {
-            const vendorId = await getVendorIdByUserId(authUser.userId);
-            if (!vendorId) return res.status(403).json({ message: "Vendor profile not found" });
             quotationResult = await pool.query(
                 `SELECT sq.*, s.name AS service_name, u.name AS client_name, u.email AS client_email, 
                         sqd.document_url AS base_document_url, sqd.s3_key AS base_document_s3_key,
@@ -724,7 +729,84 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
             );
         }
 
+        // If not found in legacy service_quotations, check universal service_tickets!
         if (quotationResult.rows.length === 0) {
+            const ticketResult = await pool.query(
+                `SELECT st.*, u.name AS client_name, u.email AS client_email,
+                        pc.label AS category_name, pc.code AS category_code,
+                        v.company_name AS vendor_name
+                 FROM service_tickets st
+                 JOIN users u ON u.id = st.client_user_id
+                 LEFT JOIN product_category pc ON pc.id = st.category_id
+                 LEFT JOIN vendors v ON v.id = st.vendor_id
+                 WHERE st.id = $1 ${isClient ? "AND st.client_user_id = $2" : ""}`,
+                isClient ? [id, authUser.userId] : [id]
+            );
+
+            if (ticketResult.rows.length > 0) {
+                const t = ticketResult.rows[0];
+                const docsResult = await pool.query(
+                    `SELECT * FROM service_ticket_documents WHERE ticket_id = $1`,
+                    [id]
+                );
+
+                // Fetch quotes submitted for this ticket
+                const quotesResult = await pool.query(
+                    `SELECT stq.*, v.company_name AS vendor_name
+                     FROM service_ticket_quotations stq
+                     JOIN vendors v ON v.id = stq.vendor_id
+                     WHERE stq.ticket_id = $1
+                     ORDER BY stq.created_at ASC`,
+                    [id]
+                );
+
+                const messages = quotesResult.rows.map((q: any) => ({
+                    id: q.id,
+                    sender_role: "vendor" as const,
+                    action: "offer" as const,
+                    offer_price: String(q.total_price),
+                    note: q.quote_breakdown?.notes || `Quotation submitted by ${q.vendor_name}`,
+                    reason: null,
+                    created_at: q.created_at,
+                    sender_name: q.vendor_name,
+                }));
+
+                const scopeOfWork =
+                    t.ticket_payload?.symptoms ||
+                    t.ticket_payload?.technical_notes ||
+                    t.ticket_payload?.cargo_type ||
+                    t.ticket_payload?.job_title ||
+                    t.ticket_payload?.machine_name ||
+                    "Service Request";
+
+                const quotationRow = {
+                    id: t.id,
+                    status: t.status === "broadcasted" ? "pending_vendor" : t.status === "quoted" ? "vendor_offered" : t.status === "accepted" ? "client_accepted" : t.status,
+                    scope_of_work: scopeOfWork,
+                    requested_price: t.ticket_payload?.estimated_fare || null,
+                    agreed_price: t.total_amount ? String(t.total_amount) : null,
+                    created_at: t.created_at,
+                    updated_at: t.updated_at,
+                    service_id: t.category_id,
+                    user_id: t.client_user_id,
+                    vendor_id: t.vendor_id || vendorId,
+                    service_name: t.category_name || "Industrial Service",
+                    client_name: t.client_name,
+                    client_email: t.client_email,
+                    base_document_url: docsResult.rows[0]?.doc_url || null,
+                    delivery_days: 7,
+                    pricing_type: "custom",
+                    moq: 1,
+                };
+
+                return res.status(200).json({
+                    data: {
+                        quotation: quotationRow,
+                        messages,
+                    },
+                });
+            }
+
             return res.status(404).json({ message: "Quotation not found" });
         }
 
@@ -830,6 +912,71 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
         }
 
         if (quotationResult.rows.length === 0) {
+            // Check if this is a universal service ticket
+            const ticketResult = await client.query(
+                `SELECT * FROM service_tickets WHERE id = $1`,
+                [id]
+            );
+
+            if (ticketResult.rows.length > 0) {
+                const t = ticketResult.rows[0];
+                const resolvedVendorId = vendorId || (await getVendorIdByUserId(authUser.userId));
+
+                if (action === "offer" || action === "counter") {
+                    if (!resolvedVendorId) {
+                        await client.query("ROLLBACK");
+                        return res.status(403).json({ message: "Vendor profile required to submit offer." });
+                    }
+
+                    const quotePrice = offerPrice ? Number(offerPrice) : 0;
+                    await client.query(
+                        `INSERT INTO service_ticket_quotations 
+                            (ticket_id, vendor_id, total_price, quote_breakdown, status)
+                         VALUES ($1, $2, $3, $4, 'pending')`,
+                        [
+                            id,
+                            resolvedVendorId,
+                            quotePrice,
+                            JSON.stringify({ notes: note || reason || "", delivery_days: deliveryDays || 7 }),
+                        ]
+                    );
+
+                    await client.query(
+                        `UPDATE service_tickets 
+                         SET status = 'quoted', updated_at = NOW()
+                         WHERE id = $1`,
+                        [id]
+                    );
+
+                    await client.query("COMMIT");
+                    return res.status(200).json({ message: "Quotation offer submitted successfully." });
+                }
+
+                if (action === "accept") {
+                    await client.query(
+                        `UPDATE service_tickets 
+                         SET status = 'accepted', total_amount = COALESCE($1, total_amount), updated_at = NOW()
+                         WHERE id = $2`,
+                        [offerPrice ? Number(offerPrice) : null, id]
+                    );
+
+                    await client.query("COMMIT");
+                    return res.status(200).json({ message: "Service quotation accepted." });
+                }
+
+                if (action === "reject") {
+                    await client.query(
+                        `UPDATE service_tickets 
+                         SET status = 'cancelled', updated_at = NOW()
+                         WHERE id = $1`,
+                        [id]
+                    );
+
+                    await client.query("COMMIT");
+                    return res.status(200).json({ message: "Service quotation rejected." });
+                }
+            }
+
             await client.query("ROLLBACK");
             return res.status(404).json({ message: "Quotation not found" });
         }
@@ -1335,7 +1482,8 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
     }
 
     try {
-        const result = await pool.query(
+        // Fetch legacy service quotations
+        const legacyResult = await pool.query(
             `SELECT
                 sq.id, sq.status, sq.scope_of_work, sq.requested_price, sq.agreed_price, sq.created_at, sq.updated_at,
                 s.name AS service_name,
@@ -1348,7 +1496,45 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
             [vendorId]
         );
 
-        return res.status(200).json({ data: result.rows });
+        // Fetch Universal Service Hub tickets available to / assigned to this vendor
+        const ticketsResult = await pool.query(
+            `SELECT
+                st.id,
+                CASE 
+                    WHEN st.status = 'broadcasted' THEN 'pending_vendor'
+                    WHEN st.status = 'quoted' THEN 'vendor_offered'
+                    WHEN st.status = 'accepted' THEN 'client_accepted'
+                    WHEN st.status = 'in_progress' THEN 'in_progress'
+                    WHEN st.status = 'completed' THEN 'client_accepted'
+                    ELSE st.status
+                END AS status,
+                COALESCE(
+                    st.ticket_payload->>'symptoms',
+                    st.ticket_payload->>'technical_notes',
+                    st.ticket_payload->>'cargo_type',
+                    st.ticket_payload->>'job_title',
+                    st.ticket_payload->>'machine_name',
+                    'Service Request'
+                ) AS scope_of_work,
+                COALESCE(st.ticket_payload->>'estimated_fare', st.total_amount::text, NULL) AS requested_price,
+                st.total_amount::text AS agreed_price,
+                st.created_at,
+                st.updated_at,
+                COALESCE(pc.label, 'Industrial Service') AS service_name,
+                u.name AS client_name
+             FROM service_tickets st
+             JOIN users u ON u.id = st.client_user_id
+             LEFT JOIN product_category pc ON pc.id = st.category_id
+             WHERE (st.vendor_id = $1 OR st.vendor_id IS NULL OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1))
+             ORDER BY st.updated_at DESC`,
+            [vendorId]
+        );
+
+        const allQuotations = [...legacyResult.rows, ...ticketsResult.rows].sort(
+            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+        );
+
+        return res.status(200).json({ data: allQuotations });
     } catch (error) {
         console.error("Error fetching vendor service quotations:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -1356,15 +1542,26 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
 };
 
 export const getSubcategoriesController = async (req: Request, res: Response): Promise<Response> => {
-    const { categoryId } = req.query;
+    const categoryId = req.params.categoryId || req.query.categoryId;
     try {
-        let query = `SELECT id, category_id, name, description FROM service_subcategories`;
+        let query = `
+            SELECT s.id, s.category_id, s.name, s.description
+            FROM subcategories s
+            JOIN product_category pc ON pc.id = s.category_id
+            WHERE pc.is_active = TRUE
+        `;
         const params: any[] = [];
         if (categoryId && typeof categoryId === "string") {
-            query += ` WHERE category_id = $1`;
-            params.push(categoryId);
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
+            if (isUuid) {
+                query += ` AND s.category_id = $1`;
+                params.push(categoryId);
+            } else {
+                query += ` AND (LOWER(pc.code) = LOWER($1) OR LOWER(pc.label) = LOWER($1))`;
+                params.push(categoryId.trim());
+            }
         }
-        query += ` ORDER BY name ASC`;
+        query += ` ORDER BY s.name ASC`;
         const result = await pool.query(query, params);
         return res.status(200).json({ data: result.rows });
     } catch (error) {

@@ -804,5 +804,196 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS current_latitude DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
+
+        -- Unified Subcategories & Product Subcategory Migration (2026-08-25)
+        CREATE TABLE IF NOT EXISTS subcategories (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            category_id UUID NOT NULL REFERENCES product_category(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT unique_category_subcategory_name UNIQUE (category_id, name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_subcategories_category_id ON subcategories(category_id);
+
+        INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
+        SELECT id, category_id, name, description, created_at, updated_at
+        FROM service_subcategories
+        ON CONFLICT (category_id, name) DO NOTHING;
+
+        ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory_id UUID;
+
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE constraint_name = 'fk_products_subcategory'
+                  AND table_name = 'products'
+            ) THEN
+                ALTER TABLE products
+                    ADD CONSTRAINT fk_products_subcategory
+                    FOREIGN KEY (subcategory_id)
+                    REFERENCES subcategories(id)
+                    ON DELETE SET NULL;
+            END IF;
+        END $$;
+
+        CREATE INDEX IF NOT EXISTS idx_products_subcategory_id ON products(subcategory_id);
+
+        -- ═══════════════════════════════════════════════════════════════
+        -- Employee Hiring & Staffing Module (2026-08-29)
+        -- ═══════════════════════════════════════════════════════════════
+
+        CREATE TABLE IF NOT EXISTS employee_candidates (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            full_name           TEXT NOT NULL,
+            email               TEXT,
+            phone               VARCHAR(20) NOT NULL,
+            city                TEXT,
+            state               TEXT,
+            pincode             VARCHAR(10),
+            address_line        TEXT,
+            designation         TEXT,
+            experience_years    NUMERIC(4,1) DEFAULT 0,
+            skills              JSONB NOT NULL DEFAULT '[]',
+            metadata            JSONB NOT NULL DEFAULT '{}',
+            photo_url           TEXT,
+            verification_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            rejection_reason    TEXT,
+            verified_at         TIMESTAMPTZ,
+            verified_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            is_available        BOOLEAN NOT NULL DEFAULT true,
+            commission_percentage NUMERIC(5,2) NOT NULL DEFAULT 0.00,
+            registered_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_emp_cand_status ON employee_candidates(verification_status);
+        CREATE INDEX IF NOT EXISTS idx_emp_cand_city ON employee_candidates(city);
+        CREATE INDEX IF NOT EXISTS idx_emp_cand_skills ON employee_candidates USING GIN (skills);
+        CREATE INDEX IF NOT EXISTS idx_emp_cand_phone ON employee_candidates(phone);
+
+        CREATE TABLE IF NOT EXISTS employee_documents (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            candidate_id        UUID NOT NULL REFERENCES employee_candidates(id) ON DELETE CASCADE,
+            doc_type            VARCHAR(50) NOT NULL,
+            doc_number          VARCHAR(100),
+            doc_url             TEXT NOT NULL,
+            doc_name            TEXT,
+            metadata            JSONB NOT NULL DEFAULT '{}',
+            uploaded_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_emp_doc_candidate ON employee_documents(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_emp_doc_type ON employee_documents(doc_type);
+
+        CREATE TABLE IF NOT EXISTS hire_requests (
+            id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            candidate_id            UUID NOT NULL REFERENCES employee_candidates(id) ON DELETE CASCADE,
+            requested_by_user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            status                  VARCHAR(20) NOT NULL DEFAULT 'pending',
+            request_details         JSONB NOT NULL DEFAULT '{}',
+            admin_notes             TEXT,
+            reviewed_by_user_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+            reviewed_at             TIMESTAMPTZ,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_hire_req_candidate ON hire_requests(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_hire_req_user ON hire_requests(requested_by_user_id);
+        CREATE INDEX IF NOT EXISTS idx_hire_req_status ON hire_requests(status);
+
+        -- ═══════════════════════════════════════════════════════════════
+        -- Universal B2B Service Hub & Asset Registry (2026-08-29)
+        -- ═══════════════════════════════════════════════════════════════
+
+        ALTER TABLE subcategories 
+            ADD COLUMN IF NOT EXISTS form_schema JSONB DEFAULT '[]';
+
+        CREATE TABLE IF NOT EXISTS client_assets (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            category_id         UUID REFERENCES product_category(id) ON DELETE SET NULL,
+            subcategory_id      UUID REFERENCES subcategories(id) ON DELETE SET NULL,
+            asset_name          TEXT NOT NULL,
+            asset_code          VARCHAR(100),
+            brand               TEXT,
+            model_number        TEXT,
+            serial_number       TEXT,
+            installation_year   INTEGER,
+            specs               JSONB NOT NULL DEFAULT '{}',
+            location_details    JSONB NOT NULL DEFAULT '{}',
+            documents           JSONB NOT NULL DEFAULT '[]',
+            is_active           BOOLEAN NOT NULL DEFAULT true,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_client_assets_user ON client_assets(user_id);
+        CREATE INDEX IF NOT EXISTS idx_client_assets_category ON client_assets(category_id);
+        CREATE INDEX IF NOT EXISTS idx_client_assets_specs ON client_assets USING GIN (specs);
+
+        CREATE TABLE IF NOT EXISTS service_tickets (
+            id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            ticket_number           VARCHAR(50) NOT NULL UNIQUE,
+            category_id             UUID NOT NULL REFERENCES product_category(id) ON DELETE RESTRICT,
+            subcategory_id          UUID REFERENCES subcategories(id) ON DELETE SET NULL,
+            client_user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            vendor_id               UUID REFERENCES vendors(id) ON DELETE SET NULL,
+            assigned_agent_id       UUID REFERENCES users(id) ON DELETE SET NULL,
+            asset_id                UUID REFERENCES client_assets(id) ON DELETE SET NULL,
+            status                  VARCHAR(30) NOT NULL DEFAULT 'draft',
+            priority                VARCHAR(20) NOT NULL DEFAULT 'medium',
+            ticket_payload          JSONB NOT NULL DEFAULT '{}',
+            quotation_breakdown     JSONB NOT NULL DEFAULT '{}',
+            total_amount            NUMERIC(12,2) DEFAULT 0.00,
+            advance_paid            NUMERIC(12,2) DEFAULT 0.00,
+            completion_otp          VARCHAR(6),
+            otp_verified_at         TIMESTAMPTZ,
+            timeline_logs           JSONB NOT NULL DEFAULT '[]',
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_srv_tickets_client ON service_tickets(client_user_id);
+        CREATE INDEX IF NOT EXISTS idx_srv_tickets_vendor ON service_tickets(vendor_id);
+        CREATE INDEX IF NOT EXISTS idx_srv_tickets_status ON service_tickets(status);
+        CREATE INDEX IF NOT EXISTS idx_srv_tickets_cat ON service_tickets(category_id);
+        CREATE INDEX IF NOT EXISTS idx_srv_tickets_payload ON service_tickets USING GIN (ticket_payload);
+
+        CREATE TABLE IF NOT EXISTS service_ticket_quotations (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            ticket_id        UUID NOT NULL REFERENCES service_tickets(id) ON DELETE CASCADE,
+            vendor_id        UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+            status           VARCHAR(20) NOT NULL DEFAULT 'submitted',
+            quote_breakdown  JSONB NOT NULL DEFAULT '{}',
+            total_price      NUMERIC(12,2) NOT NULL,
+            token_percentage NUMERIC(5,2) DEFAULT 0.00,
+            token_amount     NUMERIC(12,2) DEFAULT 0.00,
+            valid_until      TIMESTAMPTZ,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_srv_ticket_quotes_ticket ON service_ticket_quotations(ticket_id);
+        CREATE INDEX IF NOT EXISTS idx_srv_ticket_quotes_vendor ON service_ticket_quotations(vendor_id);
+
+        CREATE TABLE IF NOT EXISTS service_ticket_documents (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            ticket_id           UUID NOT NULL REFERENCES service_tickets(id) ON DELETE CASCADE,
+            doc_type            VARCHAR(50) NOT NULL,
+            doc_name            TEXT,
+            doc_url             TEXT NOT NULL,
+            uploaded_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+            metadata            JSONB NOT NULL DEFAULT '{}',
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_srv_ticket_docs_ticket ON service_ticket_documents(ticket_id);
     `);
 }

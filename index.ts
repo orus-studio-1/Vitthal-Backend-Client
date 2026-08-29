@@ -19,6 +19,8 @@ import quotationRouter from './Routers/Quotation.router';
 import notificationRouter from './Routers/Notification.router';
 import uploadRouter from './Routers/Upload.router';
 import deliveryRouter from './Routers/Delivery.router';
+import hiringRouter from './Routers/Hiring.router';
+import serviceHubRouter from './Routers/ServiceHub.router';
 import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
 import { startAccountDeletionJob } from './jobs/accountDeletion.job';
 import { createServer } from 'http';
@@ -104,6 +106,8 @@ app.use("/api/services", serviceRouter);
 app.use("/api/service-cart", serviceCartRouter);
 app.use("/api/quotations", quotationRouter);
 app.use("/api/notifications", notificationRouter);
+app.use("/api/hiring", hiringRouter);
+app.use("/api/service-hub", serviceHubRouter);
 app.use("/api", uploadRouter);
 
 async function startServer() {

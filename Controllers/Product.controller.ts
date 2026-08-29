@@ -350,11 +350,26 @@ export const addProductController = async (req: Request, res: Response): Promise
             return res.status(400).json({ message: "Quotation limit must be a positive integer" });
         }
 
+        const subcategoryId = req.body.subcategoryId || req.body.subcategory_id || null;
+        let resolvedSubcategoryId: string | null = null;
+        if (subcategoryId && typeof subcategoryId === "string" && subcategoryId.trim()) {
+            const subCheck = await client.query(
+                `SELECT id FROM subcategories WHERE id = $1 AND category_id = $2 LIMIT 1`,
+                [subcategoryId.trim(), resolvedCategoryId]
+            );
+            if (subCheck.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(400).json({ message: "Selected subcategory does not belong to this category." });
+            }
+            resolvedSubcategoryId = subCheck.rows[0].id;
+        }
+
         const query = `
             INSERT INTO products (
                 name,
                 description,
                 category,
+                subcategory_id,
                 product_type,
                 attributes,
                 approval_status,
@@ -363,13 +378,14 @@ export const addProductController = async (req: Request, res: Response): Promise
                 quotation_limit,
                 item_code
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             returning *
         `;
         const values = [
             name,
             description,
             resolvedCategoryId,
+            resolvedSubcategoryId,
             productType,
             JSON.stringify(attributesObj),
             approvalStatus,
@@ -689,11 +705,11 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
         console.error("Error while updating Products : ", error);
         return res.status(500).json({ message: "Internal Server Error" });
     }
-}
+};
 
 export const getAllProducts = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { offset, limit, search, category, productType } = req.query;
+        const { offset, limit, search, category, subcategory, productType } = req.query;
         if (offset === undefined || offset === null || isNaN(Number(offset))) {
             return res.status(400).json({ message: "Invalid offset value" });
         }
@@ -701,7 +717,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const offsetValue = Number(offset) * limitValue;
 
         let baseQuery = `
-            SELECT p.id, p.name, p.description, p.category, p.product_type
+            SELECT p.id, p.name, p.description, p.category, p.subcategory_id, p.product_type
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -718,7 +734,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
               )
         `;
         let countQuery = `
-            SELECT COUNT(*)::int AS total_count
+            SELECT COUNT(*) AS total
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -764,6 +780,13 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             paramCount++;
         }
 
+        if (subcategory && typeof subcategory === 'string' && subcategory.trim() !== '') {
+            baseQuery += ` AND (p.subcategory_id::text = $${paramCount} OR EXISTS (SELECT 1 FROM subcategories ps2 WHERE ps2.id = p.subcategory_id AND LOWER(ps2.name) = LOWER($${paramCount})))`;
+            countQuery += ` AND (p.subcategory_id::text = $${paramCount} OR EXISTS (SELECT 1 FROM subcategories ps2 WHERE ps2.id = p.subcategory_id AND LOWER(ps2.name) = LOWER($${paramCount})))`;
+            values.push(subcategory.trim());
+            paramCount++;
+        }
+
         if (productType && typeof productType === 'string' && productType.trim() !== '') {
             baseQuery += ` AND p.product_type = $${paramCount}`;
             countQuery += ` AND p.product_type = $${paramCount}`;
@@ -783,6 +806,9 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 p.name AS product_name,
                 p.description,
                 pc.code AS category,
+                pc.label AS category_label,
+                p.subcategory_id,
+                psub.name AS subcategory_name,
                 p.product_type,
                 ${approvedSpecificationsSelect},
 
@@ -806,6 +832,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
             ${approvedSpecificationsJoin}
 
             LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
+            LEFT JOIN subcategories psub ON psub.id = p.subcategory_id
 
             -- Primary image (no duplication)
             LEFT JOIN products_images pImg 
@@ -896,6 +923,8 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.description,
                 pc.code AS category,
                 pc.label AS category_name,
+                p.subcategory_id,
+                psub.name AS subcategory_name,
                 p.product_type,
                 p.item_code AS product_code,
                 p.attributes,
@@ -911,6 +940,7 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 COALESCE(specAgg.specifications, '{}'::jsonb) AS specifications
             FROM products p
             LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
+            LEFT JOIN subcategories psub ON psub.id = p.subcategory_id
             ${dynamicSpecificationsJoin}
             WHERE p.id = $1 AND ${approvalCondition}
         `;
@@ -1101,7 +1131,7 @@ export const getCategories = async (req: Request, res: Response): Promise<Respon
 
 export const getProductsByCategory = async (req: Request, res: Response): Promise<Response> => {
     const { category } = req.params;
-    const { offset, limit, search, productType } = req.query;
+    const { offset, limit, search, subcategory, productType } = req.query;
     const limitValue = Number(limit) > 20 ? 20 : Number(limit) || 20;
     const offsetValue = Number(offset) * limitValue;
 
@@ -1149,6 +1179,12 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
             paramCount++;
         }
 
+        if (subcategory && typeof subcategory === 'string' && subcategory.trim() !== '') {
+            filterConditions += ` AND (subcategory_id::text = $${paramCount} OR EXISTS (SELECT 1 FROM subcategories ps WHERE ps.id = products.subcategory_id AND LOWER(ps.name) = LOWER($${paramCount})))`;
+            filterValues.push(subcategory.trim());
+            paramCount++;
+        }
+
         if (productType && typeof productType === 'string' && productType.trim() !== '') {
             filterConditions += ` AND product_type = $${paramCount}`;
             filterValues.push(productType.trim());
@@ -1165,6 +1201,9 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 p.name AS product_name,
                 p.description,
                 pc.code AS category,
+                pc.label AS category_label,
+                p.subcategory_id,
+                psub.name AS subcategory_name,
                 p.product_type,
                 ${approvedSpecificationsSelect},
 
@@ -1185,7 +1224,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
-                SELECT id, name, description, category, product_type
+                SELECT id, name, description, category, subcategory_id, product_type
                 FROM products
                 WHERE ${filterConditions}
                 ORDER BY created_at DESC, id ASC
@@ -1195,6 +1234,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
             ${approvedSpecificationsJoin}
 
             LEFT JOIN product_category pc ON (p.category::text = pc.id::text OR p.category::text = pc.code)
+            LEFT JOIN subcategories psub ON psub.id = p.subcategory_id
 
             -- Primary image (no duplication)
             LEFT JOIN products_images pImg 
@@ -2780,6 +2820,35 @@ export const getLatestOrOrderedProducts = async (req: Request, res: Response): P
     } catch (e) {
         console.error("Error fetching latest or ordered products:", e);
         return res.status(500).json({ message: "Internal Server Error" });
+    }
+};
+
+export const getSubcategoriesController = async (req: Request, res: Response): Promise<Response> => {
+    const categoryId = req.params.categoryId || req.query.categoryId;
+    try {
+        let query = `
+            SELECT s.id, s.category_id, s.name, s.description, pc.code AS category_code, pc.label AS category_label
+            FROM subcategories s
+            JOIN product_category pc ON pc.id = s.category_id
+            WHERE pc.is_active = TRUE
+        `;
+        const params: any[] = [];
+        if (categoryId && typeof categoryId === "string") {
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
+            if (isUuid) {
+                query += ` AND s.category_id = $1`;
+                params.push(categoryId);
+            } else {
+                query += ` AND (LOWER(pc.code) = LOWER($1) OR LOWER(pc.label) = LOWER($1))`;
+                params.push(categoryId.trim());
+            }
+        }
+        query += ` ORDER BY s.name ASC`;
+        const result = await pool.query(query, params);
+        return res.status(200).json({ message: "Subcategories fetched successfully", data: result.rows });
+    } catch (error) {
+        console.error("Error fetching subcategories:", error);
+        return res.status(500).json({ message: "Internal server error" });
     }
 };
 

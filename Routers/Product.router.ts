@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController, getPublicProductReviewsController, getProductTypes, addProductVariantController, getProductVariantsController, getLatestOrOrderedProducts } from "../Controllers/Product.controller";
+import { addProductController, deleteProduct, getAllProducts, getProductById, getProductByName, getProductsByCategory, getCategories, getSubcategoriesController, updateProduct, addVendorProductController, getVendorProductsController, addProductSpecificationsController, getRankedVendors, getRelatedProducts, getVendorProductByIdController, updateVendorProductController, getVendorProductAnalyticsController, getProductReviewsController, uploadProductImagesController, getPublicProductReviewsController, getProductTypes, addProductVariantController, getProductVariantsController, getLatestOrOrderedProducts } from "../Controllers/Product.controller";
 
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
@@ -17,6 +17,8 @@ const upload = multer({
 // Public routes
 productRouter.get("/getAllProducts", getAllProducts);
 productRouter.get("/getCategories", getCategories);
+productRouter.get("/subcategories", getSubcategoriesController);
+productRouter.get("/categories/:categoryId/subcategories", getSubcategoriesController);
 productRouter.get("/getProductTypes", getProductTypes);
 productRouter.get("/getProductById/:productId", getProductById);
 productRouter.get("/getProductVariants/:productId", getProductVariantsController);

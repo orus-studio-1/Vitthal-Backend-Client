@@ -717,7 +717,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const offsetValue = Number(offset) * limitValue;
 
         let baseQuery = `
-            SELECT p.id, p.name, p.description, p.category, p.product_type
+            SELECT p.id, p.name, p.description, p.category,p.subcategory_id, p.product_type,p.item_code,p.attributes
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -734,7 +734,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
               )
         `;
         let countQuery = `
-            SELECT COUNT(*) AS total
+            SELECT COUNT(*)::int AS total_count
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -1263,7 +1263,7 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
-                SELECT id, name, description, category, product_type
+                SELECT id, name, description, category,subcategory_id, product_type,item_code,attributes
                 FROM products
                 WHERE ${filterConditions}
                 ORDER BY created_at DESC, id ASC

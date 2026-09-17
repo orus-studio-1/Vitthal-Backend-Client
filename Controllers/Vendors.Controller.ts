@@ -929,7 +929,8 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
                     v.application_number,
                     v.is_active,
                     v.is_blocked,
-                    v.reconsideration_notes
+                    v.reconsideration_notes,
+                    v.vendor_type
                 FROM users u
                 LEFT JOIN vendors v ON v.user_id = u.id
                 WHERE u.id = $1
@@ -950,6 +951,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
                 role: row.role,
                 vendor_id: row.vendor_id ?? null,
                 approval_status: null,
+                vendor_type: null,
                 is_active: row.is_active ?? true,
                 is_blocked: row.is_blocked ?? false,
                 reconsideration_notes: null,
@@ -961,6 +963,7 @@ export const getVendorIdStatusController = async (req: Request, res: Response): 
             role: row.role,
             vendor_id: row.vendor_id ?? null,
             approval_status: row.vendor_id ? (row.approval_status ?? "pending") : "setup_required",
+            vendor_type: row.vendor_type ?? null,
             application_number: row.application_number ?? null,
             is_active: row.is_active ?? true,
             is_blocked: row.is_blocked ?? false,

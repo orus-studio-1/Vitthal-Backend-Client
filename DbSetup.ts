@@ -506,7 +506,7 @@ export async function ensureMarketplaceSchema() {
             ALTER COLUMN code SET NOT NULL,
             ALTER COLUMN label SET NOT NULL;
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_code ON product_category(code);
+        CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
 
         DO $$
         BEGIN

@@ -4,6 +4,7 @@ import { respondServiceQuotationController } from "./Service.controller";
 import { sendQuotationRequestEmail, sendQuotationUpdateEmail } from "../helpers/emailService.helper";
 import { createNotification, notifyAllAdmins } from "./Notification.controller";
 import { generateBaseQuotationDocument, generateVendorQuotationDocument } from "../services/quotationDocument.service";
+import { generateAndSaveRoutePlan } from './Order.Controller'
 import { getPresignedUrl } from "../services/s3.service";
 import Razorpay from "razorpay";
 import crypto from "crypto";
@@ -1701,8 +1702,9 @@ export const createTokenPaymentController = async (req: Request, res: Response):
 
         const quotation = quotationResult.rows[0];
 
-        if (quotation.status !== "admin_confirmation_pending" || quotation.admin_confirmation_status !== "pending") {
-            return res.status(400).json({ message: "Quotation is not pending admin confirmation response" });
+        const validStatuses = ["admin_confirmation_pending", "client_accepted"];
+        if (!validStatuses.includes(quotation.status)) {
+            return res.status(400).json({ message: "Quotation is not pending payment or admin confirmation response" });
         }
 
         // Fetch token details
@@ -1821,6 +1823,11 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
         }
 
         const client = await pool.connect();
+        client.on("error", (err) => {
+            console.error("verifyTokenPayment DB client error:", err);
+        });
+
+        let targetOrderId: string | null = null;
 
         try {
             await client.query("BEGIN");
@@ -1868,35 +1875,87 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
                 [id]
             );
 
-            // 6. Update associated order status to processing and payment_status to paid
-            if (quotation.order_id) {
+            // 6. Ensure associated order is created and status updated to processing/paid
+            targetOrderId = quotation.order_id;
+
+            if (!targetOrderId) {
+                const addressResult = await client.query(
+                    `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+                    [userId]
+                );
+                const address = addressResult.rows[0] || {};
+                const acceptedPrice = quotation.accepted_price ? Number(quotation.accepted_price) : Number(quotation.current_offer_price);
+                const acceptedQty = quotation.accepted_quantity ? Number(quotation.accepted_quantity) : Number(quotation.current_offer_quantity);
+                const totalAmount = acceptedPrice && acceptedQty ? acceptedPrice * acceptedQty * 1.18 : Number(quotation.token_amount || 0);
+
+                const newOrderResult = await client.query(
+                    `INSERT INTO orders (
+                        user_id, vendor_id, status, payment_status, total_amount,
+                        address_line, city, state, country, pincode, latitude, langitude,
+                        source, order_type
+                    ) VALUES ($1, $2, 'processing', 'paid', $3, $4, $5, $6, $7, $8, $9, $10, 'client', 'quotation')
+                    RETURNING id`,
+                    [
+                        userId,
+                        quotation.vendor_id,
+                        totalAmount,
+                        address.address || "",
+                        quotation.buyer_city || address.city || "",
+                        quotation.buyer_state || address.state || "",
+                        quotation.buyer_country || address.country || "India",
+                        quotation.buyer_pincode || address.pincode || "",
+                        address.latitude || null,
+                        address.longitude || address.latitude || null,
+                    ]
+                );
+
+                targetOrderId = newOrderResult.rows[0].id as string;
+
+                await client.query(
+                    `INSERT INTO vendor_payouts (order_id, vendor_id, status)
+                     VALUES ($1, $2, 'pending')
+                     ON CONFLICT (order_id) DO NOTHING`,
+                    [targetOrderId, quotation.vendor_id]
+                );
+
+                await client.query(
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [targetOrderId, quotation.product_id, quotation.product_variant_id, quotation.vendor_id, acceptedQty, acceptedPrice]
+                );
+
+                await client.query(
+                    `UPDATE quotation_requests SET order_id = $1 WHERE id = $2`,
+                    [targetOrderId, id]
+                );
+            } else {
                 await client.query(
                     `UPDATE orders 
                      SET status = 'processing', payment_status = 'paid', updated_at = NOW() 
                      WHERE id = $1`,
-                    [quotation.order_id]
+                    [targetOrderId]
                 );
+            }
 
+            await client.query(
+                `INSERT INTO order_status_history (order_id, status, note, created_at)
+                 VALUES ($1, 'processing', 'Admin confirmation accepted and token money paid by client.', CURRENT_TIMESTAMP)`,
+                [targetOrderId]
+            );
+
+            // Deduct stock for order items
+            const orderItemsQuery = await client.query(
+                `SELECT product_variant_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
+                [targetOrderId]
+            );
+
+            for (const item of orderItemsQuery.rows) {
                 await client.query(
-                    `INSERT INTO order_status_history (order_id, status, note, created_at)
-                     VALUES ($1, 'processing', 'Admin confirmation accepted and token money paid by client.', CURRENT_TIMESTAMP)`,
-                    [quotation.order_id]
+                    `UPDATE vendor_products     
+                     SET stock_quantity = GREATEST(0, stock_quantity - $1), updated_at = NOW()
+                     WHERE product_variant_id = $2 AND vendor_id = $3`,
+                    [item.quantity, item.product_variant_id, item.vendor_id]
                 );
-
-                // Deduct stock for order items
-                const orderItemsQuery = await client.query(
-                    `SELECT product_variant_id, vendor_id, quantity FROM order_items WHERE order_id = $1`,
-                    [quotation.order_id]
-                );
-
-                for (const item of orderItemsQuery.rows) {
-                    await client.query(
-                        `UPDATE vendor_products     
-                         SET stock_quantity = GREATEST(0, stock_quantity - $1), updated_at = NOW()
-                         WHERE product_variant_id = $2 AND vendor_id = $3`,
-                        [item.quantity, item.product_variant_id, item.vendor_id]
-                    );
-                }
             }
 
             // 7. Insert client confirm message in chat
@@ -1926,7 +1985,6 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             });
 
             await client.query("COMMIT");
-            return res.status(200).json({ message: "Token payment verified and quotation fully confirmed!" });
 
         } catch (error) {
             await client.query("ROLLBACK");
@@ -1936,8 +1994,125 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             client.release();
         }
 
+        // Generate route plan AFTER committing the transaction so pool.query doesn't lock/timeout
+        if (targetOrderId) {
+            try {
+                await generateAndSaveRoutePlan(targetOrderId);
+                await pool.query(
+                    `UPDATE order_route_plan 
+                     SET status = 'pickup_pending', updated_at = NOW()
+                     WHERE order_id = $1 AND stop_sequence = 1`,
+                    [targetOrderId]
+                );
+            } catch (routeErr) {
+                console.error(`Route plan generation warning for order ${targetOrderId}:`, routeErr);
+            }
+        }
+
+        return res.status(200).json({ message: "Token payment verified and quotation fully confirmed!" });
+
     } catch (error) {
         console.error("Verify token payment error:", error);
         return res.status(500).json({ message: "Internal server error during payment verification." });
+    }
+};
+
+export const repairStuckQuotationOrdersController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const stuckQuotations = await pool.query(
+            `SELECT qr.* FROM quotation_requests qr
+             LEFT JOIN payments p ON p.quotation_request_id = qr.id
+             WHERE qr.order_id IS NULL 
+               AND (qr.status = 'admin_confirmed' OR qr.admin_confirmation_status = 'confirmed' OR p.status = 'successful')`
+        );
+
+        let repairedCount = 0;
+        for (const quotation of stuckQuotations.rows) {
+            const client = await pool.connect();
+            try {
+                await client.query("BEGIN");
+
+                const addressResult = await client.query(
+                    `SELECT * FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+                    [quotation.user_id]
+                );
+                const address = addressResult.rows[0] || {};
+                const acceptedPrice = quotation.accepted_price ? Number(quotation.accepted_price) : Number(quotation.current_offer_price);
+                const acceptedQty = quotation.accepted_quantity ? Number(quotation.accepted_quantity) : Number(quotation.current_offer_quantity);
+                const totalAmount = acceptedPrice && acceptedQty ? acceptedPrice * acceptedQty * 1.18 : Number(quotation.token_amount || 0);
+
+                const newOrderResult = await client.query(
+                    `INSERT INTO orders (
+                        user_id, vendor_id, status, payment_status, total_amount,
+                        address_line, city, state, country, pincode, latitude, langitude,
+                        source, order_type
+                    ) VALUES ($1, $2, 'processing', 'paid', $3, $4, $5, $6, $7, $8, $9, $10, 'client', 'quotation')
+                    RETURNING id`,
+                    [
+                        quotation.user_id,
+                        quotation.vendor_id,
+                        totalAmount,
+                        address.address || "",
+                        quotation.buyer_city || address.city || "",
+                        quotation.buyer_state || address.state || "",
+                        quotation.buyer_country || address.country || "India",
+                        quotation.buyer_pincode || address.pincode || "",
+                        address.latitude || null,
+                        address.longitude || address.latitude || null,
+                    ]
+                );
+
+                const orderId = newOrderResult.rows[0].id as string;
+
+                await client.query(
+                    `INSERT INTO vendor_payouts (order_id, vendor_id, status)
+                     VALUES ($1, $2, 'pending')
+                     ON CONFLICT (order_id) DO NOTHING`,
+                    [orderId, quotation.vendor_id]
+                );
+
+                await client.query(
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [orderId, quotation.product_id, quotation.product_variant_id, quotation.vendor_id, acceptedQty, acceptedPrice]
+                );
+
+                await client.query(
+                    `UPDATE quotation_requests SET order_id = $1, status = 'admin_confirmed', admin_confirmation_status = 'confirmed' WHERE id = $2`,
+                    [orderId, quotation.id]
+                );
+
+                await client.query(
+                    `INSERT INTO order_status_history (order_id, status, note, created_at)
+                     VALUES ($1, 'processing', 'Repaired stuck bulk quotation order.', CURRENT_TIMESTAMP)`,
+                    [orderId]
+                );
+
+                await client.query("COMMIT");
+                repairedCount++;
+
+                try {
+                    await generateAndSaveRoutePlan(orderId);
+                    await pool.query(
+                        `UPDATE order_route_plan 
+                         SET status = 'pickup_pending', updated_at = NOW()
+                         WHERE order_id = $1 AND stop_sequence = 1`,
+                        [orderId]
+                    );
+                } catch (routeErr) {
+                    console.error(`Route plan generation warning during repair for order ${orderId}:`, routeErr);
+                }
+            } catch (err) {
+                await client.query("ROLLBACK");
+                console.error(`Failed to repair quotation ${quotation.id}:`, err);
+            } finally {
+                client.release();
+            }
+        }
+
+        return res.status(200).json({ message: `Successfully repaired ${repairedCount} stuck quotation order(s).` });
+    } catch (error) {
+        console.error("Error repairing stuck quotation orders:", error);
+        return res.status(500).json({ message: "Failed to repair stuck quotation orders" });
     }
 };

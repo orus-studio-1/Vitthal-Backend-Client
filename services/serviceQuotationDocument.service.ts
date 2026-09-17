@@ -38,10 +38,15 @@ export type ServiceQuotationDocumentData = {
 
 // ─── Generate Quotation Number ───────────────────────────────────────
 export async function generateServiceQuotationNumber(): Promise<string> {
-    const result = await pool.query(`SELECT nextval('quotation_number_seq') AS seq`);
-    const seq = String(result.rows[0].seq).padStart(5, "0");
     const year = new Date().getFullYear();
-    return `SQTN-${year}-${seq}`;
+    try {
+        const result = await pool.query(`SELECT nextval('quotation_number_seq') AS seq`);
+        const seq = String(result.rows[0].seq).padStart(5, "0");
+        return `SQTN-${year}-${seq}`;
+    } catch {
+        const seq = String(Math.floor(10000 + Math.random() * 90000));
+        return `SQTN-${year}-${seq}`;
+    }
 }
 
 // ─── Format Currency ─────────────────────────────────────────────────

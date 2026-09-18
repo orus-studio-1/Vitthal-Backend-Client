@@ -73,11 +73,11 @@ function computeRouteStops(
 
     return onRoute;
 }
-
+    
 // ──────────────────────────────────────────────────────────────────────────────
 // Generate route plan and save to DB
 // ──────────────────────────────────────────────────────────────────────────────
-async function generateAndSaveRoutePlan(orderId: string): Promise<void> {
+export async function generateAndSaveRoutePlan(orderId: string): Promise<void> {
     // 1. Get the order's destination + vendor info
     const orderQ = await pool.query(
         `SELECT o.vendor_id, o.latitude, o.langitude, o.order_reference,

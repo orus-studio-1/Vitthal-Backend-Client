@@ -22,7 +22,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         await pool.query('BEGIN');
 
         // 1. Fetch user's address
-        const addressId = req.body.addressId || req.body.address_id || null;
+        const addressId = req.body?.addressId || req.body?.address_id || null;
         let addressQuery;
         
         if (addressId) {

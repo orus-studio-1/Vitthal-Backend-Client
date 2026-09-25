@@ -25,6 +25,7 @@ import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
 import { startAccountDeletionJob } from './jobs/accountDeletion.job';
 import { createServer } from 'http';
 import { initSocket } from './socket';
+import contactRouter from './Routers/Contact.router';
 
 dotenv.config();
 
@@ -109,6 +110,7 @@ app.use("/api/notifications", notificationRouter);
 app.use("/api/hiring", hiringRouter);
 app.use("/api/service-hub", serviceHubRouter);
 app.use("/api", uploadRouter);
+app.use("/api/contact",contactRouter)
 
 async function startServer() {
     try {

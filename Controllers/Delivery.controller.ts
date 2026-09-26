@@ -2,6 +2,8 @@ import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import pool from "../DbConnect";
 import { sendExpoPushNotification } from "../services/pushNotification.service";
+import { razorpay } from "../services/razorpay.service";
+import QRCode from "qrcode";
 
 // Helper to resolve the hub details using the authenticated user's ID
 async function resolveHubDetails(userId: string) {
@@ -861,7 +863,7 @@ export const getRiderTasksController = async (req: Request, res: Response): Prom
 
         const query = `
             SELECT o.id as order_id, o.order_reference, o.customer_name, o.customer_phone,
-                   o.address_line, o.city, o.state, o.pincode, o.latitude, o.langitude,
+                   o.address_line, o.city, o.state, o.pincode, o.latitude, o.langitude,o.payment_status,
                    (
                        SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
                        FROM order_items oi
@@ -1017,7 +1019,7 @@ export const getRiderCompletedDeliveriesController = async (req: Request, res: R
 // 13. POST /api/delivery/rider/deliver (Rider completes a B2B delivery)
 export const postRiderDeliverController = async (req: Request, res: Response): Promise<Response> => {
     const user = (req as any).user;
-    const { orderId } = req.body;
+    const { orderId, codPaymentMethod } = req.body; // codPaymentMethod: 'cash' | 'upi' — only relevant if order was COD
 
     if (!user || user.role !== "delivery_agent") {
         return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
@@ -1040,7 +1042,6 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         }
         const riderId = riderRes.rows[0].id;
 
-        // Check if the order was indeed handed over to this rider
         const assignmentRes = await client.query(
             `SELECT id FROM order_fulfillment_tracking 
              WHERE order_id = $1 AND delivery_agent_id = $2 AND status = 'handed_over'`,
@@ -1051,23 +1052,40 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
             return res.status(400).json({ message: "This order is not assigned to you for delivery." });
         }
 
-        // Update the order global status to delivered
+        // Check current payment status before updating, so we know whether this was COD
+        const orderRes = await client.query(
+            `SELECT payment_status FROM orders WHERE id = $1`,
+            [orderId]
+        );
+        const wasCod = orderRes.rows[0]?.payment_status === 'cod_pending';
+        const collectionMethod = wasCod && codPaymentMethod === 'upi' ? 'upi' : 'cash';
+
+        // Update order status to delivered — mark COD payment collected in the same statement
         await client.query(
-            `UPDATE orders SET status = 'delivered', updated_at = NOW() WHERE id = $1`,
+            `UPDATE orders 
+             SET status = 'delivered', 
+                 updated_at = NOW(),
+                 payment_status = CASE WHEN payment_status = 'cod_pending' THEN 'paid' ELSE payment_status END
+             WHERE id = $1`,
             [orderId]
         );
 
-        // Insert delivered tracking log
+        // Insert delivered tracking log — note COD collection method if applicable
+        const trackingNote = wasCod
+            ? `Order successfully delivered to customer. COD payment collected via ${collectionMethod === 'upi' ? 'UPI/QR' : 'cash'}.`
+            : 'Order successfully delivered to customer.';
         await client.query(
             `INSERT INTO order_fulfillment_tracking (order_id, delivery_agent_id, status, note, location_label)
-             VALUES ($1, $2, 'delivered', 'Order successfully delivered to customer.', 'Customer Location')`,
-            [orderId, riderId]
+             VALUES ($1, $2, 'delivered', $3, 'Customer Location')`,
+            [orderId, riderId, trackingNote]
         );
 
         await client.query("COMMIT");
         return res.status(200).json({
-            message: "Order successfully marked as delivered.",
-            data: { orderId }
+            message: wasCod
+                ? `Order marked as delivered. COD payment (${collectionMethod}) collected.`
+                : "Order successfully marked as delivered.",
+            data: { orderId, codPaymentCollected: wasCod, collectionMethod: wasCod ? collectionMethod : null }
         });
     } catch (error) {
         await client.query("ROLLBACK");
@@ -1769,8 +1787,8 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
         return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
     }
 
-    const { orderId, code } = req.body;
-    console.log("[verifyDelivery] Incoming verification request:", { orderId, code });
+    const { orderId, code, codPaymentMethod } = req.body; // codPaymentMethod: 'cash' | 'upi' — only relevant if order was COD
+    console.log("[verifyDelivery] Incoming verification request:", { orderId, code, codPaymentMethod });
     if (!orderId || !code) {
         return res.status(400).json({ message: "Order ID and verification code/QR are required." });
     }
@@ -1778,7 +1796,7 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
     try {
         // Query to check if the code matches the order's delivery details
         const orderQ = await pool.query(
-            `SELECT id, order_reference 
+            `SELECT id, order_reference, payment_status 
              FROM orders 
              WHERE id = $1 AND (delivery_otp = $2 OR delivery_qr_token = $3)`,
             [orderId, String(code).trim(), String(code).trim()]
@@ -1789,23 +1807,65 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
         }
 
         const order = orderQ.rows[0];
+        const wasCod = order.payment_status === 'cod_pending';
+        const collectionMethod = wasCod && codPaymentMethod === 'upi' ? 'upi' : 'cash';
 
+        // For UPI COD, verify with Razorpay before allowing delivery to complete —
+        // this confirms real payment instead of trusting the rider's tap.
+        let matchedPaymentRecordId: string | null = null;
+        let matchedRazorpayPaymentId: string | null = null;
+        if (wasCod && collectionMethod === 'upi') {
+            const paymentQ = await pool.query(
+                `SELECT id, razorpay_order_id FROM payments 
+                WHERE $1 = ANY(order_ids) AND payment_method = 'upi_qr' AND status = 'pending'
+                ORDER BY created_at DESC LIMIT 1`,
+                [orderId]
+            );
+            if (paymentQ.rows.length === 0) {
+                return res.status(400).json({ message: "No UPI payment was initiated for this order. Generate a QR code first." });
+            }
+            const linkId = paymentQ.rows[0].razorpay_order_id;
+
+            const plink: any = await (razorpay as any).paymentLink.fetch(linkId);
+
+            if (plink.status !== 'paid') {
+                return res.status(400).json({ message: "UPI payment has not been received yet. Wait for the customer to complete payment." });
+            }
+
+            const capturedPayment = (plink.payments || []).find((p: any) => p.status === 'captured') || (plink.payments || [])[0];
+
+            matchedPaymentRecordId = paymentQ.rows[0].id;
+            matchedRazorpayPaymentId = capturedPayment?.payment_id || null;
+        }        
         // Begin verification updates
         await pool.query("BEGIN");
 
-        // 1. Update order status to delivered
+        // 1. Update order status to delivered — for COD orders, mark payment collected in the same statement
         await pool.query(
             `UPDATE orders 
-             SET status = 'delivered', updated_at = CURRENT_TIMESTAMP 
+             SET status = 'delivered', 
+                 updated_at = CURRENT_TIMESTAMP,
+                 payment_status = CASE WHEN payment_status = 'cod_pending' THEN 'paid' ELSE payment_status END
              WHERE id = $1`,
             [orderId]
         );
 
-        // 2. Add history record
+        // 1b. If UPI was verified, mark the payments record successful too
+        if (matchedPaymentRecordId) {
+            await pool.query(
+                `UPDATE payments SET status = 'successful', razorpay_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+                [matchedRazorpayPaymentId, matchedPaymentRecordId]
+            );
+        }
+
+        // 2. Add history record — note which method the rider reported/verified for COD
+        const historyNote = wasCod
+            ? `Order delivered successfully to customer. COD payment collected via ${collectionMethod === 'upi' ? 'UPI (Razorpay QR, verified)' : 'cash'}.`
+            : 'Order delivered successfully to customer';
         await pool.query(
             `INSERT INTO order_status_history (order_id, status, note, created_at)
-             VALUES ($1, 'delivered', 'Order delivered successfully to customer', CURRENT_TIMESTAMP)`,
-            [orderId]
+             VALUES ($1, 'delivered', $2, CURRENT_TIMESTAMP)`,
+            [orderId, historyNote]
         );
 
         // 3. Add tracking entry
@@ -1845,10 +1905,14 @@ export const verifyDeliveryController = async (req: Request, res: Response): Pro
         await pool.query("COMMIT");
 
         return res.status(200).json({
-            message: "Delivery verified successfully! Order marked as completed.",
+            message: wasCod
+                ? `Delivery verified! COD payment (${collectionMethod}) collected and order marked as completed.`
+                : "Delivery verified successfully! Order marked as completed.",
             data: {
                 orderId,
-                orderReference: order.order_reference
+                orderReference: order.order_reference,
+                codPaymentCollected: wasCod,
+                collectionMethod: wasCod ? collectionMethod : null
             }
         });
 
@@ -2128,4 +2192,793 @@ export const getRiderEarningsController = async (req: Request, res: Response): P
     }
 };
 
+// POST /api/delivery/rider/cod-qr/create
+export const createCodQrController = async (req: Request, res: Response): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId } = req.body;
 
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+    }
+
+    if (!orderId) {
+        return res.status(400).json({ message: "Order ID is required." });
+    }
+
+    try {
+        const orderQ = await pool.query(
+            `SELECT o.id, o.user_id, o.total_amount, o.payment_status, o.order_reference
+             FROM orders o
+             JOIN order_fulfillment_tracking oft ON oft.order_id = o.id
+             JOIN delivery_agents da ON da.id = oft.delivery_agent_id
+             WHERE o.id = $1
+               AND da.user_id = $2
+               AND oft.status = 'handed_over'
+             ORDER BY oft.created_at DESC
+             LIMIT 1`,
+            [orderId, user.userId]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(404).json({
+                message: "Order not found or not assigned to you for delivery."
+            });
+        }
+
+        const order = orderQ.rows[0];
+
+        // Only COD pending orders can generate a payment QR
+        if (order.payment_status !== 'cod_pending') {
+            return res.status(400).json({
+                message: "This order does not require COD payment collection."
+            });
+        }
+
+        // Check payment_status, NOT order.status
+        const alreadyPaidQ = await pool.query(
+            `SELECT payment_status FROM orders WHERE id = $1`,
+            [orderId]
+        );
+
+        if (alreadyPaidQ.rows[0]?.payment_status === 'paid') {
+            return res.status(400).json({
+                message: "Payment already completed for this order."
+            });
+        }
+
+        // Look for an existing pending UPI payment link
+        const existingPaymentQ = await pool.query(
+            `SELECT id, razorpay_order_id
+             FROM payments
+             WHERE $1 = ANY(order_ids)
+               AND payment_method = 'upi_qr'
+               AND status = 'pending'
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [orderId]
+        );
+
+        let plink: any;
+
+        if (existingPaymentQ.rows.length > 0) {
+            try {
+                plink = await (razorpay as any).paymentLink.fetch(
+                    existingPaymentQ.rows[0].razorpay_order_id
+                );
+
+                // Existing link is only reusable if it is still created
+                if (plink.status !== 'created') {
+                    plink = null;
+                }
+            } catch {
+                plink = null;
+            }
+        }
+
+        // Create a new payment link only when there is no active one
+        if (!plink) {
+            const amountPaise = Math.round(Number(order.total_amount) * 100);
+
+            plink = await (razorpay as any).paymentLink.create({
+                amount: amountPaise,
+                currency: "INR",
+                accept_partial: false,
+                description: `Order ${order.order_reference || order.id}`,
+                notify: {
+                    sms: false,
+                    email: false
+                },
+                notes: {
+                    orderId: order.id
+                },
+                expire_by: Math.floor(Date.now() / 1000) + 20 * 60,
+            });
+
+            await pool.query(
+                `INSERT INTO payments
+                    (user_id, amount, status, payment_method, razorpay_order_id, order_ids)
+                 VALUES
+                    ($1, $2, 'pending', 'upi_qr', $3, ARRAY[$4]::uuid[])`,
+                [
+                    order.user_id,
+                    order.total_amount,
+                    plink.id,
+                    orderId
+                ]
+            );
+        }
+
+        const qrDataUrl = await QRCode.toDataURL(
+            plink.short_url,
+            {
+                width: 400,
+                margin: 1
+            }
+        );
+
+        return res.status(200).json({
+            message: "Payment QR generated",
+            data: {
+                qrId: plink.id,
+                imageUrl: qrDataUrl,
+                amount: order.total_amount,
+                paymentUrl: plink.short_url,
+                expiry: Number(plink.expire_by) * 1000
+            }
+        });
+
+    } catch (error: any) {
+        console.error("Error creating COD payment link:", {
+            message: error?.message,
+            statusCode: error?.statusCode,
+            description: error?.error?.description,
+        });
+
+        return res.status(500).json({
+            message: "Failed to generate payment QR."
+        });
+    }
+};
+
+// GET /api/delivery/rider/cod-qr/:orderId/status
+// GET /api/delivery/rider/cod-qr/:orderId/status
+export const getCodQrStatusController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId } = req.params;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({
+            message: "Unauthorized."
+        });
+    }
+
+    try {
+        const orderQ = await pool.query(
+            `SELECT payment_status
+             FROM orders
+             WHERE id = $1`,
+            [orderId]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(404).json({
+                message: "Order not found."
+            });
+        }
+
+        // Already persisted as paid
+        if (orderQ.rows[0].payment_status === 'paid') {
+            return res.status(200).json({
+                data: {
+                    paid: true,
+                    paymentId: null
+                }
+            });
+        }
+
+        const paymentQ = await pool.query(
+            `SELECT razorpay_order_id
+             FROM payments
+             WHERE $1 = ANY(order_ids)
+               AND payment_method = 'upi_qr'
+               AND status = 'pending'
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [orderId]
+        );
+
+        if (paymentQ.rows.length === 0) {
+            return res.status(200).json({
+                data: {
+                    paid: false,
+                    paymentId: null
+                }
+            });
+        }
+
+        const linkId = paymentQ.rows[0].razorpay_order_id;
+
+        const plink: any = await (razorpay as any).paymentLink.fetch(linkId);
+
+        const paid = plink.status === 'paid';
+
+        const paymentId =
+            plink.payments?.[0]?.payment_id || null;
+
+        // Razorpay confirms payment
+        if (paid) {
+
+            // Persist order payment status
+            await pool.query(
+                `UPDATE orders
+                 SET payment_status = 'paid',
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND payment_status = 'cod_pending'`,
+                [orderId]
+            );
+
+            // Persist payment record
+            await pool.query(
+                `UPDATE payments
+                 SET status = 'successful',
+                     razorpay_payment_id = $1,
+                     updated_at = NOW()
+                 WHERE razorpay_order_id = $2
+                   AND payment_method = 'upi_qr'
+                   AND status = 'pending'`,
+                [paymentId, linkId]
+            );
+        }
+
+        return res.status(200).json({
+            data: {
+                paid,
+                paymentId
+            }
+        });
+
+    } catch (error) {
+        console.error(
+            "Error checking payment link status:",
+            error
+        );
+
+        return res.status(500).json({
+            message: "Failed to check payment status."
+        });
+    }
+};
+
+// POST /api/delivery/rider/quotation-payment/create
+export const createQuotationDeliveryPaymentQrController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId } = req.body;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({
+            message: "Unauthorized. Delivery agents only.",
+        });
+    }
+
+    if (!orderId) {
+        return res.status(400).json({
+            message: "Order ID is required.",
+        });
+    }
+
+    try {
+        // ---------------------------------------------------------
+        // 1. Verify order belongs to this rider and is handed over
+        // ---------------------------------------------------------
+        const orderQ = await pool.query(
+            `
+            SELECT
+                o.id,
+                o.user_id,
+                o.total_amount,
+                o.payment_status,
+                o.order_type,
+                o.order_reference,
+                qr.id AS quotation_request_id,
+                qr.token_percentage,
+                qr.token_amount
+            FROM orders o
+
+            JOIN order_fulfillment_tracking oft
+                ON oft.order_id = o.id
+
+            JOIN delivery_agents da
+                ON da.id = oft.delivery_agent_id
+
+            JOIN quotation_requests qr
+                ON qr.order_id = o.id
+
+            WHERE o.id = $1
+              AND da.user_id = $2
+              AND oft.status = 'handed_over'
+              AND o.order_type = 'quotation'
+
+            ORDER BY oft.created_at DESC
+            LIMIT 1
+            `,
+            [orderId, user.userId]
+        );
+
+        if (orderQ.rows.length === 0) {
+            return res.status(404).json({
+                message:
+                    "Quotation order not found or not assigned to you for delivery.",
+            });
+        }
+
+        const order = orderQ.rows[0];
+
+        const quotationTotal = Number(order.total_amount);
+
+        if (!quotationTotal || quotationTotal <= 0) {
+            return res.status(400).json({
+                message: "Invalid quotation total amount.",
+            });
+        }
+
+        // ---------------------------------------------------------
+        // 2. Make sure token payment was already completed
+        // ---------------------------------------------------------
+        const tokenPaymentQ = await pool.query(
+            `
+            SELECT
+                id,
+                amount,
+                status
+            FROM payments
+            WHERE quotation_request_id = $1
+              AND split_number = 1
+              AND status = 'successful'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [order.quotation_request_id]
+        );
+
+        if (tokenPaymentQ.rows.length === 0) {
+            return res.status(400).json({
+                message:
+                    "Token payment has not been completed. Delivery payment cannot be collected yet.",
+            });
+        }
+
+        // ---------------------------------------------------------
+        // 3. Make sure dispatch payment was already completed
+        //
+        // Dispatch payment will be split #2.
+        // This branch does not implement dispatch payment,
+        // but once that branch is merged this query will pick it up.
+        // ---------------------------------------------------------
+        const dispatchPaymentQ = await pool.query(
+            `
+            SELECT
+                id,
+                amount,
+                status
+            FROM payments
+            WHERE quotation_request_id = $1
+              AND split_number = 2
+              AND status = 'successful'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [order.quotation_request_id]
+        );
+
+        if (dispatchPaymentQ.rows.length === 0) {
+            return res.status(400).json({
+                message:
+                    "Dispatch payment has not been completed yet. Final delivery payment cannot be collected.",
+            });
+        }
+
+        // ---------------------------------------------------------
+        // 4. Calculate everything already paid
+        //
+        // Example:
+        //
+        // Total       = 100,000
+        // Token       = 10,000
+        // Dispatch    = 75,000
+        //
+        // Already paid = 85,000
+        // Delivery     = 15,000
+        // ---------------------------------------------------------
+        const paidQ = await pool.query(
+            `
+            SELECT COALESCE(SUM(amount), 0) AS total_paid
+            FROM payments
+            WHERE quotation_request_id = $1
+              AND order_ids @> ARRAY[$2]::uuid[]
+              AND status = 'successful'
+            `,
+            [order.quotation_request_id, orderId]
+        );
+
+        const totalPaid = Number(
+            paidQ.rows[0]?.total_paid || 0
+        );
+
+        const deliveryAmount = quotationTotal - totalPaid;
+
+        // ---------------------------------------------------------
+        // 5. Nothing left to collect
+        // ---------------------------------------------------------
+        if (deliveryAmount <= 0) {
+            return res.status(400).json({
+                message: "No remaining delivery payment is due.",
+                data: {
+                    quotationTotal,
+                    totalPaid,
+                    remainingAmount: 0,
+                },
+            });
+        }
+
+        // ---------------------------------------------------------
+        // 6. Calculate the actual remaining percentage
+        //
+        // Example:
+        // 15,000 / 100,000 = 15%
+        // ---------------------------------------------------------
+        const deliveryPercentage =
+            (deliveryAmount / quotationTotal) * 100;
+
+        // ---------------------------------------------------------
+        // 7. Check whether a pending delivery QR already exists
+        // ---------------------------------------------------------
+        const existingPaymentQ = await pool.query(
+            `
+            SELECT
+                id,
+                amount,
+                razorpay_order_id
+            FROM payments
+            WHERE $1 = ANY(order_ids)
+              AND quotation_request_id = $2
+              AND split_number = 3
+              AND payment_method = 'upi_qr'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [orderId, order.quotation_request_id]
+        );
+
+        let plink: any = null;
+
+        if (existingPaymentQ.rows.length > 0) {
+            try {
+                plink = await (razorpay as any).paymentLink.fetch(
+                    existingPaymentQ.rows[0].razorpay_order_id
+                );
+
+                // Reuse only an active payment link.
+                if (plink.status !== "created") {
+                    plink = null;
+                }
+            } catch {
+                plink = null;
+            }
+        }
+
+        // ---------------------------------------------------------
+        // 8. Create Razorpay Payment Link if needed
+        // ---------------------------------------------------------
+        if (!plink) {
+            const amountPaise = Math.round(
+                deliveryAmount * 100
+            );
+
+            plink = await (razorpay as any).paymentLink.create({
+                amount: amountPaise,
+                currency: "INR",
+                accept_partial: false,
+
+                description:
+                    `Final delivery payment for Order ${
+                        order.order_reference || order.id
+                    }`,
+
+                notify: {
+                    sms: false,
+                    email: false,
+                },
+
+                notes: {
+                    orderId: order.id,
+                    quotationRequestId:
+                        order.quotation_request_id,
+                    paymentType: "quotation_delivery",
+                    splitNumber: "3",
+                },
+
+                expire_by:
+                    Math.floor(Date.now() / 1000) +
+                    20 * 60,
+            });
+
+            // -----------------------------------------------------
+            // 9. Store pending payment
+            // -----------------------------------------------------
+            await pool.query(
+                `
+                INSERT INTO payments (
+                    user_id,
+                    amount,
+                    status,
+                    payment_method,
+                    razorpay_order_id,
+                    order_ids,
+                    quotation_request_id,
+                    split_number,
+                    split_percentage
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    'pending',
+                    'upi_qr',
+                    $3,
+                    ARRAY[$4]::uuid[],
+                    $5,
+                    3,
+                    $6
+                )
+                `,
+                [
+                    order.user_id,
+                    deliveryAmount,
+                    plink.id,
+                    orderId,
+                    order.quotation_request_id,
+                    deliveryPercentage,
+                ]
+            );
+        }
+
+        // ---------------------------------------------------------
+        // 10. Generate QR
+        // ---------------------------------------------------------
+        const qrDataUrl = await QRCode.toDataURL(
+            plink.short_url,
+            {
+                width: 400,
+                margin: 1,
+            }
+        );
+
+        return res.status(200).json({
+            message:
+                "Quotation delivery payment QR generated",
+
+            data: {
+                qrId: plink.id,
+                imageUrl: qrDataUrl,
+                paymentUrl: plink.short_url,
+
+                paymentType: "quotation_delivery",
+                splitNumber: 3,
+
+                quotationTotal,
+                alreadyPaid: totalPaid,
+                amount: deliveryAmount,
+                percentage: deliveryPercentage,
+            },
+        });
+
+    } catch (error: any) {
+        console.error(
+            "Error creating quotation delivery payment QR:",
+            {
+                message: error?.message,
+                statusCode: error?.statusCode,
+                description: error?.error?.description,
+            }
+        );
+
+        return res.status(500).json({
+            message:
+                "Failed to generate quotation delivery payment QR.",
+        });
+    }
+};
+
+// GET /api/delivery/rider/quotation-payment/:orderId/status
+
+export const getQuotationDeliveryPaymentStatusController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+    const { orderId } = req.params;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({
+            message: "Unauthorized.",
+        });
+    }
+
+    if (!orderId) {
+        return res.status(400).json({
+            message: "Order ID is required.",
+        });
+    }
+
+    try {
+        // Verify rider assignment
+        const assignmentQ = await pool.query(
+            `
+            SELECT
+                o.id,
+                o.total_amount,
+                o.payment_status,
+                qr.id AS quotation_request_id
+            FROM orders o
+            JOIN quotation_requests qr
+                ON qr.order_id = o.id
+            JOIN order_fulfillment_tracking oft
+                ON oft.order_id = o.id
+            JOIN delivery_agents da
+                ON da.id = oft.delivery_agent_id
+            WHERE o.id = $1
+              AND da.user_id = $2
+              AND o.order_type = 'quotation'
+              AND oft.status = 'handed_over'
+            ORDER BY oft.created_at DESC
+            LIMIT 1
+            `,
+            [orderId, user.userId]
+        );
+
+        if (assignmentQ.rows.length === 0) {
+            return res.status(404).json({
+                message:
+                    "Quotation order not found or not assigned to you.",
+            });
+        }
+
+        const order = assignmentQ.rows[0];
+
+        // Find rider's pending delivery payment
+        const paymentQ = await pool.query(
+            `
+            SELECT
+                id,
+                amount,
+                razorpay_order_id,
+                split_percentage
+            FROM payments
+            WHERE $1 = ANY(order_ids)
+              AND quotation_request_id = $2
+              AND split_number = 3
+              AND payment_method = 'upi_qr'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [
+                orderId,
+                order.quotation_request_id,
+            ]
+        );
+
+        if (paymentQ.rows.length === 0) {
+            return res.status(200).json({
+                data: {
+                    paid: false,
+                    paymentPending: false,
+                },
+            });
+        }
+
+        const payment = paymentQ.rows[0];
+
+        const plink: any =
+            await (razorpay as any).paymentLink.fetch(
+                payment.razorpay_order_id
+            );
+
+        const paid = plink.status === "paid";
+
+        if (paid) {
+            // Mark payment successful
+            await pool.query(
+                `
+                UPDATE payments
+                SET
+                    status = 'successful',
+                    razorpay_payment_id = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = 'pending'
+                `,
+                [
+                    payment.id,
+                    plink.payments?.[0]?.payment_id || null,
+                ]
+            );
+
+            // Check whether this was the final outstanding amount
+            const paidTotalQ = await pool.query(
+                `
+                SELECT COALESCE(SUM(amount), 0) AS total_paid
+                FROM payments
+                WHERE quotation_request_id = $1
+                  AND $2 = ANY(order_ids)
+                  AND status = 'successful'
+                `,
+                [
+                    order.quotation_request_id,
+                    orderId,
+                ]
+            );
+
+            const totalPaid = Number(
+                paidTotalQ.rows[0]?.total_paid || 0
+            );
+
+            const quotationTotal =
+                Number(order.total_amount);
+
+            // Only mark the order fully paid when
+            // all quotation splits are actually paid.
+            if (totalPaid >= quotationTotal) {
+                await pool.query(
+                    `
+                    UPDATE orders
+                    SET
+                        payment_status = 'paid',
+                        updated_at = NOW()
+                    WHERE id = $1
+                    `,
+                    [orderId]
+                );
+            }
+
+            return res.status(200).json({
+                data: {
+                    paid: true,
+                    paymentPending: false,
+                    paymentId:
+                        plink.payments?.[0]?.payment_id ||
+                        null,
+                    amount: Number(payment.amount),
+                },
+            });
+        }
+
+        return res.status(200).json({
+            data: {
+                paid: false,
+                paymentPending: true,
+                amount: Number(payment.amount),
+                percentage:
+                    Number(payment.split_percentage) || 0,
+            },
+        });
+
+    } catch (error) {
+        console.error(
+            "Error checking quotation delivery payment:",
+            error
+        );
+
+        return res.status(500).json({
+            message:
+                "Failed to check quotation delivery payment status.",
+        });
+    }
+};

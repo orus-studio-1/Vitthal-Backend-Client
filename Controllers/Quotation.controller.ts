@@ -83,12 +83,13 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
 
         const cartId = cartResult.rows[0].id as string;
 
-        // Get cart items (vendor_id here is just the "viewing" vendor, we'll broadcast to all)
+        // Get cart items
         const cartItemsResult = await client.query(
             `
                 SELECT DISTINCT ON (ci.product_variant_id)
                     ci.product_id,
                     ci.product_variant_id,
+                    ci.vendor_id,
                     ci.quantity,
                     ci.price_at_added,
                     p.name AS product_name,
@@ -129,11 +130,10 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
         const createdServiceQuotationIds: string[] = [];
 
         for (const item of cartItemsResult.rows) {
-            // Find ALL vendors serving this product variant with quotation_enabled = true
-            // AND stock_quantity >= product quotation_limit
-            const eligibleVendorsResult = await client.query(
+            // Find ALL eligible vendors for this product / variant
+            let eligibleVendorsResult = await client.query(
                 `
-                    SELECT
+                    SELECT DISTINCT
                         vp.vendor_id,
                         v.company_name AS vendor_name,
                         u.email AS vendor_email,
@@ -142,20 +142,38 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                     JOIN vendors v ON vp.vendor_id = v.id
                     JOIN users u ON v.user_id = u.id
                     JOIN products p ON vp.product_id = p.id
-                    WHERE vp.product_variant_id = $1
-                      AND vp.quotation_enabled = true
-                      AND vp.is_active = true
+                    WHERE (vp.product_variant_id = $1 OR vp.product_id = $2)
                       AND v.approval_status = 'approved'
                       AND v.is_active = true
                       AND v.is_blocked = false
                       AND v.vendor_type IN ('product', 'both')
                       AND u.is_active = true
-                      AND (p.quotation_limit IS NULL OR vp.stock_quantity >= p.quotation_limit)
                 `,
-                [item.product_variant_id]
+                [item.product_variant_id, item.product_id]
             );
 
-            if (eligibleVendorsResult.rows.length === 0) {
+            let eligibleVendors = eligibleVendorsResult.rows;
+
+            if (eligibleVendors.length === 0 && item.vendor_id) {
+                const itemVendorRes = await client.query(
+                    `
+                        SELECT
+                            v.id AS vendor_id,
+                            v.company_name AS vendor_name,
+                            u.email AS vendor_email,
+                            u.id AS vendor_user_id
+                        FROM vendors v
+                        JOIN users u ON v.user_id = u.id
+                        WHERE v.id = $1
+                          AND v.approval_status = 'approved'
+                          AND v.is_active = true
+                    `,
+                    [item.vendor_id]
+                );
+                eligibleVendors = itemVendorRes.rows;
+            }
+
+            if (eligibleVendors.length === 0) {
                 // Skip this product if no eligible vendors
                 continue;
             }
@@ -165,7 +183,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
             const quotationGroupId = groupIdResult.rows[0].group_id as string;
 
             // Create a quotation_request for EACH eligible vendor
-            for (const vendor of eligibleVendorsResult.rows) {
+            for (const vendor of eligibleVendors) {
                 const quotationResult = await client.query(
                     `
                         INSERT INTO quotation_requests (
@@ -1864,18 +1882,18 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
 
             const quotation = quotationResult.rows[0];
 
-            // 5. Update quotation request status
+            // 5. Update quotation request status to token_paid
             await client.query(
                 `UPDATE quotation_requests
                  SET admin_confirmation_status = 'confirmed',
                      admin_confirmed_at = NOW(),
-                     status = 'admin_confirmed',
+                     status = 'token_paid',
                      updated_at = NOW()
                  WHERE id = $1`,
                 [id]
             );
 
-            // 6. Ensure associated order is created and status updated to processing/paid
+            // 6. Ensure associated order is created with status pending_dispatch & payment_status partially_paid
             targetOrderId = quotation.order_id;
 
             if (!targetOrderId) {
@@ -1893,7 +1911,7 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
                         user_id, vendor_id, status, payment_status, total_amount,
                         address_line, city, state, country, pincode, latitude, langitude,
                         source, order_type
-                    ) VALUES ($1, $2, 'processing', 'paid', $3, $4, $5, $6, $7, $8, $9, $10, 'client', 'quotation')
+                    ) VALUES ($1, $2, 'pending', 'partially_paid', $3, $4, $5, $6, $7, $8, $9, $10, 'client', 'quotation')
                     RETURNING id`,
                     [
                         userId,
@@ -1931,7 +1949,7 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             } else {
                 await client.query(
                     `UPDATE orders 
-                     SET status = 'processing', payment_status = 'paid', updated_at = NOW() 
+                     SET status = 'pending', payment_status = 'partially_paid', updated_at = NOW() 
                      WHERE id = $1`,
                     [targetOrderId]
                 );
@@ -1939,7 +1957,7 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
 
             await client.query(
                 `INSERT INTO order_status_history (order_id, status, note, created_at)
-                 VALUES ($1, 'processing', 'Admin confirmation accepted and token money paid by client.', CURRENT_TIMESTAMP)`,
+                 VALUES ($1, 'pending', 'Token money paid by client. Awaiting vendor dispatch request and remaining payment.', CURRENT_TIMESTAMP)`,
                 [targetOrderId]
             );
 
@@ -1961,7 +1979,7 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             // 7. Insert client confirm message in chat
             await client.query(
                 `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
-                 VALUES ($1, $2, 'client', 'admin_confirmed', $3)`,
+                 VALUES ($1, $2, 'client', 'token_paid', $3)`,
                 [id, userId, note || "Token money paid via Razorpay."]
             );
 
@@ -1970,16 +1988,16 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
                 await createNotification({
                     userId: quotation.admin_user_id,
                     type: "admin_confirmation_accepted",
-                    title: "Client confirmed the quotation & paid token money",
-                    body: `Client paid token money via Razorpay. Quotation confirmed and order is now active.`,
+                    title: "Client paid token money",
+                    body: `Client paid token money via Razorpay. Awaiting vendor dispatch request.`,
                     referenceType: "quotation",
                     referenceId: id,
                 });
             }
             await notifyAllAdmins({
                 type: "admin_confirmation_accepted",
-                title: "Quotation fully confirmed",
-                body: `Client confirmed quotation and paid token money. Order is now processing.`,
+                title: "Token payment verified",
+                body: `Client paid token money. Quotation moved to token_paid stage.`,
                 referenceType: "quotation",
                 referenceId: id,
             });
@@ -1994,7 +2012,278 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             client.release();
         }
 
-        // Generate route plan AFTER committing the transaction so pool.query doesn't lock/timeout
+        return res.status(200).json({ message: "Token payment verified successfully!" });
+
+    } catch (error) {
+        console.error("Verify token payment error:", error);
+        return res.status(500).json({ message: "Internal server error during payment verification." });
+    }
+};
+
+export const requestDispatchPaymentController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser.role !== "vendor") {
+        return res.status(403).json({ message: "Only vendors can request dispatch payment" });
+    }
+    const id = req.params.id as string;
+    const { note } = req.body;
+
+    try {
+        const vendorId = await getVendorIdForUser(authUser.userId);
+        if (!vendorId) {
+            return res.status(404).json({ message: "Vendor profile not found" });
+        }
+
+        const quotationResult = await pool.query(
+            `SELECT * FROM quotation_requests WHERE id = $1 AND vendor_id = $2 LIMIT 1`,
+            [id, vendorId]
+        );
+
+        if (quotationResult.rows.length === 0) {
+            return res.status(404).json({ message: "Quotation request not found" });
+        }
+
+        const quotation = quotationResult.rows[0];
+
+        if (!["token_paid", "admin_confirmed"].includes(quotation.status)) {
+            return res.status(400).json({ message: "Token payment must be completed before requesting dispatch payment" });
+        }
+
+        await pool.query(
+            `UPDATE quotation_requests SET status = 'dispatch_requested', updated_at = NOW() WHERE id = $1`,
+            [id]
+        );
+
+        await pool.query(
+            `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
+             VALUES ($1, $2, 'vendor', 'dispatch_requested', $3)`,
+            [id, authUser.userId, note || "Vendor has requested remaining balance payment before dispatching your bulk shipment."]
+        );
+
+        await createNotification({
+            userId: quotation.user_id,
+            type: "quotation_dispatch_payment_requested",
+            title: "Dispatch Payment Requested",
+            body: `Vendor has requested dispatch payment for your bulk order. Please complete payment to initiate shipment.`,
+            referenceType: "quotation",
+            referenceId: id,
+        });
+
+        return res.status(200).json({ message: "Dispatch payment request sent to client successfully" });
+    } catch (error) {
+        console.error("Request dispatch payment error:", error);
+        return res.status(500).json({ message: "Failed to request dispatch payment" });
+    }
+};
+
+export const createDispatchPaymentController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser.role !== "client") {
+        return res.status(403).json({ message: "Only clients can make payments" });
+    }
+    const { userId } = authUser;
+    const id = req.params.id as string;
+
+    if (!id) {
+        return res.status(400).json({ message: "Quotation ID is required" });
+    }
+
+    try {
+        const quotationResult = await pool.query(
+            `SELECT * FROM quotation_requests WHERE id = $1 AND user_id = $2 LIMIT 1`,
+            [id, userId]
+        );
+
+        if (quotationResult.rows.length === 0) {
+            return res.status(404).json({ message: "Quotation request not found" });
+        }
+
+        const quotation = quotationResult.rows[0];
+
+        if (quotation.status !== "dispatch_requested" && quotation.status !== "token_paid" && quotation.status !== "admin_confirmed") {
+            return res.status(400).json({ message: "Quotation is not currently in dispatch payment state" });
+        }
+
+        const acceptedPrice = quotation.accepted_price ? Number(quotation.accepted_price) : Number(quotation.current_offer_price);
+        const acceptedQty = quotation.accepted_quantity ? Number(quotation.accepted_quantity) : Number(quotation.current_offer_quantity);
+        const totalAmount = acceptedPrice * acceptedQty * 1.18;
+
+        const tokenPct = quotation.token_percentage ? Number(quotation.token_percentage) : 10;
+        const tokenAmount = quotation.token_amount ? Number(quotation.token_amount) : (tokenPct / 100) * totalAmount;
+
+        const codPct = 10;
+        let dispatchPct = 100 - tokenPct - codPct;
+        if (dispatchPct <= 0) {
+            dispatchPct = 100 - tokenPct;
+        }
+
+        const dispatchAmount = Math.max(0, (dispatchPct / 100) * totalAmount);
+
+        const keyId = process.env.RAZORPAY_KEY_ID;
+        const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+        if (!keyId || !keySecret) {
+            return res.status(400).json({ message: "Razorpay credentials are not configured in backend." });
+        }
+
+        const razorpayInstance = new Razorpay({ key_id: keyId, key_secret: keySecret });
+        const razorpayAmount = Math.round(dispatchAmount * 100);
+
+        const razorpayOrder = await (razorpayInstance.orders.create({
+            amount: razorpayAmount,
+            currency: "INR",
+            receipt: `receipt_dispatch_${Date.now()}`,
+            notes: { userId, quotationRequestId: id }
+        }) as any);
+
+        const userProfileQuery = await pool.query(
+            `SELECT u.name, u.email, c.phone FROM users u LEFT JOIN client c ON c.user_id = u.id WHERE u.id = $1`,
+            [userId]
+        );
+        const userProfile = userProfileQuery.rows[0];
+
+        const orderIds = quotation.order_id ? [quotation.order_id] : [];
+        await pool.query(
+            `INSERT INTO payments (
+                user_id, amount, status, payment_method, razorpay_order_id, order_ids, quotation_request_id, split_number, split_percentage
+            ) VALUES ($1, $2, 'pending', 'razorpay', $3, $4, $5, 2, $6)`,
+            [userId, dispatchAmount, razorpayOrder.id, orderIds, id, dispatchPct]
+        );
+
+        return res.status(200).json({
+            keyId,
+            amount: razorpayOrder.amount,
+            currency: razorpayOrder.currency,
+            razorpayOrderId: razorpayOrder.id,
+            quotationRequestId: id,
+            dispatchAmount,
+            dispatchPercentage: dispatchPct,
+            userProfile: {
+                name: userProfile?.name || "",
+                email: userProfile?.email || "",
+                phone: userProfile?.phone || ""
+            }
+        });
+    } catch (error: any) {
+        console.error("Create dispatch payment order error:", error);
+        return res.status(500).json({ message: error?.message || "Failed to initiate dispatch payment." });
+    }
+};
+
+export const verifyDispatchPaymentController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser.role !== "client") {
+        return res.status(403).json({ message: "Only clients can verify payments" });
+    }
+    const { userId } = authUser;
+    const id = req.params.id as string;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, note } = req.body;
+
+    if (!id || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return res.status(400).json({ message: "Missing required payment verification details." });
+    }
+
+    try {
+        const keySecret = process.env.RAZORPAY_KEY_SECRET;
+        if (!keySecret) {
+            return res.status(500).json({ message: "Razorpay credentials are not configured on the server." });
+        }
+
+        const hmac = crypto.createHmac("sha256", keySecret);
+        hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
+        const generatedSignature = hmac.digest("hex");
+
+        if (generatedSignature !== razorpay_signature) {
+            await pool.query(
+                `UPDATE payments SET status = 'failed', updated_at = NOW() WHERE razorpay_order_id = $1`,
+                [razorpay_order_id]
+            );
+            return res.status(400).json({ message: "Payment verification failed. Invalid signature." });
+        }
+
+        const client = await pool.connect();
+        let targetOrderId: string | null = null;
+
+        try {
+            await client.query("BEGIN");
+
+            await client.query(
+                `UPDATE payments 
+                 SET status = 'successful', razorpay_payment_id = $2, razorpay_signature = $3, updated_at = NOW()
+                 WHERE razorpay_order_id = $1`,
+                [razorpay_order_id, razorpay_payment_id, razorpay_signature]
+            );
+
+            const quotationResult = await client.query(
+                `SELECT * FROM quotation_requests WHERE id = $1 LIMIT 1`,
+                [id]
+            );
+
+            if (quotationResult.rows.length === 0) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Quotation request not found" });
+            }
+
+            const quotation = quotationResult.rows[0];
+
+            await client.query(
+                `UPDATE quotation_requests
+                 SET status = 'dispatched',
+                     admin_confirmation_status = 'confirmed',
+                     updated_at = NOW()
+                 WHERE id = $1`,
+                [id]
+            );
+
+            targetOrderId = quotation.order_id;
+            if (targetOrderId) {
+                await client.query(
+                    `UPDATE orders 
+                     SET status = 'processing', payment_status = 'paid', updated_at = NOW() 
+                     WHERE id = $1`,
+                    [targetOrderId]
+                );
+
+                await client.query(
+                    `INSERT INTO order_status_history (order_id, status, note, created_at)
+                     VALUES ($1, 'processing', 'Dispatch payment verified. Order dispatched from warehouse to fulfillment center.', CURRENT_TIMESTAMP)`,
+                    [targetOrderId]
+                );
+            }
+
+            await client.query(
+                `INSERT INTO quotation_messages (quotation_id, sender_user_id, sender_role, action, note)
+                 VALUES ($1, $2, 'client', 'dispatched', $3)`,
+                [id, userId, note || "Dispatch payment completed via Razorpay. Order dispatched!"]
+            );
+
+            await createNotification({
+                userId: quotation.vendor_id,
+                type: "quotation_dispatched",
+                title: "Dispatch Payment Received — Order Dispatched!",
+                body: `Client paid dispatch payment. Bulk order is now marked as dispatched and scheduled for fulfillment pickup.`,
+                referenceType: "quotation",
+                referenceId: id,
+            });
+
+            await notifyAllAdmins({
+                type: "quotation_dispatched",
+                title: "Bulk Order Dispatched",
+                body: `Dispatch payment verified for quotation order. Status updated to dispatched.`,
+                referenceType: "quotation",
+                referenceId: id,
+            });
+
+            await client.query("COMMIT");
+
+        } catch (error) {
+            await client.query("ROLLBACK");
+            console.error("verifyDispatchPayment transaction error:", error);
+            return res.status(500).json({ message: "Failed to complete verification transaction." });
+        } finally {
+            client.release();
+        }
+
         if (targetOrderId) {
             try {
                 await generateAndSaveRoutePlan(targetOrderId);
@@ -2009,11 +2298,10 @@ export const verifyTokenPaymentController = async (req: Request, res: Response):
             }
         }
 
-        return res.status(200).json({ message: "Token payment verified and quotation fully confirmed!" });
-
+        return res.status(200).json({ message: "Dispatch payment verified and order dispatched successfully!" });
     } catch (error) {
-        console.error("Verify token payment error:", error);
-        return res.status(500).json({ message: "Internal server error during payment verification." });
+        console.error("Verify dispatch payment error:", error);
+        return res.status(500).json({ message: "Internal server error during dispatch payment verification." });
     }
 };
 

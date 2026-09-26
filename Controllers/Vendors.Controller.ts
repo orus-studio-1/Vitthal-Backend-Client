@@ -830,13 +830,13 @@ export const getVendorCategoriesController = async (req: Request, res: Response)
 
     try {
                 const query = `
-                        SELECT pc.code, pc.label, pc.sort_order
+                        SELECT pc.id, pc.code, pc.label, pc.sort_order
                         FROM vendors v
                         INNER JOIN vendor_categories vc ON vc.vendor_id = v.id
                         INNER JOIN product_category pc ON pc.id = vc.category_id
                         WHERE v.user_id = $1
                             AND pc.is_active = TRUE
-                        GROUP BY pc.code, pc.label, pc.sort_order
+                        GROUP BY pc.id, pc.code, pc.label, pc.sort_order
                         ORDER BY pc.sort_order ASC, pc.label ASC
                 `;
 

@@ -750,14 +750,15 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                     [id]
                 );
 
-                // Fetch quotes submitted for this ticket
+                // Fetch quotes submitted for this ticket (if vendor, only fetch quotes from this vendor to maintain privacy)
+                const quotesQueryParams = isVendor ? [id, vendorId] : [id];
                 const quotesResult = await pool.query(
                     `SELECT stq.*, v.company_name AS vendor_name
                      FROM service_ticket_quotations stq
                      JOIN vendors v ON v.id = stq.vendor_id
-                     WHERE stq.ticket_id = $1
+                     WHERE stq.ticket_id = $1 ${isVendor ? "AND stq.vendor_id = $2" : ""}
                      ORDER BY stq.created_at ASC`,
-                    [id]
+                    quotesQueryParams
                 );
 
                 const messages = quotesResult.rows.map((q: any) => ({
@@ -779,9 +780,54 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                     t.ticket_payload?.machine_name ||
                     "Service Request";
 
+                let computedStatus = t.status;
+                if (isVendor) {
+                    if (t.status === "completed") {
+                        if (t.vendor_id && t.vendor_id !== vendorId) {
+                            computedStatus = "closed_accepted_by_other";
+                            messages.push({
+                                id: "closed_accepted_msg",
+                                sender_role: "client" as any,
+                                action: "reject" as any,
+                                offer_price: null as any,
+                                note: "Client has accepted another offer. The ticket room is closed.",
+                                reason: null as any,
+                                created_at: t.updated_at || t.created_at,
+                                sender_name: "System",
+                            });
+                        } else {
+                            computedStatus = "completed";
+                        }
+                    } else if (t.status === "accepted" || t.status === "in_progress") {
+                        if (t.vendor_id && t.vendor_id !== vendorId) {
+                            computedStatus = "closed_accepted_by_other";
+                            messages.push({
+                                id: "closed_accepted_msg",
+                                sender_role: "client" as any,
+                                action: "reject" as any,
+                                offer_price: null as any,
+                                note: "Client has accepted another offer. The ticket room is closed.",
+                                reason: null as any,
+                                created_at: t.updated_at || t.created_at,
+                                sender_name: "System",
+                            });
+                        } else if (t.vendor_id === vendorId) {
+                            computedStatus = "client_accepted";
+                        } else {
+                            computedStatus = "closed_accepted_by_other";
+                        }
+                    } else if (t.status === "broadcasted" || t.status === "quoted") {
+                        computedStatus = quotesResult.rows.length > 0 ? "vendor_offered" : "pending_vendor";
+                    }
+                } else if (isClient) {
+                    if (t.status === "broadcasted") computedStatus = "pending_vendor";
+                    else if (t.status === "quoted") computedStatus = "vendor_offered";
+                    else if (t.status === "accepted") computedStatus = "client_accepted";
+                }
+
                 const quotationRow = {
                     id: t.id,
-                    status: t.status === "broadcasted" ? "pending_vendor" : t.status === "quoted" ? "vendor_offered" : t.status === "accepted" ? "client_accepted" : t.status,
+                    status: computedStatus,
                     scope_of_work: scopeOfWork,
                     requested_price: t.ticket_payload?.estimated_fare || null,
                     agreed_price: t.total_amount ? String(t.total_amount) : null,
@@ -886,7 +932,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
 
         if (isClient) {
             quotationResult = await client.query(
-                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, v.user_id AS vendor_user_id 
+                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id, v.user_id AS vendor_user_id 
                  FROM service_quotations sq 
                  LEFT JOIN vendors v ON v.id = sq.vendor_id 
                  WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
@@ -903,7 +949,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                 return res.status(403).json({ message: "Vendor profile not found" });
             }
             quotationResult = await client.query(
-                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id 
+                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id 
                  FROM service_quotations sq 
                  WHERE sq.id = $1 AND sq.vendor_id = $2 LIMIT 1`,
                 [id, vendorId]
@@ -949,6 +995,21 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     );
 
                     await client.query("COMMIT");
+
+                    if (t.client_user_id) {
+                        const vendorRow = await client.query(`SELECT company_name FROM vendors WHERE id = $1`, [resolvedVendorId]);
+                        const vendorName = vendorRow.rows[0]?.company_name || "Vendor";
+
+                        await createNotification({
+                            userId: t.client_user_id,
+                            type: "quotation_offer_received",
+                            title: "New Quotation Received",
+                            body: `Vendor ${vendorName} submitted a quotation of ₹${quotePrice} for your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}".`,
+                            referenceType: "service_ticket",
+                            referenceId: id as string,
+                        }).catch((err) => console.error("[Notification] Failed to notify client of service offer:", err));
+                    }
+
                     return res.status(200).json({ message: "Quotation offer submitted successfully." });
                 }
 
@@ -961,6 +1022,18 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     );
 
                     await client.query("COMMIT");
+
+                    if (t.client_user_id) {
+                        await createNotification({
+                            userId: t.client_user_id,
+                            type: "quotation_accepted",
+                            title: "Service Proposal Accepted",
+                            body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}" status has been updated to accepted.`,
+                            referenceType: "service_ticket",
+                            referenceId: id as string,
+                        }).catch((err) => console.error("[Notification] Failed to notify client of accept:", err));
+                    }
+
                     return res.status(200).json({ message: "Service quotation accepted." });
                 }
 
@@ -973,6 +1046,18 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                     );
 
                     await client.query("COMMIT");
+
+                    if (t.client_user_id) {
+                        await createNotification({
+                            userId: t.client_user_id,
+                            type: "quotation_rejected",
+                            title: "Service Request Closed",
+                            body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}" was declined or cancelled.`,
+                            referenceType: "service_ticket",
+                            referenceId: id as string,
+                        }).catch((err) => console.error("[Notification] Failed to notify client of reject:", err));
+                    }
+
                     return res.status(200).json({ message: "Service quotation rejected." });
                 }
             }
@@ -1058,6 +1143,37 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                 senderRole
             ]
         );
+
+        // Broadcast group handling: Only expire other vendors' requests when a quotation is accepted by the client
+        if (newStatus === "client_accepted" && quotation.broadcast_group_id) {
+            const otherBroadcastQuotes = await client.query(
+                `SELECT sq.id, v.user_id AS vendor_user_id
+                 FROM service_quotations sq
+                 JOIN vendors v ON v.id = sq.vendor_id
+                 WHERE sq.broadcast_group_id = $1 AND sq.id != $2`,
+                [quotation.broadcast_group_id, id]
+            );
+
+            await client.query(
+                `UPDATE service_quotations
+                 SET status = 'closed_accepted_by_other', updated_at = NOW()
+                 WHERE broadcast_group_id = $1 AND id != $2`,
+                [quotation.broadcast_group_id, id]
+            );
+
+            for (const row of otherBroadcastQuotes.rows) {
+                if (row.vendor_user_id) {
+                    await createNotification({
+                        userId: row.vendor_user_id,
+                        type: "quotation_rejected",
+                        title: "Service request claimed by another vendor",
+                        body: "A nearby vendor's offer has been accepted by the client. This request is now closed.",
+                        referenceType: "service_quotation",
+                        referenceId: row.id,
+                    });
+                }
+            }
+        }
 
         if (newStatus === "client_accepted") {
             const vsResult = await client.query(
@@ -1161,8 +1277,8 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
         } else if (isVendor && quotation.user_id) {
             await createNotification({
                 userId: quotation.user_id,
-                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : "quotation_counter_received",
-                title: "Quotation Update",
+                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : (action === "offer" ? "quotation_offer_received" : "quotation_counter_received"),
+                title: action === "offer" ? "New Quotation Received" : "Quotation Update",
                 body: action === "offer"
                     ? "Vendor submitted an offer for your service request"
                     : action === "counter"
@@ -1503,9 +1619,12 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
                 CASE 
                     WHEN st.status = 'broadcasted' THEN 'pending_vendor'
                     WHEN st.status = 'quoted' THEN 'vendor_offered'
-                    WHEN st.status = 'accepted' THEN 'client_accepted'
-                    WHEN st.status = 'in_progress' THEN 'in_progress'
-                    WHEN st.status = 'completed' THEN 'client_accepted'
+                    WHEN st.status = 'accepted' AND st.vendor_id = $1 THEN 'client_accepted'
+                    WHEN st.status = 'accepted' AND (st.vendor_id IS NOT NULL AND st.vendor_id != $1) THEN 'closed_accepted_by_other'
+                    WHEN st.status = 'in_progress' AND st.vendor_id = $1 THEN 'in_progress'
+                    WHEN st.status = 'in_progress' AND (st.vendor_id IS NOT NULL AND st.vendor_id != $1) THEN 'closed_accepted_by_other'
+                    WHEN st.status = 'completed' AND st.vendor_id = $1 THEN 'completed'
+                    WHEN st.status = 'completed' AND (st.vendor_id IS NOT NULL AND st.vendor_id != $1) THEN 'closed_accepted_by_other'
                     ELSE st.status
                 END AS status,
                 COALESCE(
@@ -1566,6 +1685,526 @@ export const getSubcategoriesController = async (req: Request, res: Response): P
         return res.status(200).json({ data: result.rows });
     } catch (error) {
         console.error("Error fetching subcategories:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// ── Admin Service Approvals & Management ────────────────────────────────────
+
+export const adminListPendingServicesController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { status = "all" } = req.query;
+        let whereClause = "";
+        const params: any[] = [];
+
+        if (status === "pending") {
+            whereClause = "WHERE s.status = 'pending'";
+        } else if (status === "approved") {
+            whereClause = "WHERE s.status = 'approved'";
+        } else if (status === "rejected") {
+            whereClause = "WHERE s.status = 'rejected'";
+        }
+
+        const result = await pool.query(
+            `SELECT 
+                s.id, s.name, s.description, s.status, s.rating, s.review_count, s.created_at, s.updated_at,
+                pc.label AS category_name, pc.id AS category_id,
+                ss.name AS subcategory_name,
+                v.company_name AS vendor_name, v.id AS vendor_id, v.user_id AS vendor_user_id,
+                u.email AS vendor_email, v.phone AS vendor_phone,
+                vs.price, vs.pricing_type, vs.moq, vs.delivery_days, vs.token_percentage, vs.is_active AS vendor_service_active,
+                (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1) AS image_url,
+                COALESCE((
+                    SELECT json_agg(json_build_object('id', sm.id, 'media_url', sm.media_url, 'media_type', sm.media_type, 'is_primary', sm.is_primary))
+                    FROM services_media sm WHERE sm.service_id = s.id
+                ), '[]'::json) AS media_gallery
+             FROM services s
+             LEFT JOIN product_category pc ON pc.id = s.category_id
+             LEFT JOIN subcategories ss ON ss.id = s.subcategory_id
+             LEFT JOIN vendor_services vs ON vs.service_id = s.id
+             LEFT JOIN vendors v ON v.id = vs.vendor_id
+             LEFT JOIN users u ON u.id = v.user_id
+             ${whereClause}
+             ORDER BY s.created_at DESC`,
+            params
+        );
+
+        const rows = await Promise.all(
+            result.rows.map(async (row) => {
+                const imageUrl = await getPresignedUrlOrOriginal(row.image_url);
+                const mediaGallery = Array.isArray(row.media_gallery)
+                    ? await Promise.all(row.media_gallery.map(async (m: any) => ({
+                        ...m,
+                        media_url: await getPresignedUrlOrOriginal(m.media_url),
+                      })))
+                    : [];
+                return {
+                    ...row,
+                    image_url: imageUrl,
+                    media_gallery: mediaGallery,
+                };
+            })
+        );
+
+        return res.status(200).json({ data: rows });
+    } catch (error) {
+        console.error("Error listing admin pending services:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const adminApproveServiceController = async (req: Request, res: Response): Promise<Response> => {
+    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    try {
+        const serviceResult = await pool.query(`SELECT id, name FROM services WHERE id = $1 LIMIT 1`, [serviceId]);
+        if (serviceResult.rows.length === 0) {
+            return res.status(404).json({ message: "Service not found" });
+        }
+        const serviceName = serviceResult.rows[0].name;
+
+        await pool.query(`UPDATE services SET status = 'approved', updated_at = NOW() WHERE id = $1`, [serviceId]);
+        await pool.query(`UPDATE vendor_services SET is_active = true WHERE service_id = $1`, [serviceId]);
+
+        // Find associated vendor user id to send notification
+        const vendorResult = await pool.query(
+            `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
+            [serviceId]
+        );
+        if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
+            await createNotification({
+                userId: vendorResult.rows[0].user_id,
+                type: "vendor_product_approved",
+                title: "Service Approved ✓",
+                body: `Your service offering "${serviceName}" has been approved by Admin and is now live globally!`,
+                referenceType: "service",
+                referenceId: serviceId,
+            });
+        }
+
+        return res.status(200).json({ message: "Service approved successfully!" });
+    } catch (error) {
+        console.error("Error approving service:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const adminRejectServiceController = async (req: Request, res: Response): Promise<Response> => {
+    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const { reason } = req.body || {};
+    try {
+        const serviceResult = await pool.query(`SELECT id, name FROM services WHERE id = $1 LIMIT 1`, [serviceId]);
+        if (serviceResult.rows.length === 0) {
+            return res.status(404).json({ message: "Service not found" });
+        }
+        const serviceName = serviceResult.rows[0].name;
+
+        await pool.query(`UPDATE services SET status = 'rejected', updated_at = NOW() WHERE id = $1`, [serviceId]);
+        await pool.query(`UPDATE vendor_services SET is_active = false WHERE service_id = $1`, [serviceId]);
+
+        const vendorResult = await pool.query(
+            `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
+            [serviceId]
+        );
+        if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
+            await createNotification({
+                userId: vendorResult.rows[0].user_id,
+                type: "vendor_product_rejected",
+                title: "Service Rejected",
+                body: `Your service offering "${serviceName}" was rejected by Admin. ${reason ? `Reason: ${reason}` : ""}`,
+                referenceType: "service",
+                referenceId: serviceId,
+            });
+        }
+
+        return res.status(200).json({ message: "Service rejected successfully." });
+    } catch (error) {
+        console.error("Error rejecting service:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const getVendorServiceOfferingsController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = getAuthUser(req);
+    if (!authUser || authUser.role !== "vendor") {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const vendorId = await getVendorIdByUserId(authUser.userId);
+    if (!vendorId) {
+        return res.status(403).json({ message: "Vendor profile not found or not approved" });
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT 
+                vs.id, vs.price, vs.pricing_type, vs.moq, 
+                CASE WHEN s.status = 'approved' THEN true ELSE vs.is_active END AS is_active, 
+                vs.created_at, vs.service_id,
+                s.name AS service_name, s.status AS service_status,
+                pc.label AS category_name,
+                (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1) AS service_image,
+                (SELECT COUNT(*) FROM service_bookings sb WHERE sb.vendor_service_id = vs.id) AS booking_count
+             FROM vendor_services vs
+             JOIN services s ON s.id = vs.service_id
+             LEFT JOIN product_category pc ON pc.id = s.category_id
+             WHERE vs.vendor_id = $1
+             ORDER BY vs.created_at DESC`,
+            [vendorId]
+        );
+
+        const rows = await Promise.all(
+            result.rows.map(async (row) => ({
+                ...row,
+                service_image: await getPresignedUrlOrOriginal(row.service_image),
+            }))
+        );
+
+        return res.status(200).json({ data: rows });
+    } catch (error) {
+        console.error("Error fetching vendor service offerings:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const createServiceAndOfferingController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = getAuthUser(req);
+    if (!authUser || authUser.role !== "vendor") {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const vendorId = await getVendorIdByUserId(authUser.userId);
+    if (!vendorId) {
+        return res.status(403).json({ message: "Vendor profile not found or not approved" });
+    }
+
+    const { name, description, categoryId, subcategoryId, price, pricingType, moq, deliveryDays, tokenPercentage } = req.body;
+
+    if (!name || !categoryId) {
+        return res.status(400).json({ message: "Service name and categoryId are required" });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        // Resolve Category ID (whether passed as UUID, code, or label)
+        let resolvedCategoryId: string | null = null;
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(categoryId).trim());
+        if (isUuid) {
+            const catCheck = await client.query(`SELECT id FROM product_category WHERE id = $1`, [categoryId]);
+            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+        }
+        if (!resolvedCategoryId) {
+            const catCheck = await client.query(
+                `SELECT id FROM product_category WHERE LOWER(label) = LOWER($1) OR LOWER(code) = LOWER($1) LIMIT 1`,
+                [String(categoryId).trim()]
+            );
+            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+        }
+        if (!resolvedCategoryId) {
+            const catCheck = await client.query(
+                `SELECT id FROM product_category WHERE label ILIKE $1 OR code ILIKE $1 LIMIT 1`,
+                [`%${String(categoryId).trim()}%`]
+            );
+            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+        }
+        if (!resolvedCategoryId) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: `Invalid category reference: "${categoryId}"` });
+        }
+
+        // Resolve Subcategory ID if present
+        let resolvedSubcategoryId: string | null = null;
+        if (subcategoryId) {
+            const isSubUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(subcategoryId).trim());
+            if (isSubUuid) {
+                const subCheck = await client.query(`SELECT id FROM subcategories WHERE id = $1`, [subcategoryId]);
+                if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;
+            }
+            if (!resolvedSubcategoryId) {
+                const subCheck = await client.query(
+                    `SELECT id FROM subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+                    [String(subcategoryId).trim()]
+                );
+                if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;
+            }
+        }
+
+        // Create Master Service with status 'pending'
+        const sRes = await client.query(
+            `INSERT INTO services (name, description, category_id, subcategory_id, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'pending', NOW(), NOW())
+             RETURNING *`,
+            [name.trim(), description || null, resolvedCategoryId, resolvedSubcategoryId || null]
+        );
+        const newService = sRes.rows[0];
+
+        // Create Vendor Service Offering with is_active = false (pending admin approval)
+        const vsRes = await client.query(
+            `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, false, NOW(), NOW())
+             RETURNING *`,
+            [
+                vendorId,
+                newService.id,
+                price != null ? parseFloat(price) : 0,
+                pricingType || "flat",
+                moq != null ? parseInt(moq) : 1,
+                deliveryDays != null ? parseInt(deliveryDays) : null,
+                tokenPercentage != null ? parseFloat(tokenPercentage) : null,
+            ]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(201).json({
+            message: "Custom service submitted and pending admin approval!",
+            data: {
+                ...newService,
+                offering: vsRes.rows[0],
+            },
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Error creating service & offering:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
+    }
+};
+
+export const createVendorServiceOfferingController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = getAuthUser(req);
+    if (!authUser || authUser.role !== "vendor") {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const vendorId = await getVendorIdByUserId(authUser.userId);
+    if (!vendorId) {
+        return res.status(403).json({ message: "Vendor profile not found or not approved" });
+    }
+
+    const { serviceId, price, pricingType, moq, deliveryDays, tokenPercentage } = req.body;
+    if (!serviceId) {
+        return res.status(400).json({ message: "serviceId is required" });
+    }
+
+    try {
+        const vsRes = await pool.query(
+            `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, false, NOW(), NOW())
+             RETURNING *`,
+            [
+                vendorId,
+                serviceId,
+                price != null ? parseFloat(price) : 0,
+                pricingType || "flat",
+                moq != null ? parseInt(moq) : 1,
+                deliveryDays != null ? parseInt(deliveryDays) : null,
+                tokenPercentage != null ? parseFloat(tokenPercentage) : null,
+            ]
+        );
+
+        return res.status(201).json({
+            message: "Vendor service offering added!",
+            data: vsRes.rows[0],
+        });
+    } catch (error) {
+        console.error("Error adding vendor service offering:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const uploadServiceMediaController = async (req: Request, res: Response): Promise<Response> => {
+    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const file = req.file;
+
+    if (!file) {
+        return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    try {
+        const isVideo = file.mimetype.startsWith("video/");
+        const isImage = file.mimetype.startsWith("image/");
+        const mediaType = isVideo ? "video" : "image";
+
+        const uploadResult = await uploadBufferToS3(file.buffer, file.originalname, file.mimetype);
+        
+        const countRes = await pool.query(
+            `SELECT COUNT(*) FROM services_media WHERE service_id = $1 AND is_primary = true`, [serviceId]
+        );
+        const isPrimary = parseInt(countRes.rows[0].count, 10) === 0 && isImage;
+
+        const mediaRes = await pool.query(
+            `INSERT INTO services_media (service_id, media_url, s3_key, media_type, is_primary, approval_status, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+             RETURNING *`,
+            [serviceId, uploadResult.url, uploadResult.s3Key, mediaType, isPrimary]
+        );
+
+        return res.status(201).json({
+            message: "Media uploaded successfully",
+            data: mediaRes.rows[0],
+        });
+    } catch (error) {
+        console.error("Error uploading service media:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const reviewServiceController = async (req: Request, res: Response): Promise<Response> => {
+    const { decision, notes, reason } = req.body || {};
+    if (decision === "approved") {
+        return adminApproveServiceController(req, res);
+    } else if (decision === "rejected") {
+        req.body.reason = notes || reason;
+        return adminRejectServiceController(req, res);
+    }
+    return res.status(400).json({ message: "Invalid decision. Must be 'approved' or 'rejected'." });
+};
+
+// ── Geolocation 10-Vendor Broadcast Matching Controller ───────────────────
+
+export const broadcastServiceCategoryRequestController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = getAuthUser(req);
+    if (!authUser || authUser.role !== "client") {
+        return res.status(403).json({ message: "Only clients can broadcast service category requests" });
+    }
+
+    const { serviceId, categoryId, scopeOfWork, requestedPrice, latitude, longitude } = req.body as Record<string, unknown>;
+    const scopeText = normalizeText(scopeOfWork);
+    if (!scopeText) {
+        return res.status(400).json({ message: "scopeOfWork is required" });
+    }
+
+    const clientLat = latitude != null ? Number(latitude) : null;
+    const clientLng = longitude != null ? Number(longitude) : null;
+    const priceVal = requestedPrice != null ? parsePositiveDecimal(requestedPrice) : null;
+
+    try {
+        // 1. Find up to 10 nearest approved service vendors in this service/category
+        let vendorQuery = `
+            SELECT DISTINCT v.id AS vendor_id, v.user_id AS vendor_user_id, va.latitude, va.longitude
+            FROM vendors v
+            JOIN vendor_services vs ON vs.vendor_id = v.id AND vs.is_active = true
+            JOIN services s ON s.id = vs.service_id AND s.status = 'approved'
+            LEFT JOIN (
+                SELECT DISTINCT ON (user_id) user_id, latitude, longitude
+                FROM addresses
+                ORDER BY user_id, created_at DESC
+            ) va ON v.user_id = va.user_id
+            WHERE v.approval_status = 'approved'
+              AND v.is_active = true
+              AND v.is_blocked = false
+              AND v.vendor_type IN ('service', 'both')
+        `;
+
+        const queryParams: any[] = [];
+        if (serviceId && typeof serviceId === "string") {
+            vendorQuery += ` AND s.id = $1`;
+            queryParams.push(serviceId);
+        } else if (categoryId && typeof categoryId === "string") {
+            vendorQuery += ` AND s.category_id = $1`;
+            queryParams.push(categoryId);
+        }
+
+        const vendorResult = await pool.query(vendorQuery, queryParams);
+        let vendors = vendorResult.rows;
+
+        if (vendors.length === 0) {
+            return res.status(404).json({ message: "No active approved vendors found for this service category in your area." });
+        }
+
+        // Calculate distance if coordinates are present
+        if (clientLat !== null && clientLng !== null && !isNaN(clientLat) && !isNaN(clientLng)) {
+            vendors = vendors.map((v) => {
+                const vLat = v.latitude != null ? Number(v.latitude) : null;
+                const vLng = v.longitude != null ? Number(v.longitude) : null;
+                let distance = 99999;
+                if (vLat !== null && vLng !== null && !isNaN(vLat) && !isNaN(vLng)) {
+                    // Haversine formula
+                    const R = 6371;
+                    const dLat = (vLat - clientLat) * (Math.PI / 180);
+                    const dLng = (vLng - clientLng) * (Math.PI / 180);
+                    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                              Math.cos(clientLat * (Math.PI / 180)) * Math.cos(vLat * (Math.PI / 180)) *
+                              Math.sin(dLng / 2) * Math.sin(dLng / 2);
+                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                    distance = R * c;
+                }
+                return { ...v, distance };
+            });
+            vendors.sort((a, b) => a.distance - b.distance);
+        }
+
+        // Select top 10 nearest vendors
+        const top10Vendors = vendors.slice(0, 10);
+        const broadcastGroupId = crypto.randomUUID();
+
+        const clientDb = await pool.connect();
+        const createdQuotations: any[] = [];
+
+        try {
+            await clientDb.query("BEGIN");
+
+            for (const v of top10Vendors) {
+                // Get service_id from vendor_services if only categoryId was provided
+                let targetServiceId = serviceId as string;
+                if (!targetServiceId) {
+                    const sRes = await clientDb.query(
+                        `SELECT service_id FROM vendor_services vs JOIN services s ON s.id = vs.service_id WHERE vs.vendor_id = $1 AND s.category_id = $2 LIMIT 1`,
+                        [v.vendor_id, categoryId]
+                    );
+                    targetServiceId = sRes.rows[0]?.service_id;
+                }
+                if (!targetServiceId) continue;
+
+                const qRes = await clientDb.query(
+                    `INSERT INTO service_quotations (
+                        user_id, vendor_id, service_id, scope_of_work, requested_price, status, broadcast_group_id
+                     )
+                     VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6)
+                     RETURNING id, status, created_at`,
+                    [authUser.userId, v.vendor_id, targetServiceId, scopeText, priceVal, broadcastGroupId]
+                );
+
+                const quotationId = qRes.rows[0].id;
+                createdQuotations.push(qRes.rows[0]);
+
+                await clientDb.query(
+                    `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
+                     VALUES ($1, $2, 'client', 'request', $3, $4)`,
+                    [quotationId, authUser.userId, priceVal, scopeText]
+                );
+
+                if (v.vendor_user_id) {
+                    await createNotification({
+                        userId: v.vendor_user_id,
+                        type: "quotation_request_received",
+                        title: "New nearby service request",
+                        body: `You received a nearby service category quotation request. Respond first to claim this order!`,
+                        referenceType: "service_quotation",
+                        referenceId: quotationId,
+                    });
+                }
+            }
+
+            await clientDb.query("COMMIT");
+        } catch (err) {
+            await clientDb.query("ROLLBACK");
+            throw err;
+        } finally {
+            clientDb.release();
+        }
+
+        return res.status(200).json({
+            message: `Service request successfully broadcasted to ${createdQuotations.length} nearby vendors!`,
+            broadcastGroupId,
+            quotationsCount: createdQuotations.length,
+        });
+
+    } catch (error) {
+        console.error("Error broadcasting service request:", error);
         return res.status(500).json({ message: "Internal server error" });
     }
 };

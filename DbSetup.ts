@@ -39,11 +39,56 @@ export async function ensureMarketplaceSchema() {
             END IF;
         END $$;
 
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'token_paid';
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'dispatch_requested';
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'dispatched';
+
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quotation_message_action') THEN
                 CREATE TYPE quotation_message_action AS ENUM ('request', 'offer', 'counter', 'accept', 'reject', 'note');
             END IF;
+        END $$;
+
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'token_paid';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_requested';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_paid';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatched';
+
+        ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+
+        DO $$
+        BEGIN
+            ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_reference_type;
+            ALTER TABLE notifications
+                ADD CONSTRAINT chk_notification_reference_type
+                CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product', 'service', 'service_quotation', 'service_booking', 'service_ticket'));
+
+            ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_type;
+            ALTER TABLE notifications
+                ADD CONSTRAINT chk_notification_type
+                CHECK (type IN (
+                    'quotation_request_received',
+                    'quotation_offer_received',
+                    'quotation_counter_received',
+                    'quotation_accepted',
+                    'quotation_rejected',
+                    'service_completed',
+                    'admin_confirmation_sent',
+                    'admin_confirmation_accepted',
+                    'admin_confirmation_rejected',
+                    'product_approved',
+                    'product_rejected',
+                    'image_approved',
+                    'image_rejected',
+                    'vendor_product_approved',
+                    'vendor_product_rejected',
+                    'general'
+                ));
+
+            ALTER TABLE services_media ADD COLUMN IF NOT EXISTS s3_key TEXT;
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
         END $$;
 
         CREATE TABLE IF NOT EXISTS products_images (
@@ -742,6 +787,10 @@ export async function ensureMarketplaceSchema() {
         -- Add default timeline and token money to vendor service offerings
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+
+        -- Add broadcast_group_id to service_quotations for 10-vendor broadcast matching
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS broadcast_group_id UUID;
+        CREATE INDEX IF NOT EXISTS idx_service_quotations_broadcast_group ON service_quotations(broadcast_group_id) WHERE broadcast_group_id IS NOT NULL;
 
         -- Add booking_ids column to payments table
         ALTER TABLE payments ADD COLUMN IF NOT EXISTS booking_ids UUID[] DEFAULT '{}';

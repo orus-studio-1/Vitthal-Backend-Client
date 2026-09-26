@@ -131,14 +131,25 @@ export async function createNotification(params: {
     referenceId?: string;
 }): Promise<void> {
     try {
-        const result = await pool.query(
-            `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
-            [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
-        );
+        let result;
+        try {
+            result = await pool.query(
+                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+                [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
+            );
+        } catch (dbErr: any) {
+            console.warn(`[createNotification] Initial insert failed (${dbErr.message}), retrying with general fallback...`);
+            result = await pool.query(
+                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+                 VALUES ($1, 'general', $2, $3, $4, $5)
+                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+                [params.userId, params.title, params.body, params.referenceType || null, params.referenceId || null]
+            );
+        }
         
-        if (result.rows.length > 0) {
+        if (result && result.rows.length > 0) {
             sendNotificationToUser(params.userId, result.rows[0]);
         }
     } catch (error) {

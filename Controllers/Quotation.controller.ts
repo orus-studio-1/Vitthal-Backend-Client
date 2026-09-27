@@ -2099,6 +2099,7 @@ export const createDispatchPaymentController = async (req: Request, res: Respons
         }
 
         const quotation = quotationResult.rows[0];
+        
 
         if (quotation.status !== "dispatch_requested" && quotation.status !== "token_paid" && quotation.status !== "admin_confirmed") {
             return res.status(400).json({ message: "Quotation is not currently in dispatch payment state" });
@@ -2226,6 +2227,14 @@ export const verifyDispatchPaymentController = async (req: Request, res: Respons
 
             const quotation = quotationResult.rows[0];
 
+            if (quotation.status === 'dispatched') {
+                await client.query("COMMIT");
+                return res.status(200).json({
+                    message: "Dispatch payment already verified for this order.",
+                    data: { orderId: quotation.order_id, alreadyDispatched: true }
+                });
+            }
+
             await client.query(
                 `UPDATE quotation_requests
                  SET status = 'dispatched',
@@ -2239,8 +2248,8 @@ export const verifyDispatchPaymentController = async (req: Request, res: Respons
             if (targetOrderId) {
                 await client.query(
                     `UPDATE orders 
-                     SET status = 'processing', payment_status = 'paid', updated_at = NOW() 
-                     WHERE id = $1`,
+                    SET status = 'processing', payment_status = 'partially_paid', updated_at = NOW()
+                    WHERE id = $1`,
                     [targetOrderId]
                 );
 
@@ -2284,19 +2293,28 @@ export const verifyDispatchPaymentController = async (req: Request, res: Respons
             client.release();
         }
 
-        if (targetOrderId) {
-            try {
-                await generateAndSaveRoutePlan(targetOrderId);
-                await pool.query(
-                    `UPDATE order_route_plan 
-                     SET status = 'pickup_pending', updated_at = NOW()
-                     WHERE order_id = $1 AND stop_sequence = 1`,
-                    [targetOrderId]
-                );
-            } catch (routeErr) {
-                console.error(`Route plan generation warning for order ${targetOrderId}:`, routeErr);
-            }
-        }
+            if (targetOrderId) {
+                try {
+                    const existingRouteRes = await pool.query(
+                        `SELECT id FROM order_route_plan WHERE order_id = $1 LIMIT 1`,
+                        [targetOrderId]
+                    );
+
+                    if (existingRouteRes.rows.length === 0) {
+                        await generateAndSaveRoutePlan(targetOrderId);
+                        await pool.query(
+                            `UPDATE order_route_plan 
+                            SET status = 'pickup_pending', updated_at = NOW()
+                            WHERE order_id = $1 AND stop_sequence = 1`,
+                            [targetOrderId]
+                        );
+                    } else {
+                        console.log(`Route plan already exists for order ${targetOrderId} — skipping regeneration to avoid resetting rider progress/OTPs.`);
+                    }
+                    } catch (routeErr) {
+                        console.error(`Route plan generation warning for order ${targetOrderId}:`, routeErr);
+                    }
+                }
 
         return res.status(200).json({ message: "Dispatch payment verified and order dispatched successfully!" });
     } catch (error) {

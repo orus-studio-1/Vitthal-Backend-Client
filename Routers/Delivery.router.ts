@@ -33,7 +33,9 @@ import {
     patchRiderKYCApprovalController,
     getRiderEarningsController,
     createCodQrController,
-    getCodQrStatusController
+    getCodQrStatusController,
+    createQuotationDeliveryPaymentQrController,
+    getQuotationDeliveryPaymentStatusController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -76,6 +78,8 @@ deliveryRouter.post("/rider/verify-pickup", authMiddleware, verifyPickupControll
 deliveryRouter.post("/rider/verify-delivery", authMiddleware, verifyDeliveryController);
 deliveryRouter.post("/rider/cod-qr/create", authMiddleware, createCodQrController);
 deliveryRouter.get("/rider/cod-qr/:orderId/status", authMiddleware, getCodQrStatusController);
+deliveryRouter.post("/rider/quotation-payment/create",authMiddleware ,createQuotationDeliveryPaymentQrController)
+deliveryRouter.get("/rider/quotation-payment/:orderId/status", authMiddleware,getQuotationDeliveryPaymentStatusController)
 
 // Hub/Admin Live tracking query
 deliveryRouter.get("/riders/:riderId/live", authMiddleware, getRiderLiveDetailsController);

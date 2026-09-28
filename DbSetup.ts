@@ -878,6 +878,8 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
 
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMPTZ DEFAULT NULL;
+
         -- Unified Subcategories & Product Subcategory Migration (2026-08-25)
         CREATE TABLE IF NOT EXISTS subcategories (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -891,10 +893,15 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_subcategories_category_id ON subcategories(category_id);
 
-        INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
-        SELECT id, category_id, name, description, created_at, updated_at
-        FROM service_subcategories
-        ON CONFLICT (category_id, name) DO NOTHING;
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'service_subcategories') THEN
+                INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
+                SELECT id, category_id, name, description, created_at, updated_at
+                FROM service_subcategories
+                ON CONFLICT (category_id, name) DO NOTHING;
+            END IF;
+        END $$;
 
         ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory_id UUID;
 

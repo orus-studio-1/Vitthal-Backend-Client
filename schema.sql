@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_token TEXT,
     OTP_Expiry TIMESTAMPTZ,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    deletion_requested_at TIMESTAMPTZ DEFAULT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

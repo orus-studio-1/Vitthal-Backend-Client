@@ -33,7 +33,7 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 initSocket(httpServer);
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 
 
 //cors configuration

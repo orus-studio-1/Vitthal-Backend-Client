@@ -1,6 +1,25 @@
+import fs from "fs";
+import path from "path";
 import pool from "./DbConnect";
 
 export async function ensureMarketplaceSchema() {
+    try {
+        const { rows } = await pool.query(`SELECT to_regclass('public.users') as has_users;`);
+        if (!rows[0] || !rows[0].has_users) {
+            console.log("Base schema missing. Running schema.sql initialization...");
+            const schemaPath = path.join(process.cwd(), "schema.sql");
+            if (fs.existsSync(schemaPath)) {
+                const schemaSql = fs.readFileSync(schemaPath, "utf8");
+                await pool.query(schemaSql);
+                console.log("Base schema.sql successfully executed!");
+            } else {
+                console.warn("schema.sql not found at path:", schemaPath);
+            }
+        }
+    } catch (err) {
+        console.warn("Initial schema existence check failed, continuing with migration patch:", err);
+    }
+
     await pool.query(`
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
         CREATE EXTENSION IF NOT EXISTS citext;
@@ -55,7 +74,12 @@ export async function ensureMarketplaceSchema() {
         ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_paid';
         ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatched';
 
-        ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
+                ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+            END IF;
+        END $$;
 
         DO $$
         BEGIN

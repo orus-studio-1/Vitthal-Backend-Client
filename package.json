@@ -18,6 +18,7 @@
     "@aws-sdk/client-s3": "^3.1053.0",
     "@aws-sdk/lib-storage": "^3.1053.0",
     "@aws-sdk/s3-request-presigner": "^3.1053.0",
+    "@types/qrcode": "^1.5.6",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
@@ -29,6 +30,7 @@
     "nodemailer": "^8.0.7",
     "pdfmake": "^0.3.9",
     "pg": "^8.23.0",
+    "qrcode": "^1.5.4",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.3"
   },

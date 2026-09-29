@@ -477,6 +477,19 @@ CREATE TABLE IF NOT EXISTS service_cart_items (
     CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
 );
 
+CREATE TABLE IF NOT EXISTS contact_queries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email CITEXT NOT NULL,
+    company TEXT,
+    phone TEXT,
+    subject TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- 4. Create Service Bookings Table (equivalent to orders)
 CREATE TABLE IF NOT EXISTS service_bookings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

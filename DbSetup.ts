@@ -894,6 +894,19 @@ export async function ensureMarketplaceSchema() {
             CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
         );
 
+        CREATE TABLE IF NOT EXISTS contact_queries (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            email CITEXT NOT NULL,
+            company TEXT,
+            phone TEXT,
+            subject TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         -- Unified Subcategories & Product Subcategory Migration (2026-08-25)
         CREATE TABLE IF NOT EXISTS subcategories (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,23 +1,25 @@
 import nodemailer from 'nodemailer';
 
 const transporter = nodemailer.createTransport(
-    process.env.SMTP_HOST
+    (process.env.SMTP_HOST
         ? {
               host: process.env.SMTP_HOST.trim(),
               port: Number(process.env.SMTP_PORT || 587),
-              secure: process.env.SMTP_SECURE === 'true' || Number(process.env.SMTP_PORT) === 465,
+              secure: process.env.SMTP_SECURE === 'true' && Number(process.env.SMTP_PORT) === 465,
               auth: {
                   user: (process.env.SMTP_USER || process.env.EMAIL_USER)?.trim(),
                   pass: (process.env.SMTP_PASS || process.env.EMAIL_PASSWORD)?.trim(),
               },
+              family: 4,
           }
         : {
-              service: process.env.EMAIL_SERVICE || 'gmail', // e.g., 'gmail', 'outlook', etc.
+              service: process.env.EMAIL_SERVICE || 'gmail',
               auth: {
                   user: process.env.EMAIL_USER,
-                  pass: process.env.EMAIL_PASSWORD, // or app-specific password
+                  pass: process.env.EMAIL_PASSWORD,
               },
-          }
+              family: 4,
+          }) as any
 );
 
 interface EmailPayload {

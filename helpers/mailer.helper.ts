@@ -1,4 +1,11 @@
 import nodemailer from 'nodemailer';
+import dns from 'dns';
+
+try {
+    dns.setDefaultResultOrder('ipv4first');
+} catch (err) {
+    // Ignore if not supported in older node
+}
 
 const transporter = nodemailer.createTransport(
     (process.env.SMTP_HOST

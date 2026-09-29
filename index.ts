@@ -1,7 +1,15 @@
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import dotenv from 'dotenv';
+import dns from 'dns';
 import cors, { type CorsOptions } from 'cors';
+
+try {
+    dns.setDefaultResultOrder('ipv4first');
+} catch (err) {
+    // Ignore if not supported in older node
+}
+
 import pool from './DbConnect';
 import { ensureMarketplaceSchema } from './DbSetup';
 import productRouter from './Routers/Product.router';

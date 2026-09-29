@@ -463,6 +463,20 @@ CREATE TABLE IF NOT EXISTS vendor_services (
 CREATE INDEX IF NOT EXISTS idx_vendor_services_service_id ON vendor_services(service_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_services_vendor_id ON vendor_services(vendor_id);
 
+CREATE TABLE IF NOT EXISTS service_cart_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cart_id UUID NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+    service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    vendor_service_id UUID NOT NULL REFERENCES vendor_services(id) ON DELETE CASCADE,
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    price_at_added NUMERIC(12, 2) NOT NULL,
+    pricing_type TEXT NOT NULL DEFAULT 'flat',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
+);
+
 -- 4. Create Service Bookings Table (equivalent to orders)
 CREATE TABLE IF NOT EXISTS service_bookings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -808,7 +808,32 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_service_quotation_documents_quote_id ON service_quotation_documents(service_quotation_id);
 
-        -- Add default timeline and token money to vendor service offerings
+        -- Product quotation documents table & sequence
+        CREATE TABLE IF NOT EXISTS quotation_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            quotation_group_id UUID NOT NULL,
+            quotation_number TEXT NOT NULL UNIQUE,
+            document_url TEXT NOT NULL,
+            s3_key TEXT NOT NULL,
+            valid_until DATE NOT NULL,
+            product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_qd_group_id ON quotation_documents(quotation_group_id);
+        CREATE INDEX IF NOT EXISTS idx_qd_quotation_number ON quotation_documents(quotation_number);
+
+        -- Vendor response terms on quotation_requests
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS delivery_days INTEGER CHECK (delivery_days > 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2) CHECK (token_percentage >= 0 AND token_percentage <= 100);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_amount NUMERIC(12,2) CHECK (token_amount >= 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_url TEXT;
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_s3_key TEXT;
+
+        CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
 

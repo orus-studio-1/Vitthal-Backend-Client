@@ -1511,6 +1511,27 @@ ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS vendor_latitude DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS vendor_longitude DOUBLE PRECISION;
 
+-- ================================
+-- QUOTATION DOCUMENTS
+-- ================================
+CREATE TABLE IF NOT EXISTS quotation_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_group_id UUID NOT NULL,
+    quotation_number TEXT NOT NULL UNIQUE,
+    document_url TEXT NOT NULL,
+    s3_key TEXT NOT NULL,
+    valid_until DATE NOT NULL,
+    product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_qd_group_id ON quotation_documents(quotation_group_id);
+CREATE INDEX IF NOT EXISTS idx_qd_quotation_number ON quotation_documents(quotation_number);
+
+
 
 
 

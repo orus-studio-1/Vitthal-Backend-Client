@@ -75,9 +75,9 @@ async function getLogoBase64(): Promise<string> {
 
 // ─── Generate PDF using pdfmake ───────────────────────────────────────
 export async function generateServicePDFBuffer(data: ServiceQuotationDocumentData): Promise<Buffer> {
-    const PdfPrinter = (await import("pdfmake/js/Printer" as any)).default;
-    const virtualFs = (await import("pdfmake/js/virtual-fs" as any)).default;
-    const URLResolver = (await import("pdfmake/js/URLResolver" as any)).default;
+    const PdfPrinter = (await import("pdfmake/js/Printer.js" as any)).default;
+    const virtualFs = (await import("pdfmake/js/virtual-fs.js" as any)).default;
+    const URLResolver = (await import("pdfmake/js/URLResolver.js" as any)).default;
     const urlResolver = new URLResolver(virtualFs);
     const fonts = {
         Helvetica: {

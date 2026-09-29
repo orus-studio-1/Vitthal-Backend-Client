@@ -93,7 +93,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
             ? authorization.slice(7).trim()
             : undefined;
 
-        const validMiddlewareRoles = new Set(["client", "vendor", "fulfillment_center", "delivery_agent", "admin", "super_admin"]);
+        const validMiddlewareRoles = new Set(["client", "worker", "vendor", "fulfillment_center", "delivery_agent", "admin", "super_admin"]);
 
         if (typeof requestFrom === "string" && validMiddlewareRoles.has(requestFrom)) {
             const role = requestFrom;

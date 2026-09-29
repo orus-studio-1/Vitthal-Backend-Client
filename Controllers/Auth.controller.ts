@@ -7,7 +7,7 @@ import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
 import { sendOTPEmail, sendPublicAccountDeletionEmail } from "../helpers/emailService.helper";
 import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 
-const validUserRoles = new Set(["client", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
+const validUserRoles = new Set(["client", "worker", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
 const gstDocumentMimeTypes = new Set(["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"]);
 
 function normalizeRequiredText(value: unknown) {

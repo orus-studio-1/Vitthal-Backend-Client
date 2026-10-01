@@ -274,9 +274,9 @@ export const createHirePaymentOrderController = async (req: Request, res: Respon
 };
 
 async function finalizePayment(db: PoolClient, request: HiringRecord, payment: HiringRecord,
-    gateway: Awaited<ReturnType<typeof razorpay.payments.fetch>>, user: AuthUser, signature?: string): Promise<TransactionResult> {
+    gateway: Parameters<typeof assertCapturedHiringPayment>[1], user: AuthUser, signature?: string): Promise<TransactionResult> {
     assertCapturedHiringPayment(payment as Parameters<typeof assertCapturedHiringPayment>[0], gateway, request.agreed_amount);
-    if (payment.status === "successful") {
+    if (payment.status === "successful") {  
         if (payment.razorpay_payment_id !== gateway.id) throw new HiringError(409, "This order was already verified with a different payment.");
         // A repeated callback must never reactivate a completed contract.
         return { status: "paid", data: request };

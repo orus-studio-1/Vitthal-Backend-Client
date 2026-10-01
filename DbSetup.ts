@@ -1,6 +1,25 @@
+import fs from "fs";
+import path from "path";
 import pool from "./DbConnect";
 
 export async function ensureMarketplaceSchema() {
+    try {
+        const { rows } = await pool.query(`SELECT to_regclass('public.users') as has_users;`);
+        if (!rows[0] || !rows[0].has_users) {
+            console.log("Base schema missing. Running schema.sql initialization...");
+            const schemaPath = path.join(process.cwd(), "schema.sql");
+            if (fs.existsSync(schemaPath)) {
+                const schemaSql = fs.readFileSync(schemaPath, "utf8");
+                await pool.query(schemaSql);
+                console.log("Base schema.sql successfully executed!");
+            } else {
+                console.warn("schema.sql not found at path:", schemaPath);
+            }
+        }
+    } catch (err) {
+        console.warn("Initial schema existence check failed, continuing with migration patch:", err);
+    }
+
     await pool.query(`
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
         CREATE EXTENSION IF NOT EXISTS citext;
@@ -55,7 +74,12 @@ export async function ensureMarketplaceSchema() {
         ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_paid';
         ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatched';
 
-        ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
+                ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+            END IF;
+        END $$;
 
         DO $$
         BEGIN
@@ -784,7 +808,32 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_service_quotation_documents_quote_id ON service_quotation_documents(service_quotation_id);
 
-        -- Add default timeline and token money to vendor service offerings
+        -- Product quotation documents table & sequence
+        CREATE TABLE IF NOT EXISTS quotation_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            quotation_group_id UUID NOT NULL,
+            quotation_number TEXT NOT NULL UNIQUE,
+            document_url TEXT NOT NULL,
+            s3_key TEXT NOT NULL,
+            valid_until DATE NOT NULL,
+            product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_qd_group_id ON quotation_documents(quotation_group_id);
+        CREATE INDEX IF NOT EXISTS idx_qd_quotation_number ON quotation_documents(quotation_number);
+
+        -- Vendor response terms on quotation_requests
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS delivery_days INTEGER CHECK (delivery_days > 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2) CHECK (token_percentage >= 0 AND token_percentage <= 100);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_amount NUMERIC(12,2) CHECK (token_amount >= 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_url TEXT;
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_s3_key TEXT;
+
+        CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
 
@@ -854,6 +903,35 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
 
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMPTZ DEFAULT NULL;
+
+        CREATE TABLE IF NOT EXISTS service_cart_items (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            cart_id UUID NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+            service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+            vendor_service_id UUID NOT NULL REFERENCES vendor_services(id) ON DELETE CASCADE,
+            vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+            quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+            price_at_added NUMERIC(12, 2) NOT NULL,
+            pricing_type TEXT NOT NULL DEFAULT 'flat',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS contact_queries (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            email CITEXT NOT NULL,
+            company TEXT,
+            phone TEXT,
+            subject TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         -- Unified Subcategories & Product Subcategory Migration (2026-08-25)
         CREATE TABLE IF NOT EXISTS subcategories (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -867,10 +945,15 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_subcategories_category_id ON subcategories(category_id);
 
-        INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
-        SELECT id, category_id, name, description, created_at, updated_at
-        FROM service_subcategories
-        ON CONFLICT (category_id, name) DO NOTHING;
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'service_subcategories') THEN
+                INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
+                SELECT id, category_id, name, description, created_at, updated_at
+                FROM service_subcategories
+                ON CONFLICT (category_id, name) DO NOTHING;
+            END IF;
+        END $$;
 
         ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory_id UUID;
 

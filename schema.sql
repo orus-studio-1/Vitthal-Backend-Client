@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS users (
     refresh_token TEXT,
     OTP_Expiry TIMESTAMPTZ,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    deletion_requested_at TIMESTAMPTZ DEFAULT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -461,6 +462,33 @@ CREATE TABLE IF NOT EXISTS vendor_services (
 
 CREATE INDEX IF NOT EXISTS idx_vendor_services_service_id ON vendor_services(service_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_services_vendor_id ON vendor_services(vendor_id);
+
+CREATE TABLE IF NOT EXISTS service_cart_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cart_id UUID NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+    service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    vendor_service_id UUID NOT NULL REFERENCES vendor_services(id) ON DELETE CASCADE,
+    vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    price_at_added NUMERIC(12, 2) NOT NULL,
+    pricing_type TEXT NOT NULL DEFAULT 'flat',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
+);
+
+CREATE TABLE IF NOT EXISTS contact_queries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    email CITEXT NOT NULL,
+    company TEXT,
+    phone TEXT,
+    subject TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- 4. Create Service Bookings Table (equivalent to orders)
 CREATE TABLE IF NOT EXISTS service_bookings (
@@ -1482,6 +1510,27 @@ ALTER TABLE orders
     ADD COLUMN IF NOT EXISTS vendor_state TEXT,
     ADD COLUMN IF NOT EXISTS vendor_latitude DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS vendor_longitude DOUBLE PRECISION;
+
+-- ================================
+-- QUOTATION DOCUMENTS
+-- ================================
+CREATE TABLE IF NOT EXISTS quotation_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_group_id UUID NOT NULL,
+    quotation_number TEXT NOT NULL UNIQUE,
+    document_url TEXT NOT NULL,
+    s3_key TEXT NOT NULL,
+    valid_until DATE NOT NULL,
+    product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_qd_group_id ON quotation_documents(quotation_group_id);
+CREATE INDEX IF NOT EXISTS idx_qd_quotation_number ON quotation_documents(quotation_number);
+
 
 
 

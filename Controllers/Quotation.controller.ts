@@ -167,6 +167,7 @@ export const createQuotationFromCartController = async (req: Request, res: Respo
                         WHERE v.id = $1
                           AND v.approval_status = 'approved'
                           AND v.is_active = true
+                          AND v.vendor_type IN ('product', 'both')
                     `,
                     [item.vendor_id]
                 );

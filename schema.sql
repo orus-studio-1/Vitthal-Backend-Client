@@ -26,9 +26,11 @@ CREATE EXTENSION IF NOT EXISTS citext;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
-        CREATE TYPE user_role AS ENUM ('client', 'vendor', 'admin', 'super_admin', 'fulfillment_center', 'delivery_agent');
+        CREATE TYPE user_role AS ENUM ('client', 'worker', 'vendor', 'admin', 'super_admin', 'fulfillment_center', 'delivery_agent');
     END IF;
 END$$;
+
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'worker';
 
 DO $$
 BEGIN

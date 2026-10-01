@@ -33,6 +33,7 @@ export async function ensureMarketplaceSchema() {
 
         ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'fulfillment_center';
         ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'delivery_agent';
+        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'worker';
 
         DO $$
         BEGIN
@@ -1039,6 +1040,54 @@ export async function ensureMarketplaceSchema() {
         CREATE INDEX IF NOT EXISTS idx_hire_req_candidate ON hire_requests(candidate_id);
         CREATE INDEX IF NOT EXISTS idx_hire_req_user ON hire_requests(requested_by_user_id);
         CREATE INDEX IF NOT EXISTS idx_hire_req_status ON hire_requests(status);
+
+        ALTER TABLE hire_requests
+            ADD COLUMN IF NOT EXISTS proposed_amount NUMERIC(12,2),
+            ADD COLUMN IF NOT EXISTS agreed_amount NUMERIC(12,2),
+            ADD COLUMN IF NOT EXISTS negotiation_status VARCHAR(20) NOT NULL DEFAULT 'open',
+            ADD COLUMN IF NOT EXISTS negotiation_proposed_by UUID REFERENCES users(id) ON DELETE SET NULL,
+            ADD COLUMN IF NOT EXISTS contract_status VARCHAR(20) NOT NULL DEFAULT 'pending_payment',
+            ADD COLUMN IF NOT EXISTS client_completed_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS worker_completed_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+
+        CREATE TABLE IF NOT EXISTS hire_request_messages (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            hire_request_id UUID NOT NULL REFERENCES hire_requests(id) ON DELETE CASCADE,
+            sender_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            sender_role VARCHAR(20) NOT NULL,
+            message_type VARCHAR(50) NOT NULL DEFAULT 'message',
+            body TEXT NOT NULL,
+            proposed_amount NUMERIC(12,2),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        ALTER TABLE hire_request_messages
+        ALTER COLUMN message_type TYPE VARCHAR(50);
+        ALTER TABLE hire_requests
+        ADD COLUMN IF NOT EXISTS latest_offer_id UUID
+            REFERENCES hire_request_messages(id)
+            ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS agreed_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+
+        CREATE INDEX IF NOT EXISTS idx_hire_request_messages_request
+            ON hire_request_messages(hire_request_id, created_at);
+
+        ALTER TABLE payments
+            ADD COLUMN IF NOT EXISTS hire_request_id UUID REFERENCES hire_requests(id) ON DELETE SET NULL,
+            ADD COLUMN IF NOT EXISTS payment_type VARCHAR(30) NOT NULL DEFAULT 'marketplace';
+        CREATE INDEX IF NOT EXISTS idx_payments_hire_request_id ON payments(hire_request_id);
+
+                UPDATE hire_requests hr
+                SET contract_status = 'active'
+                WHERE hr.contract_status = 'pending_payment'
+                    AND hr.negotiation_status = 'paid'
+                    AND EXISTS (
+                            SELECT 1 FROM payments p
+                            WHERE p.hire_request_id = hr.id
+                                AND p.payment_type = 'worker_hiring'
+                                AND p.status = 'successful'
+                    );
 
         -- ═══════════════════════════════════════════════════════════════
         -- Universal B2B Service Hub & Asset Registry (2026-08-29)

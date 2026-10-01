@@ -1177,4 +1177,71 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_srv_ticket_docs_ticket ON service_ticket_documents(ticket_id);
     `);
+
+    // Run automated migration runner for all SQL files in migrations/
+    await runMigrationEngine();
 }
+
+async function runMigrationEngine() {
+    try {
+        // 1. Ensure tracking table exists
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id SERIAL PRIMARY KEY,
+                filename VARCHAR(255) UNIQUE NOT NULL,
+                executed_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        `);
+
+        // 2. Fetch already executed migrations
+        const { rows } = await pool.query(`SELECT filename FROM schema_migrations;`);
+        const executedFiles = new Set(rows.map((r: { filename: string }) => r.filename));
+
+        // 3. Locate and sort all .sql files in migrations/
+        const migrationsDir = path.join(process.cwd(), "migrations");
+        if (!fs.existsSync(migrationsDir)) {
+            return;
+        }
+
+        const files = fs.readdirSync(migrationsDir)
+            .filter((f) => f.endsWith(".sql"))
+            .sort();
+
+        let appliedCount = 0;
+
+        for (const file of files) {
+            if (!executedFiles.has(file)) {
+                console.log(`[DbSetup] Executing pending migration: ${file}...`);
+                const filePath = path.join(migrationsDir, file);
+                const sql = fs.readFileSync(filePath, "utf8");
+
+                const client = await pool.connect();
+                try {
+                    await client.query("BEGIN");
+                    await client.query(sql);
+                    await client.query(
+                        `INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING;`,
+                        [file]
+                    );
+                    await client.query("COMMIT");
+                    appliedCount++;
+                    console.log(`[DbSetup] Successfully applied migration: ${file}`);
+                } catch (migrationErr) {
+                    await client.query("ROLLBACK");
+                    console.error(`[DbSetup] Failed to apply migration ${file}:`, migrationErr);
+                } finally {
+                    client.release();
+                }
+            }
+        }
+
+        if (appliedCount > 0) {
+            console.log(`[DbSetup] Migration sync completed: ${appliedCount} migration(s) applied.`);
+        } else {
+            console.log(`[DbSetup] All database migrations are up to date.`);
+        }
+    } catch (err) {
+        console.error("[DbSetup] Error during migration engine execution:", err);
+    }
+}
+

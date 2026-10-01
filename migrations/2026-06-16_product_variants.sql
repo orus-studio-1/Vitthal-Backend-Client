@@ -47,10 +47,18 @@ ALTER TABLE vendor_products ALTER COLUMN product_variant_id SET NOT NULL;
 ALTER TABLE vendor_products DROP CONSTRAINT IF EXISTS unique_vendor_product;
 
 -- Add new uniqueness constraint (vendor_id, product_variant_id)
-ALTER TABLE vendor_products ADD CONSTRAINT unique_vendor_product_variant UNIQUE (vendor_id, product_variant_id);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_vendor_product_variant') THEN
+        ALTER TABLE vendor_products ADD CONSTRAINT unique_vendor_product_variant UNIQUE (vendor_id, product_variant_id);
+    END IF;
+END $$;
 
 -- Add foreign key constraint to product_variants
-ALTER TABLE vendor_products ADD CONSTRAINT fk_vendor_products_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_vendor_products_variant') THEN
+        ALTER TABLE vendor_products ADD CONSTRAINT fk_vendor_products_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- 4. Modify cart_items to reference product_variant_id
 ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS product_variant_id UUID;
@@ -68,10 +76,18 @@ ALTER TABLE cart_items ALTER COLUMN product_variant_id SET NOT NULL;
 ALTER TABLE cart_items DROP CONSTRAINT IF EXISTS unique_cart_product_vendor;
 
 -- Add new uniqueness constraint
-ALTER TABLE cart_items ADD CONSTRAINT unique_cart_product_variant_vendor UNIQUE (cart_id, product_variant_id, vendor_id);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_cart_product_variant_vendor') THEN
+        ALTER TABLE cart_items ADD CONSTRAINT unique_cart_product_variant_vendor UNIQUE (cart_id, product_variant_id, vendor_id);
+    END IF;
+END $$;
 
 -- Add foreign key
-ALTER TABLE cart_items ADD CONSTRAINT fk_cart_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_cart_items_variant') THEN
+        ALTER TABLE cart_items ADD CONSTRAINT fk_cart_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- 5. Modify wishlist_items to reference product_variant_id
 ALTER TABLE wishlist_items ADD COLUMN IF NOT EXISTS product_variant_id UUID;
@@ -89,10 +105,18 @@ ALTER TABLE wishlist_items ALTER COLUMN product_variant_id SET NOT NULL;
 ALTER TABLE wishlist_items DROP CONSTRAINT IF EXISTS unique_wishlist_product;
 
 -- Add new uniqueness constraint
-ALTER TABLE wishlist_items ADD CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_wishlist_product_variant') THEN
+        ALTER TABLE wishlist_items ADD CONSTRAINT unique_wishlist_product_variant UNIQUE (wishlist_id, product_variant_id);
+    END IF;
+END $$;
 
 -- Add foreign key
-ALTER TABLE wishlist_items ADD CONSTRAINT fk_wishlist_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_wishlist_items_variant') THEN
+        ALTER TABLE wishlist_items ADD CONSTRAINT fk_wishlist_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- 6. Modify order_items to reference product_variant_id (nullable for past order safety)
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS product_variant_id UUID;
@@ -104,7 +128,11 @@ FROM product_variants pv
 WHERE pv.product_id = oi.product_id AND oi.product_variant_id IS NULL;
 
 -- Add foreign key
-ALTER TABLE order_items ADD CONSTRAINT fk_order_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE SET NULL;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_order_items_variant') THEN
+        ALTER TABLE order_items ADD CONSTRAINT fk_order_items_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE SET NULL;
+    END IF;
+END $$;
 
 -- 7. Modify quotation_requests to reference product_variant_id (nullable for past request safety)
 ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS product_variant_id UUID;
@@ -116,4 +144,8 @@ FROM product_variants pv
 WHERE pv.product_id = qr.product_id AND qr.product_variant_id IS NULL;
 
 -- Add foreign key
-ALTER TABLE quotation_requests ADD CONSTRAINT fk_quotation_requests_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_quotation_requests_variant') THEN
+        ALTER TABLE quotation_requests ADD CONSTRAINT fk_quotation_requests_variant FOREIGN KEY (product_variant_id) REFERENCES product_variants(id) ON DELETE CASCADE;
+    END IF;
+END $$;

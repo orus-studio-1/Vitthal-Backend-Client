@@ -465,6 +465,30 @@ CREATE TABLE IF NOT EXISTS vendor_services (
 CREATE INDEX IF NOT EXISTS idx_vendor_services_service_id ON vendor_services(service_id);
 CREATE INDEX IF NOT EXISTS idx_vendor_services_vendor_id ON vendor_services(vendor_id);
 
+--cart : 
+CREATE TABLE IF NOT EXISTS carts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    user_id UUID NOT NULL,
+    cart_type cart_type NOT NULL DEFAULT 'direct',
+
+    status TEXT NOT NULL DEFAULT 'active', 
+    -- future: active, converted, abandoned, saved
+
+    total_amount NUMERIC(12,2) DEFAULT 0, -- optional (can be computed)
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT fk_carts_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(id)
+        ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_type_status
+    ON carts(user_id, cart_type) WHERE status = 'active';
+
 CREATE TABLE IF NOT EXISTS service_cart_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     cart_id UUID NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
@@ -718,29 +742,6 @@ CREATE TABLE IF NOT EXISTS fulfillment_centers(
 -- CART SYSTEM
 -- ================================
 
---cart : 
-CREATE TABLE IF NOT EXISTS carts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-    user_id UUID NOT NULL,
-    cart_type cart_type NOT NULL DEFAULT 'direct',
-
-    status TEXT NOT NULL DEFAULT 'active', 
-    -- future: active, converted, abandoned, saved
-
-    total_amount NUMERIC(12,2) DEFAULT 0, -- optional (can be computed)
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT fk_carts_user
-        FOREIGN KEY (user_id)
-        REFERENCES users(id)
-        ON DELETE CASCADE
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_type_status
-    ON carts(user_id, cart_type) WHERE status = 'active';
 
 --cart_items : 
 CREATE TABLE IF NOT EXISTS cart_items (

@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
-import { getPresignedUrlOrOriginal } from "../services/s3.service";
+import { getPresignedUrlOrOriginal, uploadBufferToS3 } from "../services/s3.service"; // NOTE: adapt uploadBufferToS3 to your real S3 upload function
 import { createNotification } from "./Notification.controller";
 import { generateInvoicePDFBuffer } from "../services/invoiceDocument.service";
 
@@ -13,6 +13,19 @@ async function resolveItemImages(items: any[] | null): Promise<any[] | null> {
             image_url: await getPresignedUrlOrOriginal(item.image_url),
         }))
     );
+}
+
+// Helper: resolve S3 URLs for the optional dispatch documents (all fields may be null)
+async function resolveDispatchDocs(d: any | null) {
+    if (!d) return null;
+    const r = async (u: string | null) => (u ? await getPresignedUrlOrOriginal(u) : null);
+    return {
+        ...d,
+        eway_bill_url: await r(d.eway_bill_url),
+        delivery_challan_url: await r(d.delivery_challan_url),
+        invoice_url: await r(d.invoice_url),
+        lr_document_url: await r(d.lr_document_url),
+    };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -274,6 +287,7 @@ export const getOrdersController = async (req: Request, res: Response): Promise<
 export const getVendorOrdersController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
     if (!authUser?.userId || !authUser?.role) {
+        console.log('here comes the message')
         return res.status(401).json({ message: "Unauthorized" });
     }
 
@@ -307,6 +321,7 @@ export const getVendorOrdersController = async (req: Request, res: Response): Pr
                 COALESCE(o.customer_name, u.name) AS customer_name,
                 COALESCE(o.customer_email, u.email) AS customer_email,
                 COALESCE(o.customer_phone, c.phone) AS customer_phone,
+                EXISTS (SELECT 1 FROM order_dispatch_details d WHERE d.order_id = o.id) AS has_dispatch_details,
                 (
                     SELECT json_agg(
                         json_build_object(
@@ -402,6 +417,15 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
                 COALESCE(o.customer_email, u.email) AS customer_email,
                 COALESCE(o.customer_phone, c.phone) AS customer_phone,
                 (
+                    SELECT row_to_json(od) FROM (
+                        SELECT d.lr_number, d.eway_bill_number, d.transporter_name,
+                               d.eway_bill_url, d.delivery_challan_url, d.invoice_url,
+                               d.lr_document_url, d.updated_at
+                        FROM order_dispatch_details d
+                        WHERE d.order_id = o.id
+                    ) od
+                ) AS dispatch_details,
+                (
                     SELECT json_agg(
                         json_build_object(
                             'product_id', oi.product_id,
@@ -435,10 +459,11 @@ export const getVendorOrderByIdController = async (req: Request, res: Response):
             return res.status(404).json({ message: "Order not found or access denied" });
         }
 
-        // Resolve S3 image URLs for items
+        // Resolve S3 image URLs for items + dispatch documents
         const order = {
             ...result.rows[0],
             items: await resolveItemImages(result.rows[0].items),
+            dispatch_details: await resolveDispatchDocs(result.rows[0].dispatch_details),
         };
 
         return res.status(200).json({ data: order });
@@ -588,6 +613,104 @@ export const updateOrderStatusController = async (req: Request, res: Response): 
         return res.status(500).json({ message: "Internal server error" });
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Optional dispatch details (LR number, e-way bill, delivery challan, invoice).
+// Purely informational: does NOT change order status, route plan, stock,
+// payouts or notifications. Safe to call multiple times (upsert); fields that
+// are not sent keep their previous values.
+// ──────────────────────────────────────────────────────────────────────────────
+export const saveOrderDispatchDetailsController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (!authUser?.userId || authUser?.role !== 'vendor') {
+        return res.status(403).json({ message: "Only vendors can add dispatch details" });
+    }
+
+    const rawId = req.params.id;
+    const id = Array.isArray(rawId) ? rawId[0] : rawId;
+    if (!id) return res.status(400).json({ message: "Order ID is required" });
+
+    const files = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
+    const eway = files.eway_bill?.[0];
+    const challan = files.delivery_challan?.[0];
+    const invoice = files.invoice?.[0];
+    const lrDoc = files.lr_document?.[0];
+
+    const clean = (v: unknown) => (String(v ?? "").trim() || null);
+    const lrNumber = clean(req.body.lr_number);
+    const ewayNumber = clean(req.body.eway_bill_number);
+    const transporter = clean(req.body.transporter_name);
+
+    if (!eway && !challan && !invoice && !lrDoc && !lrNumber && !ewayNumber && !transporter) {
+        return res.status(400).json({ message: "Provide at least one detail or document." });
+    }
+
+    try {
+        const vendorQ = await pool.query(`SELECT id FROM vendors WHERE user_id = $1`, [authUser.userId]);
+        if (!vendorQ.rows.length) return res.status(404).json({ message: "Vendor not found" });
+        const vendorId = vendorQ.rows[0].id;
+
+        const orderQ = await pool.query(
+            `SELECT status FROM orders WHERE id = $1 AND vendor_id = $2`,
+            [id, vendorId]
+        );
+        if (!orderQ.rows.length) return res.status(404).json({ message: "Order not found or access denied" });
+        if (orderQ.rows[0].status !== 'processing') {
+            return res.status(400).json({
+                message: "Dispatch details can only be added while the order is processing."
+            });
+        }
+
+        const prefix = `orders/${id}/dispatch`;
+        const up = async (
+            f: Express.Multer.File | undefined,
+            name: string
+        ): Promise<string | null> => {
+            if (!f) return null;
+
+            const uploaded = await uploadBufferToS3(
+                f.buffer,
+                `${prefix}/${name}-${Date.now()}`,
+                f.mimetype
+            );
+
+            return uploaded.s3Key;
+        };
+
+        const [ewayUrl, challanUrl, invoiceUrl, lrUrl] = await Promise.all([
+            up(eway, "eway-bill"),
+            up(challan, "delivery-challan"),
+            up(invoice, "invoice"),
+            up(lrDoc, "lr"),
+        ]);
+
+        const result = await pool.query(
+            `INSERT INTO order_dispatch_details
+                (order_id, vendor_id, lr_number, eway_bill_number, transporter_name,
+                 eway_bill_url, delivery_challan_url, invoice_url, lr_document_url)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             ON CONFLICT (order_id) DO UPDATE SET
+                lr_number            = COALESCE(EXCLUDED.lr_number, order_dispatch_details.lr_number),
+                eway_bill_number     = COALESCE(EXCLUDED.eway_bill_number, order_dispatch_details.eway_bill_number),
+                transporter_name     = COALESCE(EXCLUDED.transporter_name, order_dispatch_details.transporter_name),
+                eway_bill_url        = COALESCE(EXCLUDED.eway_bill_url, order_dispatch_details.eway_bill_url),
+                delivery_challan_url = COALESCE(EXCLUDED.delivery_challan_url, order_dispatch_details.delivery_challan_url),
+                invoice_url          = COALESCE(EXCLUDED.invoice_url, order_dispatch_details.invoice_url),
+                lr_document_url      = COALESCE(EXCLUDED.lr_document_url, order_dispatch_details.lr_document_url),
+                updated_at           = NOW()
+             RETURNING *`,
+            [id, vendorId, lrNumber, ewayNumber, transporter, ewayUrl, challanUrl, invoiceUrl, lrUrl]
+        );
+
+        return res.status(200).json({
+            message: "Dispatch details saved",
+            data: await resolveDispatchDocs(result.rows[0]),
+        });
+    } catch (error) {
+        console.error("Error saving dispatch details:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared tracking query helper — returns full tracking data for an order.

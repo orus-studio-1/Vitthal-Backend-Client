@@ -90,10 +90,26 @@ export const markNotificationReadController = async (req: Request, res: Response
     }
 
     try {
-        await pool.query(
-            `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
+        // await pool.query(
+        //     `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
+        //     [id, authUser.userId]
+        // );
+        const result = await pool.query(
+            `
+            UPDATE notifications
+            SET is_read = TRUE
+            WHERE id = $1
+            AND user_id = $2
+            RETURNING id
+            `,
             [id, authUser.userId]
         );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                message: "Notification not found",
+            });
+        }
 
         return res.status(200).json({ message: "Notification marked as read" });
     } catch (error) {
@@ -122,27 +138,92 @@ export const markAllNotificationsReadController = async (req: Request, res: Resp
 };
 
 // Helper to create notifications (used by other controllers)
-export async function createNotification(params: {
+// export async function createNotification(params: {
+//     userId: string;
+//     type: string;
+//     title: string;
+//     body: string;
+//     referenceType?: string;
+//     referenceId?: string;
+// }): Promise<void> {
+//     try {
+//         const result = await pool.query(
+//             `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+//              VALUES ($1, $2, $3, $4, $5, $6)
+//              RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+//             [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
+//         );
+        
+//         if (result.rows.length > 0) {
+//             sendNotificationToUser(params.userId, result.rows[0]);
+//         }
+//     } catch (error) {
+//         console.error("Error creating notification:", error);
+//     }
+// }
+
+export type CreateNotificationParams = {
     userId: string;
     type: string;
     title: string;
     body: string;
     referenceType?: string;
     referenceId?: string;
-}): Promise<void> {
+};
+
+export async function createNotification(
+    params: CreateNotificationParams
+) {
     try {
         const result = await pool.query(
-            `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
-            [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
+            `
+            INSERT INTO notifications (
+                user_id,
+                type,
+                title,
+                body,
+                reference_type,
+                reference_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING
+                id,
+                type,
+                title,
+                body,
+                reference_type,
+                reference_id,
+                is_read,
+                created_at
+            `,
+            [
+                params.userId,
+                params.type,
+                params.title,
+                params.body,
+                params.referenceType || null,
+                params.referenceId || null,
+            ]
         );
-        
-        if (result.rows.length > 0) {
-            sendNotificationToUser(params.userId, result.rows[0]);
+
+        const notification =
+            result.rows[0] || null;
+
+        if (notification) {
+            sendNotificationToUser(
+                params.userId,
+                notification
+            );
         }
+
+        return notification;
     } catch (error) {
-        console.error("Error creating notification:", error);
+        console.error(
+            "Error creating notification:",
+            error
+        );
+
+        return null;
     }
 }
 

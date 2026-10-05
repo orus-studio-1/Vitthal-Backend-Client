@@ -6,6 +6,7 @@ import pool from "../DbConnect";
 import { COOKIE_OPTIONS } from "../shared/CokkieSetting.shared";
 import { sendOTPEmail, sendPublicAccountDeletionEmail } from "../helpers/emailService.helper";
 import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
+import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 const validUserRoles = new Set(["client", "worker", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
 const gstDocumentMimeTypes = new Set(["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"]);
@@ -545,6 +546,11 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         const normalizedCompanyWebsite = normalizeRequiredText(req.body.companyWebsite);
         const normalizedGstCertificateLink = normalizeRequiredText(req.body.gstCertificateLink);
         const gstCertificateFile = getUploadedFile(req, "gstCertificate");
+        const bankName = normalizeRequiredText(req.body.bankName);
+        const accountHolderName = normalizeRequiredText(req.body.accountHolderName);
+        const accountNumber = normalizeRequiredText(req.body.accountNumber);
+        const ifscCode = normalizeRequiredText(req.body.ifscCode).toUpperCase();
+        const cancelledChequeFile = getUploadedFile(req, "cancelledCheque");
         const normalizedPhone = normalizeRequiredText(req.body.phone);
         const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
         const normalizedDesignation = normalizeRequiredText(req.body.designation);
@@ -564,6 +570,10 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             normalizedCompanyName,
             normalizedBusinessType,
             normalizedGstNumber,
+            bankName,
+            accountHolderName,
+            accountNumber,
+            ifscCode,
             normalizedPhone,
             normalizedDesignation,
             normalizedBusinessDescription,
@@ -576,13 +586,17 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             normalizedGstCertificateLink,
             normalizedAlternativeNumber,
             normalizedCreditCycle,
-        ].some((value) => value.length > 0) || Boolean(gstCertificateFile) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
+        ].some((value) => value.length > 0) || Boolean(gstCertificateFile || cancelledChequeFile) || parsedLatitude !== null || parsedLongitude !== null || parsedMinCommission !== null || parsedMaxCommission !== null;
 
         if (shouldPersistVendorSetup) {
             if (
                 !normalizedCompanyName ||
                 !normalizedBusinessType ||
                 !normalizedGstNumber ||
+                !bankName ||
+                !accountHolderName ||
+                !/^\d{9,18}$/.test(accountNumber) ||
+                !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode) ||
                 !normalizedPhone ||
                 !normalizedDesignation ||
                 !normalizedBusinessDescription ||
@@ -596,9 +610,10 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                 parsedMaxCommission === null ||
                 parsedLatitude === null ||
                 parsedLongitude === null ||
-                (!gstCertificateFile && !normalizedGstCertificateLink)
+                (!gstCertificateFile && !normalizedGstCertificateLink) ||
+                !cancelledChequeFile
             ) {
-                return res.status(400).json({ message: "Missing vendor setup fields. All fields, GST certificate, and commission details are required." });
+                return res.status(400).json({ message: "Missing vendor setup fields. All fields, bank payout details, cancelled cheque, GST certificate, and commission details are required." });
             }
 
             if (!/^\d{6}$/.test(normalizedPincode)) {
@@ -670,6 +685,13 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                     allowedTypes: gstDocumentMimeTypes,
                     required: true,
                 }) : normalizedGstCertificateLink;
+                const uploadedCancelledChequeLink = await uploadRegistrationFile(cancelledChequeFile, {
+                    fieldLabel: "Cancelled cheque",
+                    folder: "payout-cheques",
+                    allowedTypes: gstDocumentMimeTypes,
+                    required: true,
+                });
+                const encryptedAccountNumber = encryptPayoutAccountNumber(accountNumber);
 
                 await client.query(
                     `
@@ -678,6 +700,12 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 company_name,
                                 gst_number,
                                 gst_certificate_link,
+                                bank_name,
+                                account_holder_name,
+                                account_number,
+                                account_number_last4,
+                                ifsc_code,
+                                cancelled_cheque_link,
                                 business_type,
                                 company_website,
                                 phone,
@@ -693,12 +721,18 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 vendor_type,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, $10, $11, $12, $13, 'pending', 'Awaiting admin approval', $14, $15, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, NULLIF($14, ''), $15, $16, $17, $18, $19, 'pending', 'Awaiting admin approval', $20, $21, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
                                 gst_number = EXCLUDED.gst_number,
                                 gst_certificate_link = EXCLUDED.gst_certificate_link,
+                                bank_name = EXCLUDED.bank_name,
+                                account_holder_name = EXCLUDED.account_holder_name,
+                                account_number = EXCLUDED.account_number,
+                                account_number_last4 = EXCLUDED.account_number_last4,
+                                ifsc_code = EXCLUDED.ifsc_code,
+                                cancelled_cheque_link = EXCLUDED.cancelled_cheque_link,
                                 business_type = EXCLUDED.business_type,
                                 company_website = EXCLUDED.company_website,
                                 phone = EXCLUDED.phone,
@@ -719,6 +753,12 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         normalizedCompanyName,
                         normalizedGstNumber,
                         uploadedGstCertificateLink,
+                        bankName,
+                        accountHolderName,
+                        encryptedAccountNumber,
+                        accountNumber.slice(-4),
+                        ifscCode,
+                        uploadedCancelledChequeLink,
                         normalizedBusinessType,
                         normalizedCompanyWebsite,
                         normalizedPhone,

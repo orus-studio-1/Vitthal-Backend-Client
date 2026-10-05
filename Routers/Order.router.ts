@@ -7,6 +7,7 @@ import {
     getVendorOrderTrackingController,
     updateOrderStatusController,
     getVendorPayoutsController,
+    requestVendorPayoutController,
     getOrderInvoiceController,
 } from "../Controllers/Order.Controller";
 import { authMiddleware } from "../Middleware/AuthMiddleware";
@@ -22,6 +23,7 @@ orderRouter.get("/track/:id", getOrderTrackingController);
 
 // Vendor routes
 orderRouter.get("/vendor/payouts", requireApprovedVendor, getVendorPayoutsController);
+orderRouter.post("/vendor/payouts/:transactionType/:transactionId/request", requireApprovedVendor, requestVendorPayoutController);
 orderRouter.get("/vendor", requireApprovedVendor, getVendorOrdersController);
 orderRouter.get("/vendor/:id/track", requireApprovedVendor, getVendorOrderTrackingController);
 orderRouter.get("/vendor/:id", requireApprovedVendor, getVendorOrderByIdController);

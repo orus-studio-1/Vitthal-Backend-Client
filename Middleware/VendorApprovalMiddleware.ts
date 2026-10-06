@@ -36,6 +36,7 @@ export const requireApprovedVendor = async (req: Request, res: Response, next: N
     const role = user?.role as string | undefined;
 
     if (!userId) {
+        console.log('here we are getting the message')
         return res.status(401).json({ message: "Unauthorized! User not found in token." });
     }
 

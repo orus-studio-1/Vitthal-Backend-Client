@@ -38,10 +38,15 @@ export type ServiceQuotationDocumentData = {
 
 // ─── Generate Quotation Number ───────────────────────────────────────
 export async function generateServiceQuotationNumber(): Promise<string> {
-    const result = await pool.query(`SELECT nextval('quotation_number_seq') AS seq`);
-    const seq = String(result.rows[0].seq).padStart(5, "0");
     const year = new Date().getFullYear();
-    return `SQTN-${year}-${seq}`;
+    try {
+        const result = await pool.query(`SELECT nextval('quotation_number_seq') AS seq`);
+        const seq = String(result.rows[0].seq).padStart(5, "0");
+        return `SQTN-${year}-${seq}`;
+    } catch {
+        const seq = String(Math.floor(10000 + Math.random() * 90000));
+        return `SQTN-${year}-${seq}`;
+    }
 }
 
 // ─── Format Currency ─────────────────────────────────────────────────
@@ -70,9 +75,9 @@ async function getLogoBase64(): Promise<string> {
 
 // ─── Generate PDF using pdfmake ───────────────────────────────────────
 export async function generateServicePDFBuffer(data: ServiceQuotationDocumentData): Promise<Buffer> {
-    const PdfPrinter = (await import("pdfmake/js/Printer" as any)).default;
-    const virtualFs = (await import("pdfmake/js/virtual-fs" as any)).default;
-    const URLResolver = (await import("pdfmake/js/URLResolver" as any)).default;
+    const PdfPrinter = (await import("pdfmake/js/Printer.js" as any)).default;
+    const virtualFs = (await import("pdfmake/js/virtual-fs.js" as any)).default;
+    const URLResolver = (await import("pdfmake/js/URLResolver.js" as any)).default;
     const urlResolver = new URLResolver(virtualFs);
     const fonts = {
         Helvetica: {

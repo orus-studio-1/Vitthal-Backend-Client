@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { getPresignedUrlOrOriginal } from "../services/s3.service";
+import { createNotification } from "./Notification.controller";
 
 type AuthUser = { userId: string; role: string; email?: string };
 
@@ -285,6 +286,82 @@ export const createServiceTicket = async (req: Request, res: Response): Promise<
             }
         }
 
+        // Dispatch notifications to matching vendors (if <= 10, notify all; if > 10, notify 10 nearest)
+        try {
+            let vendorQuery = `
+                SELECT DISTINCT v.id AS vendor_id, v.user_id AS vendor_user_id, va.latitude, va.longitude
+                FROM vendors v
+                LEFT JOIN vendor_services vs ON vs.vendor_id = v.id AND vs.is_active = true
+                LEFT JOIN services s ON s.id = vs.service_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (user_id) user_id, latitude, longitude
+                    FROM addresses
+                    ORDER BY user_id, created_at DESC
+                ) va ON v.user_id = va.user_id
+                WHERE v.approval_status = 'approved'
+                  AND v.is_active = true
+                  AND v.is_blocked = false
+                  AND v.vendor_type IN ('service', 'both')
+            `;
+            const vParams: any[] = [];
+            if (vendor_id) {
+                vendorQuery += ` AND v.id = $1`;
+                vParams.push(vendor_id);
+            } else if (category_id) {
+                vendorQuery += ` AND (s.category_id = $1 OR EXISTS (SELECT 1 FROM product_category pc WHERE pc.id = $1 AND pc.category_type = 'service'))`;
+                vParams.push(category_id);
+            }
+
+            const vendorRes = await pool.query(vendorQuery, vParams);
+            let targetVendors = vendorRes.rows;
+
+            if (targetVendors.length > 10) {
+                const clientAddrRes = await pool.query(
+                    `SELECT latitude, longitude FROM addresses WHERE user_id = $1 AND latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
+                    [authUser.userId]
+                );
+                const cLat = clientAddrRes.rows[0]?.latitude != null ? Number(clientAddrRes.rows[0].latitude) : null;
+                const cLng = clientAddrRes.rows[0]?.longitude != null ? Number(clientAddrRes.rows[0].longitude) : null;
+
+                if (cLat !== null && cLng !== null && !isNaN(cLat) && !isNaN(cLng)) {
+                    targetVendors = targetVendors.map((v) => {
+                        const vLat = v.latitude != null ? Number(v.latitude) : null;
+                        const vLng = v.longitude != null ? Number(v.longitude) : null;
+                        let dist = 99999;
+                        if (vLat !== null && vLng !== null && !isNaN(vLat) && !isNaN(vLng)) {
+                            const R = 6371;
+                            const dLat = (vLat - cLat) * (Math.PI / 180);
+                            const dLng = (vLng - cLng) * (Math.PI / 180);
+                            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                                      Math.cos(cLat * (Math.PI / 180)) * Math.cos(vLat * (Math.PI / 180)) *
+                                      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+                            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                            dist = R * c;
+                        }
+                        return { ...v, dist };
+                    });
+                    targetVendors.sort((a, b) => a.dist - b.dist);
+                }
+                targetVendors = targetVendors.slice(0, 10);
+            }
+
+            const jobTitleText = ticket_payload?.job_title || "Service Request";
+            for (const v of targetVendors) {
+                if (v.vendor_user_id) {
+                    await createNotification({
+                        userId: v.vendor_user_id,
+                        type: "quotation_request_received",
+                        title: "New Service Request Received",
+                        body: `New service category request received: "${jobTitleText}". Review and submit your bid!`,
+                        referenceType: "service_quotation",
+                        referenceId: createdTicket.id,
+                    }).catch(err => console.error("Error creating vendor notification:", err));
+                }
+            }
+        } catch (notifErr) {
+            console.error("Error dispatching vendor notifications for ticket:", notifErr);
+        }
+
         return res.status(201).json({
             success: true,
             message: `Service ticket ${ticketNumber} created successfully.`,
@@ -387,6 +464,7 @@ export const getServiceTicketDetail = async (req: Request, res: Response): Promi
         if (ticketResult.rows.length === 0) {
             return res.status(404).json({ success: false, message: "Ticket not found." });
         }
+        const ticketRow = ticketResult.rows[0];
 
         // Fetch quotations
         const quotesResult = await pool.query(
@@ -397,6 +475,15 @@ export const getServiceTicketDetail = async (req: Request, res: Response): Promi
              ORDER BY stq.created_at DESC`,
             [id]
         );
+
+        let quotations = quotesResult.rows;
+
+        // If ticket is already accepted/assigned, only return the assigned/accepted quotation
+        if (ticketRow.vendor_id || ["accepted", "in_progress", "completed"].includes(ticketRow.status)) {
+            quotations = quotations.filter(
+                (q: any) => q.status === "accepted" || (ticketRow.vendor_id && q.vendor_id === ticketRow.vendor_id)
+            );
+        }
 
         // Fetch attached documents
         const docsResult = await pool.query(
@@ -411,8 +498,8 @@ export const getServiceTicketDetail = async (req: Request, res: Response): Promi
         return res.status(200).json({
             success: true,
             data: {
-                ...ticketResult.rows[0],
-                quotations: quotesResult.rows,
+                ...ticketRow,
+                quotations,
                 documents: docsResult.rows,
             },
         });
@@ -434,11 +521,16 @@ export const acceptTicketQuote = async (req: Request, res: Response): Promise<Re
     try {
         // Verify ticket belongs to client
         const ticketCheck = await pool.query(
-            `SELECT id, status, timeline_logs FROM service_tickets WHERE id = $1 AND client_user_id = $2`,
+            `SELECT id, status, vendor_id, timeline_logs FROM service_tickets WHERE id = $1 AND client_user_id = $2`,
             [id, authUser.userId]
         );
         if (ticketCheck.rows.length === 0) {
             return res.status(404).json({ success: false, message: "Ticket not found or unauthorized." });
+        }
+
+        const ticketRow = ticketCheck.rows[0];
+        if (ticketRow.vendor_id || ["accepted", "in_progress", "completed"].includes(ticketRow.status)) {
+            return res.status(400).json({ success: false, message: "An offer has already been accepted for this service request." });
         }
 
         // Get quote details
@@ -492,6 +584,40 @@ export const acceptTicketQuote = async (req: Request, res: Response): Promise<Re
             ]
         );
 
+        // Notify accepted vendor
+        const ticketIdStr = Array.isArray(id) ? id[0] : id;
+        const acceptedVendorUserRes = await pool.query(
+            `SELECT user_id FROM vendors WHERE id = $1 LIMIT 1`, [selectedQuote.vendor_id]
+        );
+        if (acceptedVendorUserRes.rows[0]?.user_id) {
+            await createNotification({
+                userId: acceptedVendorUserRes.rows[0].user_id,
+                type: "quotation_accepted",
+                title: "Quotation Accepted ✓",
+                body: `Your quotation for service ticket ${result.rows[0].ticket_number || ''} was accepted by the client! Work is now in progress.`,
+                referenceType: "service_ticket",
+                referenceId: ticketIdStr,
+            }).catch(err => console.error("Error notifying accepted vendor:", err));
+        }
+
+        // Notify other vendors that request has been claimed by another vendor
+        const otherQuotesRes = await pool.query(
+            `SELECT DISTINCT v.user_id FROM service_ticket_quotations stq JOIN vendors v ON v.id = stq.vendor_id WHERE stq.ticket_id = $1 AND stq.vendor_id != $2`,
+            [id, selectedQuote.vendor_id]
+        );
+        for (const row of otherQuotesRes.rows) {
+            if (row.user_id) {
+                await createNotification({
+                    userId: row.user_id,
+                    type: "quotation_rejected",
+                    title: "Service Request Claimed",
+                    body: `The service request "${result.rows[0].ticket_payload?.job_title || 'Service Ticket'}" has been claimed and accepted by another vendor. Thank you for your response.`,
+                    referenceType: "service_ticket",
+                    referenceId: ticketIdStr,
+                }).catch(err => console.error("Error notifying other vendor:", err));
+            }
+        }
+
         return res.status(200).json({
             success: true,
             message: "Quotation accepted. The vendor has been assigned to start work.",
@@ -516,11 +642,38 @@ export const verifyTicketOtp = async (req: Request, res: Response): Promise<Resp
 
     try {
         const ticketCheck = await pool.query(
-            `SELECT id, completion_otp, status, timeline_logs FROM service_tickets WHERE id = $1`,
+            `SELECT id, completion_otp, status, timeline_logs, client_user_id, ticket_number FROM service_tickets WHERE id = $1`,
             [id]
         );
+
         if (ticketCheck.rows.length === 0) {
-            return res.status(404).json({ success: false, message: "Ticket not found." });
+            // Check legacy service_quotations table
+            const sqCheck = await pool.query(
+                `SELECT id, user_id, status FROM service_quotations WHERE id = $1`,
+                [id]
+            );
+            if (sqCheck.rows.length > 0) {
+                const sq = sqCheck.rows[0];
+                await pool.query(
+                    `UPDATE service_quotations SET status = 'completed', updated_at = NOW() WHERE id = $1`,
+                    [id]
+                );
+                if (sq.user_id) {
+                    await createNotification({
+                        userId: sq.user_id,
+                        type: "service_completed",
+                        title: "Service Completed 🎉",
+                        body: `Your service request has been verified and marked as completed by the vendor. Thank you!`,
+                        referenceType: "service_quotation",
+                        referenceId: sq.id,
+                    }).catch(err => console.error("Error sending completion notification:", err));
+                }
+                return res.status(200).json({
+                    success: true,
+                    message: "Service verified and marked as completed!",
+                });
+            }
+            return res.status(404).json({ success: false, message: "Ticket or quotation not found." });
         }
 
         const ticket = ticketCheck.rows[0];
@@ -529,7 +682,7 @@ export const verifyTicketOtp = async (req: Request, res: Response): Promise<Resp
             return res.status(400).json({ success: false, message: "Ticket is already completed." });
         }
 
-        if (ticket.completion_otp !== String(otp).trim()) {
+        if (ticket.completion_otp && ticket.completion_otp !== String(otp).trim()) {
             return res.status(400).json({ success: false, message: "Invalid OTP code." });
         }
 
@@ -554,10 +707,22 @@ export const verifyTicketOtp = async (req: Request, res: Response): Promise<Resp
             [JSON.stringify(updatedTimeline), id]
         );
 
+        const completedTicket = result.rows[0];
+        if (completedTicket && completedTicket.client_user_id) {
+            await createNotification({
+                userId: completedTicket.client_user_id,
+                type: "service_completed",
+                title: "Service Completed 🎉",
+                body: `Your service request "${completedTicket.ticket_number || 'Service Ticket'}" has been verified and marked as completed by the vendor. Thank you!`,
+                referenceType: "service_ticket",
+                referenceId: completedTicket.id,
+            }).catch(err => console.error("Error sending completion notification:", err));
+        }
+
         return res.status(200).json({
             success: true,
             message: "Service verified and marked as completed!",
-            data: result.rows[0],
+            data: completedTicket,
         });
     } catch (error) {
         console.error("Error verifying OTP:", error);

@@ -44,3 +44,27 @@ export const sendExpoPushNotification = async (payload: ExpoPushPayload): Promis
     return false;
   }
 };
+
+
+export async function sendWhatsAppNotification(data: {
+  name: string; email: string; phone?: string; subject: string; message: string;
+}) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const adminNumber = process.env.WHATSAPP_ADMIN_NUMBER; 
+  await fetch(`https://graph.facebook.com/v18.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: adminNumber,
+      type: "text",
+      text: {
+        body: `New contact query\nFrom: ${data.name} (${data.email})\nPhone: ${data.phone || "N/A"}\nSubject: ${data.subject}\nMessage: ${data.message}`,
+      },
+    }),
+  });
+}

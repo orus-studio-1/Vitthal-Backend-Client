@@ -15,9 +15,9 @@ function formatINR(amount: number): string {
 }
 
 export async function generateInvoicePDFBuffer(orderId: string): Promise<Buffer> {
-    const PdfPrinter = (await import("pdfmake/js/Printer" as any)).default;
-    const virtualFs = (await import("pdfmake/js/virtual-fs" as any)).default;
-    const URLResolver = (await import("pdfmake/js/URLResolver" as any)).default;
+    const PdfPrinter = (await import("pdfmake/js/Printer.js" as any)).default;
+    const virtualFs = (await import("pdfmake/js/virtual-fs.js" as any)).default;
+    const URLResolver = (await import("pdfmake/js/URLResolver.js" as any)).default;
     const urlResolver = new URLResolver(virtualFs);
 
     const fonts = {

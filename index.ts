@@ -1,7 +1,15 @@
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import dotenv from 'dotenv';
+import dns from 'dns';
 import cors, { type CorsOptions } from 'cors';
+
+try {
+    dns.setDefaultResultOrder('ipv4first');
+} catch (err) {
+    // Ignore if not supported in older node
+}
+
 import pool from './DbConnect';
 import { ensureMarketplaceSchema } from './DbSetup';
 import productRouter from './Routers/Product.router';
@@ -25,6 +33,7 @@ import { startAbandonedReminderJob } from './jobs/abandonedReminder.job';
 import { startAccountDeletionJob } from './jobs/accountDeletion.job';
 import { createServer } from 'http';
 import { initSocket } from './socket';
+import contactRouter from './Routers/Contact.router';
 
 dotenv.config();
 
@@ -32,7 +41,7 @@ dotenv.config();
 const app = express();
 const httpServer = createServer(app);
 initSocket(httpServer);
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 
 
 //cors configuration
@@ -46,8 +55,12 @@ const allowedOrigins = new Set([
     'http://192.168.1.11:3000',
     'http://192.168.1.11:3001',
     'https://mtwo.in',
+    'https://www.mtwo.in',
     'https://vendor.mtwo.in',
     'https://admin.mtwo.in',
+    'https://client.mtwo.in',
+    'https://api.mtwo.in',
+    'https://api-admin.mtwo.in',
 ]);
 
 const corsOptions: CorsOptions = {
@@ -60,8 +73,9 @@ const corsOptions: CorsOptions = {
         const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
         const isLanIp = /^http:\/\/192\.168\.\d+\.\d+:\d+$/.test(origin);
         const isVercelPreview = /^https:\/\/.*\.vercel\.app$/.test(origin);
+        const isMtwoDomain = /^https:\/\/(.*\.)?mtwo\.in$/.test(origin);
 
-        if (allowedOrigins.has(origin) || isLocalhost || isLanIp || isVercelPreview) {
+        if (allowedOrigins.has(origin) || isLocalhost || isLanIp || isVercelPreview || isMtwoDomain) {
             callback(null, true);
             return;
         }
@@ -109,6 +123,7 @@ app.use("/api/notifications", notificationRouter);
 app.use("/api/hiring", hiringRouter);
 app.use("/api/service-hub", serviceHubRouter);
 app.use("/api", uploadRouter);
+app.use("/api/contact",contactRouter)
 
 async function startServer() {
     try {

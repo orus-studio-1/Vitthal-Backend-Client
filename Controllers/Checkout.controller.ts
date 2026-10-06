@@ -1,12 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
-import Razorpay from "razorpay";
+import { razorpay } from "../services/razorpay.service";
 import crypto from "crypto";
-
-const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_51tD21k26t9Q2l",
-    key_secret: process.env.RAZORPAY_KEY_SECRET || "dummysecret12345",
-});
 
 export const placeOrderController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
@@ -15,8 +10,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         return res.status(401).json({ message: "Unauthorized" });
     }
 
-    const { userId, role } = authUser;
-
+    const { userId } = authUser;
 
     try {
         await pool.query('BEGIN');
@@ -24,7 +18,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         // 1. Fetch user's address
         const addressId = req.body?.addressId || req.body?.address_id || null;
         let addressQuery;
-        
+
         if (addressId) {
             addressQuery = await pool.query(
                 `SELECT * FROM addresses WHERE id = $1 AND user_id = $2`,
@@ -43,7 +37,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         }
         const address = addressQuery.rows[0];
 
-        // 2. Fetch user's cart and cart_items
+        // 2. Fetch user's cart
         const cartQuery = await pool.query(
             `SELECT id FROM carts WHERE user_id = $1 AND status = 'active' AND cart_type = 'direct'`,
             [userId]
@@ -54,11 +48,13 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         }
         const cartId = cartQuery.rows[0].id;
 
+        // 3. Fetch cart items with stock check
         const cartItemsQuery = await pool.query(
             `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity,
-                    vp.price as latest_price, vp.discounted_price
+                    vp.price as latest_price, vp.discounted_price, vp.stock_quantity, p.name as product_name
              FROM cart_items ci
              JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
+             JOIN products p ON p.id = ci.product_id
              WHERE ci.cart_id = $1`,
             [cartId]
         );
@@ -77,7 +73,17 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             return res.status(400).json({ message: "Cart is empty" });
         }
 
-        // 3. Group cart items by vendor_id
+        // 4. Stock check — COD still needs to validate stock before confirming
+        for (const item of cartItems) {
+            if (Number(item.quantity) > Number(item.stock_quantity)) {
+                await pool.query('ROLLBACK');
+                return res.status(400).json({
+                    message: `Insufficient stock for product "${item.product_name}". Available: ${item.stock_quantity}, Requested: ${item.quantity}.`
+                });
+            }
+        }
+
+        // 5. Group cart items by vendor_id
         const itemsByVendor: Record<string, typeof cartItems> = {};
         for (const item of cartItems) {
             if (!itemsByVendor[item.vendor_id]) {
@@ -86,17 +92,13 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             itemsByVendor[item.vendor_id].push(item);
         }
 
-        // 4. Create order for each vendor
         const userProfileQuery = await pool.query(
-            `
-                SELECT u.name, u.email, c.phone
-                FROM users u
-                LEFT JOIN client c ON c.user_id = u.id
-                WHERE u.id = $1
-            `,
+            `SELECT u.name, u.email, c.phone FROM users u LEFT JOIN client c ON c.user_id = u.id WHERE u.id = $1`,
             [userId]
         );
         const userProfile = userProfileQuery.rows[0];
+
+        const createdOrderIds: string[] = [];
 
         for (const vendorId in itemsByVendor) {
             const vendorItems = itemsByVendor[vendorId];
@@ -108,13 +110,14 @@ export const placeOrderController = async (req: Request, res: Response): Promise
                 totalAmount += effectivePrice * Number(item.quantity);
             }
 
-            // Insert into orders table
+            // COD: payment_status = 'cod_pending' — money not collected until delivery, distinct from
+            // the online-payment 'pending' status used while waiting on Razorpay confirmation
             const orderResult = await pool.query(
                 `INSERT INTO orders (
                     user_id, vendor_id, cart_id, status, payment_status, total_amount,
                     address_line, city, state, country, pincode, latitude, langitude,
-                    source, order_type, customer_name, customer_email, customer_phone
-                ) VALUES ($1, $2, $3, 'pending', 'confirmed', $4, $5, $6, $7, $8, $9, $10, $11, 'client', 'direct', $12, $13, $14) RETURNING id`,
+                    source, order_type, customer_name, customer_email, customer_phone, order_notes
+                ) VALUES ($1, $2, $3, 'pending', 'cod_pending', $4, $5, $6, $7, $8, $9, $10, $11, 'client', 'direct', $12, $13, $14, 'Cash on Delivery') RETURNING id`,
                 [
                     userId, vendorId, cartId, totalAmount,
                     address.address, address.city, address.state, address.country,
@@ -125,15 +128,14 @@ export const placeOrderController = async (req: Request, res: Response): Promise
                 ]
             );
             const orderId = orderResult.rows[0].id;
+            createdOrderIds.push(orderId);
 
-            // Create initial status history entry
             await pool.query(
                 `INSERT INTO order_status_history (order_id, status, note, created_at)
-                 VALUES ($1, 'pending', 'Order placed by customer', CURRENT_TIMESTAMP)`,
+                 VALUES ($1, 'pending', 'Order placed by customer (Cash on Delivery)', CURRENT_TIMESTAMP)`,
                 [orderId]
             );
 
-            // Insert into order_items table
             for (const item of vendorItems) {
                 const latestPrice = Number(item.latest_price) || 0;
                 const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
@@ -148,32 +150,28 @@ export const placeOrderController = async (req: Request, res: Response): Promise
             }
         }
 
-        // 4b. Create service bookings (direct checkout)
+        // Service bookings via COD
         for (const item of serviceCartItems) {
             const amount = Number(item.price_at_added) * Number(item.quantity);
             await pool.query(
                 `INSERT INTO service_bookings (
-                    user_id, vendor_id, vendor_service_id, total_amount, status, payment_status
-                ) VALUES ($1, $2, $3, $4, 'pending', 'pending')`,
+                    user_id, vendor_id, vendor_service_id, total_amount, status, payment_status, booking_notes
+                ) VALUES ($1, $2, $3, $4, 'pending', 'cod_pending', 'Cash on Delivery')`,
                 [userId, item.vendor_id, item.vendor_service_id, amount]
             );
         }
 
-        // 5. Clear the cart items since they are now ordered
-        await pool.query(
-            `DELETE FROM cart_items WHERE cart_id = $1`,
-            [cartId]
-        );
-        await pool.query(
-            `DELETE FROM service_cart_items WHERE cart_id = $1`,
-            [cartId]
-        );
+        await pool.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
+        await pool.query(`DELETE FROM service_cart_items WHERE cart_id = $1`, [cartId]);
 
         await pool.query('COMMIT');
-        return res.status(200).json({ message: "Order placed successfully!" });
+        return res.status(200).json({
+            message: "Order placed successfully! Pay on delivery.",
+            orderIds: createdOrderIds,
+        });
     } catch (error) {
         await pool.query('ROLLBACK');
-        console.error("Place order error:", error);
+        console.error("Place COD order error:", error);
         return res.status(500).json({ message: "Failed to place order due to internal error." });
     }
 };

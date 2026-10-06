@@ -90,26 +90,10 @@ export const markNotificationReadController = async (req: Request, res: Response
     }
 
     try {
-        // await pool.query(
-        //     `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
-        //     [id, authUser.userId]
-        // );
-        const result = await pool.query(
-            `
-            UPDATE notifications
-            SET is_read = TRUE
-            WHERE id = $1
-            AND user_id = $2
-            RETURNING id
-            `,
+        await pool.query(
+            `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
             [id, authUser.userId]
         );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                message: "Notification not found",
-            });
-        }
 
         return res.status(200).json({ message: "Notification marked as read" });
     } catch (error) {
@@ -138,92 +122,38 @@ export const markAllNotificationsReadController = async (req: Request, res: Resp
 };
 
 // Helper to create notifications (used by other controllers)
-// export async function createNotification(params: {
-//     userId: string;
-//     type: string;
-//     title: string;
-//     body: string;
-//     referenceType?: string;
-//     referenceId?: string;
-// }): Promise<void> {
-//     try {
-//         const result = await pool.query(
-//             `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-//              VALUES ($1, $2, $3, $4, $5, $6)
-//              RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
-//             [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
-//         );
-        
-//         if (result.rows.length > 0) {
-//             sendNotificationToUser(params.userId, result.rows[0]);
-//         }
-//     } catch (error) {
-//         console.error("Error creating notification:", error);
-//     }
-// }
-
-export type CreateNotificationParams = {
+export async function createNotification(params: {
     userId: string;
     type: string;
     title: string;
     body: string;
     referenceType?: string;
     referenceId?: string;
-};
-
-export async function createNotification(
-    params: CreateNotificationParams
-) {
+}): Promise<void> {
     try {
-        const result = await pool.query(
-            `
-            INSERT INTO notifications (
-                user_id,
-                type,
-                title,
-                body,
-                reference_type,
-                reference_id
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING
-                id,
-                type,
-                title,
-                body,
-                reference_type,
-                reference_id,
-                is_read,
-                created_at
-            `,
-            [
-                params.userId,
-                params.type,
-                params.title,
-                params.body,
-                params.referenceType || null,
-                params.referenceId || null,
-            ]
-        );
-
-        const notification =
-            result.rows[0] || null;
-
-        if (notification) {
-            sendNotificationToUser(
-                params.userId,
-                notification
+        let result;
+        try {
+            result = await pool.query(
+                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+                [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
+            );
+        } catch (dbErr: any) {
+            console.warn(`[createNotification] Initial insert failed (${dbErr.message}), retrying with general fallback...`);
+            result = await pool.query(
+                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+                 VALUES ($1, 'general', $2, $3, $4, $5)
+                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+                [params.userId, params.title, params.body, params.referenceType || null, params.referenceId || null]
             );
         }
-
-        return notification;
+        
+        if (result && result.rows.length > 0) {
+            sendNotificationToUser(params.userId, result.rows[0]);
+        }
     } catch (error) {
-        console.error(
-            "Error creating notification:",
-            error
-        );
-
-        return null;
+        console.error("Error creating notification:", error);
     }
 }
 

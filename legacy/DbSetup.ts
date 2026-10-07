@@ -1,13 +1,15 @@
+// LEGACY — FROZEN. Do not add schema changes here; use Prisma migrations (see prisma/README.md).
+// This only runs once per pre-Prisma database, from DbMigrate.ts, to bring it level with the 0_init baseline.
 import fs from "fs";
 import path from "path";
-import pool from "./DbConnect";
+import pool from "../DbConnect";
 
 export async function ensureMarketplaceSchema() {
     try {
         const { rows } = await pool.query(`SELECT to_regclass('public.users') as has_users;`);
         if (!rows[0] || !rows[0].has_users) {
             console.log("Base schema missing. Running schema.sql initialization...");
-            const schemaPath = path.join(process.cwd(), "schema.sql");
+            const schemaPath = path.join(process.cwd(), "legacy", "schema.sql");
             if (fs.existsSync(schemaPath)) {
                 const schemaSql = fs.readFileSync(schemaPath, "utf8");
                 await pool.query(schemaSql);
@@ -1360,7 +1362,7 @@ async function runMigrationEngine() {
         const executedFiles = new Set(rows.map((r: { filename: string }) => r.filename));
 
         // 3. Locate and sort all .sql files in migrations/
-        const migrationsDir = path.join(process.cwd(), "migrations");
+        const migrationsDir = path.join(process.cwd(), "legacy", "migrations");
         if (!fs.existsSync(migrationsDir)) {
             return;
         }

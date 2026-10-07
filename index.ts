@@ -11,7 +11,7 @@ try {
 }
 
 import pool from './DbConnect';
-import { ensureMarketplaceSchema } from './DbSetup';
+import { runDatabaseMigrations } from './DbMigrate';
 import productRouter from './Routers/Product.router';
 import clientRouter from './Routers/ClientRouter';
 import checkoutRouter from './Routers/Checkout.Router';
@@ -134,9 +134,9 @@ async function startServer() {
             });
 
         try {
-            await ensureMarketplaceSchema();
+            await runDatabaseMigrations();
         } catch (schemaError) {
-            console.warn("Non-fatal: Schema sync bypassed or completed concurrently in another process:", schemaError);
+            console.error("Database migration failed; the server will start but the schema may be out of date:", schemaError);
         }
         startAbandonedReminderJob();
         startAccountDeletionJob();

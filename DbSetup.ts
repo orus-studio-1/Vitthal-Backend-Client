@@ -1,6 +1,25 @@
+import fs from "fs";
+import path from "path";
 import pool from "./DbConnect";
 
 export async function ensureMarketplaceSchema() {
+    try {
+        const { rows } = await pool.query(`SELECT to_regclass('public.users') as has_users;`);
+        if (!rows[0] || !rows[0].has_users) {
+            console.log("Base schema missing. Running schema.sql initialization...");
+            const schemaPath = path.join(process.cwd(), "schema.sql");
+            if (fs.existsSync(schemaPath)) {
+                const schemaSql = fs.readFileSync(schemaPath, "utf8");
+                await pool.query(schemaSql);
+                console.log("Base schema.sql successfully executed!");
+            } else {
+                console.warn("schema.sql not found at path:", schemaPath);
+            }
+        }
+    } catch (err) {
+        console.warn("Initial schema existence check failed, continuing with migration patch:", err);
+    }
+
     await pool.query(`
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
         CREATE EXTENSION IF NOT EXISTS citext;
@@ -40,11 +59,72 @@ export async function ensureMarketplaceSchema() {
             END IF;
         END $$;
 
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'token_paid';
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'dispatch_requested';
+        ALTER TYPE quotation_status ADD VALUE IF NOT EXISTS 'dispatched';
+
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quotation_message_action') THEN
                 CREATE TYPE quotation_message_action AS ENUM ('request', 'offer', 'counter', 'accept', 'reject', 'note');
             END IF;
+        END $$;
+
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'token_paid';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_requested';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatch_paid';
+        ALTER TYPE quotation_message_action ADD VALUE IF NOT EXISTS 'dispatched';
+
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
+                ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'pending_dispatch';
+            END IF;
+        END $$;
+
+        DO $$
+        BEGIN
+            ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_reference_type;
+            ALTER TABLE notifications
+                ADD CONSTRAINT chk_notification_reference_type
+                CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product', 'service', 'service_quotation', 'service_booking', 'service_ticket', 'hire_request'));
+
+            ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_type;
+            ALTER TABLE notifications
+                ADD CONSTRAINT chk_notification_type
+                CHECK (type IN (
+                    'quotation_request_received',
+                    'quotation_offer_received',
+                    'quotation_counter_received',
+                    'quotation_accepted',
+                    'quotation_rejected',
+                    'service_completed',
+                    'admin_confirmation_sent',
+                    'admin_confirmation_accepted',
+                    'admin_confirmation_rejected',
+                    'product_approved',
+                    'product_rejected',
+                    'image_approved',
+                    'image_rejected',
+                    'vendor_product_approved',
+                    'vendor_product_rejected',
+                    'hire_request_received',
+                    'hire_request_accepted',
+                    'hire_request_rejected',
+                    'hire_request_cancelled',
+                    'hire_message',
+                    'hire_offer_received',
+                    'hire_offer_accepted',
+                    'hire_payment_successful',
+                    'hire_completion_confirmed',
+                    'hire_contract_completed',
+                    'hiring_access_unlocked',
+                    'general'
+                ));
+
+            ALTER TABLE services_media ADD COLUMN IF NOT EXISTS s3_key TEXT;
+        EXCEPTION
+            WHEN OTHERS THEN NULL;
         END $$;
 
         CREATE TABLE IF NOT EXISTS products_images (
@@ -466,6 +546,7 @@ export async function ensureMarketplaceSchema() {
             WHERE transfer_reference IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_vendor_payout_requests_vendor_status
             ON vendor_payout_requests(vendor_id, status, requested_at DESC);
+
         CREATE TABLE IF NOT EXISTS vendor_payout_bank_access_audit (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             vendor_payout_request_id UUID NOT NULL,
@@ -566,6 +647,8 @@ export async function ensureMarketplaceSchema() {
             ALTER COLUMN label SET NOT NULL;
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_code ON product_category(code);
+
+        CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
 
         DO $$
         BEGIN
@@ -798,9 +881,38 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_service_quotation_documents_quote_id ON service_quotation_documents(service_quotation_id);
 
-        -- Add default timeline and token money to vendor service offerings
+        -- Product quotation documents table & sequence
+        CREATE TABLE IF NOT EXISTS quotation_documents (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            quotation_group_id UUID NOT NULL,
+            quotation_number TEXT NOT NULL UNIQUE,
+            document_url TEXT NOT NULL,
+            s3_key TEXT NOT NULL,
+            valid_until DATE NOT NULL,
+            product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_qd_group_id ON quotation_documents(quotation_group_id);
+        CREATE INDEX IF NOT EXISTS idx_qd_quotation_number ON quotation_documents(quotation_number);
+
+        -- Vendor response terms on quotation_requests
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS delivery_days INTEGER CHECK (delivery_days > 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2) CHECK (token_percentage >= 0 AND token_percentage <= 100);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS token_amount NUMERIC(12,2) CHECK (token_amount >= 0);
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_url TEXT;
+        ALTER TABLE quotation_requests ADD COLUMN IF NOT EXISTS vendor_document_s3_key TEXT;
+
+        CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS delivery_days INTEGER;
         ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS token_percentage NUMERIC(5,2);
+
+        -- Add broadcast_group_id to service_quotations for 10-vendor broadcast matching
+        ALTER TABLE service_quotations ADD COLUMN IF NOT EXISTS broadcast_group_id UUID;
+        CREATE INDEX IF NOT EXISTS idx_service_quotations_broadcast_group ON service_quotations(broadcast_group_id) WHERE broadcast_group_id IS NOT NULL;
 
         -- Add booking_ids column to payments table
         ALTER TABLE payments ADD COLUMN IF NOT EXISTS booking_ids UUID[] DEFAULT '{}';
@@ -864,6 +976,35 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS current_longitude DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS last_located_at TIMESTAMPTZ;
 
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS deletion_requested_at TIMESTAMPTZ DEFAULT NULL;
+
+        CREATE TABLE IF NOT EXISTS service_cart_items (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            cart_id UUID NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+            service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+            vendor_service_id UUID NOT NULL REFERENCES vendor_services(id) ON DELETE CASCADE,
+            vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+            quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+            price_at_added NUMERIC(12, 2) NOT NULL,
+            pricing_type TEXT NOT NULL DEFAULT 'flat',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT unique_cart_vendor_service UNIQUE (cart_id, vendor_service_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS contact_queries (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            email CITEXT NOT NULL,
+            company TEXT,
+            phone TEXT,
+            subject TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'new',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         -- Unified Subcategories & Product Subcategory Migration (2026-08-25)
         CREATE TABLE IF NOT EXISTS subcategories (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -877,10 +1018,15 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_subcategories_category_id ON subcategories(category_id);
 
-        INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
-        SELECT id, category_id, name, description, created_at, updated_at
-        FROM service_subcategories
-        ON CONFLICT (category_id, name) DO NOTHING;
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'service_subcategories') THEN
+                INSERT INTO subcategories (id, category_id, name, description, created_at, updated_at)
+                SELECT id, category_id, name, description, created_at, updated_at
+                FROM service_subcategories
+                ON CONFLICT (category_id, name) DO NOTHING;
+            END IF;
+        END $$;
 
         ALTER TABLE products ADD COLUMN IF NOT EXISTS subcategory_id UUID;
 
@@ -1015,9 +1161,9 @@ export async function ensureMarketplaceSchema() {
                                 AND p.status = 'successful'
                     );
 
--- ═══════════════════════════════════════════════════════════════
--- Notifications: Hiring support
--- ═══════════════════════════════════════════════════════════════
+        -- ═══════════════════════════════════════════════════════════════
+        -- Notifications: Hiring support
+        -- ═══════════════════════════════════════════════════════════════
 
         CREATE TABLE IF NOT EXISTS notifications (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1031,7 +1177,7 @@ export async function ensureMarketplaceSchema() {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- Existing environments may already have restrictive CHECK constraints.
+        -- Union of existing marketplace/service types and hiring types
         ALTER TABLE notifications
             DROP CONSTRAINT IF EXISTS chk_notification_type;
 
@@ -1045,6 +1191,7 @@ export async function ensureMarketplaceSchema() {
                     'quotation_counter_received',
                     'quotation_accepted',
                     'quotation_rejected',
+                    'service_completed',
                     'admin_confirmation_sent',
                     'admin_confirmation_accepted',
                     'admin_confirmation_rejected',
@@ -1083,8 +1230,10 @@ export async function ensureMarketplaceSchema() {
                     'quotation',
                     'order',
                     'product',
+                    'service',
                     'service_quotation',
                     'service_booking',
+                    'service_ticket',
                     'hire_request'
                 )
             );
@@ -1101,7 +1250,6 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_notifications_reference
             ON notifications(reference_type, reference_id);
-
 
         -- ═══════════════════════════════════════════════════════════════
         -- Universal B2B Service Hub & Asset Registry (2026-08-29)
@@ -1191,5 +1339,70 @@ export async function ensureMarketplaceSchema() {
 
         CREATE INDEX IF NOT EXISTS idx_srv_ticket_docs_ticket ON service_ticket_documents(ticket_id);
     `);
+
+    // Run automated migration runner for all SQL files in migrations/
+    await runMigrationEngine();
 }
 
+async function runMigrationEngine() {
+    try {
+        // 1. Ensure tracking table exists
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id SERIAL PRIMARY KEY,
+                filename VARCHAR(255) UNIQUE NOT NULL,
+                executed_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        `);
+
+        // 2. Fetch already executed migrations
+        const { rows } = await pool.query(`SELECT filename FROM schema_migrations;`);
+        const executedFiles = new Set(rows.map((r: { filename: string }) => r.filename));
+
+        // 3. Locate and sort all .sql files in migrations/
+        const migrationsDir = path.join(process.cwd(), "migrations");
+        if (!fs.existsSync(migrationsDir)) {
+            return;
+        }
+
+        const files = fs.readdirSync(migrationsDir)
+            .filter((f) => f.endsWith(".sql"))
+            .sort();
+
+        let appliedCount = 0;
+
+        for (const file of files) {
+            if (!executedFiles.has(file)) {
+                console.log(`[DbSetup] Executing pending migration: ${file}...`);
+                const filePath = path.join(migrationsDir, file);
+                const sql = fs.readFileSync(filePath, "utf8");
+
+                const client = await pool.connect();
+                try {
+                    await client.query("BEGIN");
+                    await client.query(sql);
+                    await client.query(
+                        `INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT (filename) DO NOTHING;`,
+                        [file]
+                    );
+                    await client.query("COMMIT");
+                    appliedCount++;
+                    console.log(`[DbSetup] Successfully applied migration: ${file}`);
+                } catch (migrationErr) {
+                    await client.query("ROLLBACK");
+                    console.error(`[DbSetup] Failed to apply migration ${file}:`, migrationErr);
+                } finally {
+                    client.release();
+                }
+            }
+        }
+
+        if (appliedCount > 0) {
+            console.log(`[DbSetup] Migration sync completed: ${appliedCount} migration(s) applied.`);
+        } else {
+            console.log(`[DbSetup] All database migrations are up to date.`);
+        }
+    } catch (err) {
+        console.error("[DbSetup] Error during migration engine execution:", err);
+    }
+}

@@ -35,7 +35,10 @@ import {
     createCodQrController,
     getCodQrStatusController,
     createQuotationDeliveryPaymentQrController,
-    getQuotationDeliveryPaymentStatusController
+    getQuotationDeliveryPaymentStatusController,
+    settleRiderEarningsController,
+    requestRiderSettlementController,
+    getRiderSettlementController
 } from "../Controllers/Delivery.controller";
 
 const deliveryRouter = Router();
@@ -51,6 +54,8 @@ deliveryRouter.post("/hub/handover-scan", authMiddleware, postHandoverScanContro
 deliveryRouter.post("/hub/relocate", authMiddleware, postRelocateItemController);
 deliveryRouter.get("/hub/pending-pickups", authMiddleware, getPendingPickupsController);
 deliveryRouter.post("/hub/assign-pickup", authMiddleware, postAssignPickupController);
+deliveryRouter.get("/hub/riders",authMiddleware,getRidersController);
+deliveryRouter.post("/hub/riders/:riderId/settle",authMiddleware,settleRiderEarningsController);
 
 // Rider CRUD / management for Hub Manager
 deliveryRouter.get("/riders", authMiddleware, getRidersController);
@@ -73,6 +78,8 @@ deliveryRouter.post("/rider/kyc", authMiddleware, submitRiderKYCController);
 deliveryRouter.get("/rider/kyc", authMiddleware, getRiderKYCStatusController);
 deliveryRouter.patch("/riders/:riderId/kyc-status", authMiddleware, patchRiderKYCApprovalController);
 deliveryRouter.get("/rider/earnings", authMiddleware, getRiderEarningsController);
+deliveryRouter.post("/rider/earnings/request-settlement",authMiddleware, requestRiderSettlementController);
+deliveryRouter.get("/hub/rider-settlement",authMiddleware,getRiderSettlementController);
 
 deliveryRouter.post("/rider/verify-pickup", authMiddleware, verifyPickupController);
 deliveryRouter.post("/rider/verify-delivery", authMiddleware, verifyDeliveryController);
@@ -80,8 +87,6 @@ deliveryRouter.post("/rider/cod-qr/create", authMiddleware, createCodQrControlle
 deliveryRouter.get("/rider/cod-qr/:orderId/status", authMiddleware, getCodQrStatusController);
 deliveryRouter.post("/rider/quotation-payment/create",authMiddleware ,createQuotationDeliveryPaymentQrController)
 deliveryRouter.get("/rider/quotation-payment/:orderId/status", authMiddleware,getQuotationDeliveryPaymentStatusController)
-
-// Hub/Admin Live tracking query
 deliveryRouter.get("/riders/:riderId/live", authMiddleware, getRiderLiveDetailsController);
 
 export default deliveryRouter;

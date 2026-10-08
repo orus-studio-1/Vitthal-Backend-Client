@@ -962,70 +962,96 @@ export const getRiderCompletedDeliveriesController = async (req: Request, res: R
         const riderId = riderRes.rows[0].id;
 
         const result = await pool.query(
-            `SELECT sub.tracking_id,
-                    sub.order_id,
-                    sub.order_reference,
-                    sub.customer_name,
-                    sub.address_line, sub.city, sub.state, sub.pincode,
-                    sub.vendor_name, sub.vendor_city, sub.vendor_state,
-                    sub.delivered_at,
-                    sub.delivery_status,
-                    sub.delivery_leg_title,
-                    sub.items
-             FROM (
-                 SELECT oft.id::text as tracking_id,
-                        o.id as order_id, 
-                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference, 
-                        COALESCE(o.customer_name, 'Valued Customer') as customer_name, 
-                        o.address_line, o.city, o.state, o.pincode,
-                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
-                        o.vendor_city, o.vendor_state,
-                        oft.created_at as delivered_at, 
-                        oft.status as delivery_status,
-                        CASE 
-                            WHEN oft.status = 'received' THEN 'Vendor ➔ Fulfillment Center Hub'
-                            ELSE 'Fulfillment Center Hub ➔ Client Dropoff'
-                        END as delivery_leg_title,
-                        (
-                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
-                            FROM order_items oi
-                            JOIN products p ON oi.product_id = p.id
-                            WHERE oi.order_id = o.id
-                        ) as items
-                 FROM order_fulfillment_tracking oft
-                 JOIN orders o ON oft.order_id = o.id
-                 LEFT JOIN vendors v ON o.vendor_id = v.id
-                 WHERE oft.delivery_agent_id = $1
-                   AND oft.status IN ('delivered', 'received', 'handed_over')
+            `
+            SELECT
+                sub.tracking_id,
+                sub.order_id,
+                sub.order_reference,
+                sub.customer_name,
+                sub.address_line,
+                sub.city,
+                sub.state,
+                sub.pincode,
+                sub.vendor_name,
+                sub.vendor_city,
+                sub.vendor_state,
+                sub.delivered_at,
+                sub.delivery_status,
+                sub.delivery_leg_title,
+                sub.items
+            FROM (
+                SELECT
+                    oft.id::text AS tracking_id,
+                    o.id AS order_id,
 
-                 UNION ALL
+                    COALESCE(
+                        o.order_reference,
+                        substring(o.id::text, 1, 8)
+                    ) AS order_reference,
 
-                 SELECT orp.id::text as tracking_id,
-                        o.id as order_id,
-                        COALESCE(o.order_reference, substring(o.id::text, 1, 8)) as order_reference,
-                        COALESCE(o.customer_name, 'Valued Customer') as customer_name,
-                        o.address_line, o.city, o.state, o.pincode,
-                        COALESCE(v.company_name, 'Partner Vendor') as vendor_name,
-                        o.vendor_city, o.vendor_state,
-                        COALESCE(orp.actual_arrival, orp.updated_at, orp.created_at) as delivered_at,
-                        'received' as delivery_status,
-                        'Vendor ➔ Fulfillment Center Hub' as delivery_leg_title,
-                        (
-                            SELECT json_agg(json_build_object('name', p.name, 'quantity', oi.quantity))
-                            FROM order_items oi
-                            JOIN products p ON oi.product_id = p.id
-                            WHERE oi.order_id = o.id
-                        ) as items
-                 FROM order_route_plan orp
-                 JOIN orders o ON orp.order_id = o.id
-                 LEFT JOIN vendors v ON o.vendor_id = v.id
-                 WHERE orp.pickup_rider_id = $1
-                   AND NOT EXISTS (
-                       SELECT 1 FROM order_fulfillment_tracking oft2 
-                       WHERE oft2.order_id = o.id AND oft2.delivery_agent_id = $1 AND oft2.status = 'received'
-                   )
-             ) sub
-             ORDER BY sub.delivered_at DESC`,
+                    COALESCE(
+                        o.customer_name,
+                        'Valued Customer'
+                    ) AS customer_name,
+
+                    o.address_line,
+                    o.city,
+                    o.state,
+                    o.pincode,
+
+                    COALESCE(
+                        v.company_name,
+                        'Partner Vendor'
+                    ) AS vendor_name,
+
+                    o.vendor_city,
+                    o.vendor_state,
+
+                    oft.created_at AS delivered_at,
+                    oft.status AS delivery_status,
+
+                    CASE
+                        WHEN oft.status = 'received'
+                            THEN 'Vendor ➔ Fulfillment Center Hub'
+
+                        WHEN oft.status = 'delivered'
+                            THEN 'Fulfillment Center Hub ➔ Client Dropoff'
+                    END AS delivery_leg_title,
+
+                    (
+                        SELECT json_agg(
+                            json_build_object(
+                                'name', p.name,
+                                'quantity', oi.quantity
+                            )
+                        )
+                        FROM order_items oi
+                        JOIN products p
+                            ON oi.product_id = p.id
+                        WHERE oi.order_id = o.id
+                    ) AS items,
+
+                    ROW_NUMBER() OVER (
+                        PARTITION BY oft.order_id, oft.status
+                        ORDER BY oft.created_at DESC
+                    ) AS leg_row
+
+                FROM order_fulfillment_tracking oft
+
+                JOIN orders o
+                    ON oft.order_id = o.id
+
+                LEFT JOIN vendors v
+                    ON o.vendor_id = v.id
+
+                WHERE oft.delivery_agent_id = $1
+                AND oft.status IN ('received', 'delivered')
+            ) sub
+
+            WHERE sub.leg_row = 1
+
+            ORDER BY sub.delivered_at DESC
+            `,
             [riderId]
         );
 
@@ -1808,10 +1834,10 @@ export const verifyPickupController = async (req: Request, res: Response): Promi
         if (riderRes.rows.length > 0) {
             const riderId = riderRes.rows[0].id;
             await pool.query(
-                `INSERT INTO rider_earnings (delivery_agent_id, order_id, order_reference, leg_type, amount, status)
-                 VALUES ($1, $2, $3, 'vendor_pickup', 40.00, 'credited')`,
-                [riderId, orderId, order.order_reference]
-            );
+                    `INSERT INTO rider_earnings (delivery_agent_id,order_id,order_reference,earning_type,leg_type,amount,status)
+                    VALUES ($1,$2,$3,'base','vendor_pickup',40.00,'credited')
+                    `,[riderId,orderId,order.order_reference]
+                );
         }
 
         await pool.query("COMMIT");
@@ -2201,6 +2227,7 @@ export const verifyDeliveryController = async (
                     delivery_agent_id,
                     order_id,
                     order_reference,
+                    earning_type,
                     leg_type,
                     amount,
                     status
@@ -2209,6 +2236,7 @@ export const verifyDeliveryController = async (
                     $1,
                     $2,
                     $3,
+                    'base',
                     'client_dropoff',
                     50.00,
                     'credited'
@@ -2217,7 +2245,7 @@ export const verifyDeliveryController = async (
                 [
                     riderId,
                     orderId,
-                    order.order_reference,
+                    order.order_reference
                 ]
             );
         }
@@ -2447,82 +2475,1084 @@ export const patchRiderKYCApprovalController = async (req: Request, res: Respons
     }
 };
 
-// 24. GET /api/delivery/rider/earnings (Rider Earnings Summary & Transaction History)
-export const getRiderEarningsController = async (req: Request, res: Response): Promise<Response> => {
+// GET /api/delivery/hub/rider-settlement
+// FC Hub gets rider settlement requests/history for riders belonging to this hub.
+
+export const getRiderSettlementController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
     const user = (req as any).user;
+
+    if (!user || user.role !== "fulfillment_center") {
+        return res.status(403).json({
+            message: "Unauthorized. Fulfillment Center only.",
+        });
+    }
+
+    try {
+        // ---------------------------------------------------------
+        // 1. Resolve logged-in FC hub
+        // ---------------------------------------------------------
+
+        const hub = await resolveHubDetails(user.userId);
+
+        if (!hub) {
+            return res.status(404).json({
+                message: "Fulfillment center profile not found.",
+            });
+        }
+
+        // ---------------------------------------------------------
+        // 2. Get rider settlement records
+        //
+        // One row = one rider + one settlement date.
+        //
+        // We only care about:
+        // requested -> waiting for FC payment
+        // settled   -> already paid by FC
+        // ---------------------------------------------------------
+
+        const result = await pool.query(
+            `
+            SELECT
+                da.id AS rider_id,
+                da.special_rider_id,
+                da.contact_phone,
+
+                u.name AS rider_name,
+                u.email AS rider_email,
+
+                ((re.created_at AT TIME ZONE 'Asia/Kolkata')::date)::text AS settlement_date,
+
+                COUNT(*) FILTER (
+                    WHERE re.earning_type = 'base'
+                      AND re.leg_type = 'vendor_pickup'
+                )::int AS vendor_pickups,
+
+                COUNT(*) FILTER (
+                    WHERE re.earning_type = 'base'
+                      AND re.leg_type = 'client_dropoff'
+                )::int AS client_drops,
+
+                COUNT(DISTINCT re.order_id) FILTER (
+                    WHERE re.leg_type = 'client_dropoff'
+                      AND re.order_id IS NOT NULL
+                )::int AS total_deliveries,
+
+                COALESCE(
+                    SUM(re.amount) FILTER (
+                        WHERE re.earning_type = 'base'
+                          AND re.leg_type = 'vendor_pickup'
+                    ),
+                    0
+                )::numeric(12,2) AS pickup_earnings,
+
+                COALESCE(
+                    SUM(re.amount) FILTER (
+                        WHERE re.earning_type = 'base'
+                          AND re.leg_type = 'client_dropoff'
+                    ),
+                    0
+                )::numeric(12,2) AS drop_earnings,
+
+                COALESCE(
+                    SUM(re.amount) FILTER (
+                        WHERE re.earning_type = 'incentive'
+                    ),
+                    0
+                )::numeric(12,2) AS incentive_earnings,
+
+                COALESCE(
+                    SUM(re.amount),
+                    0
+                )::numeric(12,2) AS total_amount,
+
+                CASE
+                    WHEN COUNT(*) FILTER (
+                        WHERE re.status = 'requested'
+                    ) > 0
+                    THEN 'requested'
+
+                    ELSE 'settled'
+                END AS settlement_status,
+
+                MAX(
+                    CASE
+                        WHEN re.status = 'requested'
+                        THEN re.created_at
+                    END
+                ) AS requested_at,
+
+                MAX(
+                    CASE
+                        WHEN re.status = 'settled'
+                        THEN re.created_at
+                    END
+                ) AS settled_at,
+
+                MAX(k.bank_name) AS bank_name,
+                MAX(k.account_number) AS account_number,
+                MAX(k.ifsc_code) AS ifsc_code,
+                MAX(k.account_holder_name) AS account_holder_name
+
+            FROM rider_earnings re
+
+            JOIN delivery_agents da
+                ON da.id = re.delivery_agent_id
+
+            JOIN users u
+                ON u.id = da.user_id
+
+            LEFT JOIN delivery_agent_kyc k
+                ON k.delivery_agent_id = da.id
+
+            WHERE da.fulfillment_center_id = $1
+              AND da.status != 'deleted'
+              AND re.status IN ('requested', 'settled')
+
+            GROUP BY
+                da.id,
+                da.special_rider_id,
+                da.contact_phone,
+                u.name,
+                u.email,
+                (re.created_at AT TIME ZONE 'Asia/Kolkata')::date
+
+            ORDER BY
+                (re.created_at AT TIME ZONE 'Asia/Kolkata')::date DESC,
+                u.name ASC
+            `,
+            [hub.id]
+        );
+
+        // ---------------------------------------------------------
+        // 3. Convert DB rows into frontend response shape
+        // ---------------------------------------------------------
+
+        const settlements = result.rows.map((row: any) => ({
+            riderId: row.rider_id,
+            specialRiderId: row.special_rider_id,
+            riderName: row.rider_name,
+            riderPhone: row.contact_phone || null,
+
+            date: row.settlement_date,
+
+            vendorPickups: Number(row.vendor_pickups || 0),
+            clientDrops: Number(row.client_drops || 0),
+            totalDeliveries: Number(row.total_deliveries || 0),
+
+            pickupEarnings: Number(row.pickup_earnings || 0),
+            dropEarnings: Number(row.drop_earnings || 0),
+            incentiveEarnings: Number(
+                row.incentive_earnings || 0
+            ),
+
+            totalAmount: Number(row.total_amount || 0),
+
+            status:
+                row.settlement_status === "settled"
+                    ? "settled"
+                    : "requested",
+
+            /*
+             * IMPORTANT:
+             * rider_earnings currently stores created_at for the
+             * earning itself, not the exact request/settlement time.
+             *
+             * These values are therefore only approximate based
+             * on the earning record timestamp.
+             */
+            requestedAt: row.requested_at || null,
+            settledAt: row.settled_at || null,
+
+            bankDetails: {
+                bankName: row.bank_name || null,
+                accountNumber: row.account_number || null,
+                ifscCode: row.ifsc_code || null,
+                accountHolderName:
+                    row.account_holder_name || null,
+            },
+        }));
+
+        // ---------------------------------------------------------
+        // 4. Summary
+        // ---------------------------------------------------------
+
+        const requested = settlements.filter(
+            (item: any) => item.status === "requested"
+        );
+
+        const settled = settlements.filter(
+            (item: any) => item.status === "settled"
+        );
+
+        const requestedAmount = requested.reduce(
+            (sum: number, item: any) =>
+                sum + Number(item.totalAmount || 0),
+            0
+        );
+
+        const settledAmount = settled.reduce(
+            (sum: number, item: any) =>
+                sum + Number(item.totalAmount || 0),
+            0
+        );
+
+        // ---------------------------------------------------------
+        // 5. Response
+        // ---------------------------------------------------------
+
+        return res.status(200).json({
+            message: "Rider settlements retrieved successfully.",
+            data: settlements,
+            summary: {
+                requestedCount: requested.length,
+                requestedAmount: Number(
+                    requestedAmount.toFixed(2)
+                ),
+
+                settledCount: settled.length,
+                settledAmount: Number(
+                    settledAmount.toFixed(2)
+                ),
+            },
+        });
+
+    } catch (error) {
+        console.error(
+            "Error fetching rider settlements:",
+            error
+        );
+
+        return res.status(500).json({
+            message: "Internal server error.",
+        });
+    }
+};
+
+// 24. GET /api/delivery/rider/earnings
+// Rider Earnings Summary + Incentive + Settlement Status
+
+export const getRiderEarningsController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+
     if (!user || user.role !== "delivery_agent") {
-        return res.status(403).json({ message: "Unauthorized. Delivery agents only." });
+        return res.status(403).json({
+            message: "Unauthorized. Delivery agents only.",
+        });
     }
 
     try {
         const riderRes = await pool.query(
-            `SELECT da.id, k.bank_name, k.account_number, k.ifsc_code, k.account_holder_name
-             FROM delivery_agents da
-             LEFT JOIN delivery_agent_kyc k ON da.id = k.delivery_agent_id
-             WHERE da.user_id = $1`,
+            `
+            SELECT
+                da.id,
+                k.bank_name,
+                k.account_number,
+                k.ifsc_code,
+                k.account_holder_name
+            FROM delivery_agents da
+            LEFT JOIN delivery_agent_kyc k
+                ON da.id = k.delivery_agent_id
+            WHERE da.user_id = $1
+            `,
             [user.userId]
         );
 
         if (riderRes.rows.length === 0) {
-            return res.status(404).json({ message: "Rider profile not found." });
+            return res.status(404).json({
+                message: "Rider profile not found.",
+            });
         }
+
         const rider = riderRes.rows[0];
 
-        // Total lifetime earnings
-        const totalRes = await pool.query(
-            `SELECT COALESCE(SUM(amount), 0)::numeric(10,2) as total_earnings
-             FROM rider_earnings 
-             WHERE delivery_agent_id = $1`,
+        const lifetimeRes = await pool.query(
+            `
+            SELECT
+                COALESCE(SUM(amount), 0)::numeric(12,2)
+                    AS total_earnings
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+            `,
             [rider.id]
         );
 
-        // Today's earnings
         const todayRes = await pool.query(
-            `SELECT COALESCE(SUM(amount), 0)::numeric(10,2) as today_earnings
-             FROM rider_earnings 
-             WHERE delivery_agent_id = $1 AND created_at >= CURRENT_DATE`,
+            `
+            SELECT
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE earning_type = 'base'
+                    ),
+                    0
+                )::numeric(12,2) AS base_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE earning_type = 'incentive'
+                    ),
+                    0
+                )::numeric(12,2) AS incentive_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE earning_type = 'base'
+                        AND leg_type = 'vendor_pickup'
+                    ),
+                    0
+                )::numeric(12,2) AS pickup_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE earning_type = 'base'
+                        AND leg_type = 'client_dropoff'
+                    ),
+                    0
+                )::numeric(12,2) AS drop_earnings,
+
+                COALESCE(
+                    SUM(amount),
+                    0
+                )::numeric(12,2) AS total_earnings,
+
+                COUNT(*) FILTER (
+                    WHERE leg_type = 'vendor_pickup'
+                )::int AS total_pickups,
+
+                COUNT(*) FILTER (
+                    WHERE leg_type = 'client_dropoff'
+                )::int AS total_drops
+
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+            AND created_at >= (
+                (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            AND created_at < (
+                ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            `,
             [rider.id]
         );
 
-        // Leg Counts
-        const legCountsRes = await pool.query(
-            `SELECT 
-                COUNT(*) FILTER (WHERE leg_type = 'vendor_pickup')::int as total_pickups,
-                COUNT(*) FILTER (WHERE leg_type = 'client_dropoff')::int as total_drops
-             FROM rider_earnings 
-             WHERE delivery_agent_id = $1`,
+        const today = todayRes.rows[0];
+
+        const completedOrdersRes = await pool.query(
+            `
+                SELECT
+                    COUNT(DISTINCT (order_id, leg_type))::int AS completed_orders
+                FROM rider_earnings
+                WHERE delivery_agent_id = $1
+                AND earning_type = 'base'
+                AND leg_type IN ('vendor_pickup', 'client_dropoff')
+                AND created_at >= (
+                        (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                )
+                AND created_at < (
+                        ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                )
+            `,
             [rider.id]
         );
 
-        // Transaction history (latest 50)
+        const completedOrders =
+            Number(
+                completedOrdersRes.rows[0]?.completed_orders || 0
+            );
+
+        const incentiveRes = await pool.query(
+            `
+            SELECT
+                target_orders,
+                amount
+            FROM rider_incentives
+            WHERE active = TRUE
+              AND target_orders <= $1
+            ORDER BY target_orders DESC
+            LIMIT 1
+            `,
+            [completedOrders]
+        );
+
+        const eligibleIncentive =
+            incentiveRes.rows.length > 0
+                ? Number(incentiveRes.rows[0].amount)
+                : 0;
+
+        const incentiveTarget =
+            incentiveRes.rows.length > 0
+                ? Number(incentiveRes.rows[0].target_orders)
+                : null;
+
+        const creditedIncentiveRes = await pool.query(
+            `
+            SELECT
+                COALESCE(SUM(amount), 0)::numeric(12,2)
+                    AS credited_incentive
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+              AND earning_type = 'incentive'
+                AND created_at >= (
+                    (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+                )
+                AND created_at < (
+                    ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+                )
+            `,
+            [rider.id]
+        );
+
+        const creditedIncentive =
+            Number(
+                creditedIncentiveRes.rows[0]?.credited_incentive || 0
+            );
+
+        const settlementRes = await pool.query(
+            `
+            SELECT
+                CASE
+                    WHEN COUNT(*) = 0
+                        THEN 'pending'
+
+                    WHEN COUNT(*) FILTER (
+                        WHERE status = 'credited'
+                    ) > 0
+                        THEN 'pending'
+
+                    WHEN COUNT(*) FILTER (
+                        WHERE status = 'requested'
+                    ) > 0
+                        THEN 'requested'
+
+                    ELSE 'settled'
+                END AS settlement_status,
+
+                MAX(
+                    CASE
+                        WHEN status = 'settled'
+                        THEN created_at
+                    END
+                ) AS settled_at
+
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+            AND created_at >= (
+                (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            AND created_at < (
+                ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            `,
+            [rider.id]
+        );
+
+        // ---------------------------------------------------------
+        // 8. Day-wise earnings
+        // ---------------------------------------------------------
+
+        const daysRes = await pool.query(
+            `
+            SELECT
+                (created_at AT TIME ZONE 'Asia/Kolkata')::date AS date,
+
+                COALESCE(
+                    SUM(amount),
+                    0
+                )::numeric(12,2) AS total_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE leg_type = 'vendor_pickup'
+                    ),
+                    0
+                )::numeric(12,2) AS pickup_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE leg_type = 'client_dropoff'
+                    ),
+                    0
+                )::numeric(12,2) AS drop_earnings,
+
+                COALESCE(
+                    SUM(amount) FILTER (
+                        WHERE earning_type = 'incentive'
+                    ),
+                    0
+                )::numeric(12,2) AS incentive_earnings,
+
+                COUNT(*) FILTER (
+                    WHERE leg_type = 'vendor_pickup'
+                )::int AS vendor_pickups,
+
+                COUNT(*) FILTER (
+                    WHERE leg_type = 'client_dropoff'
+                )::int AS client_drops,
+
+                COUNT(DISTINCT order_id) FILTER (
+                    WHERE leg_type = 'client_dropoff'
+                )::int AS total_deliveries
+
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+
+            GROUP BY (created_at AT TIME ZONE 'Asia/Kolkata')::date
+
+            ORDER BY (created_at AT TIME ZONE 'Asia/Kolkata')::date DESC
+
+            LIMIT 30
+            `,
+            [rider.id]
+        );
+
+        // ---------------------------------------------------------
+        // 9. Transaction history
+        // ---------------------------------------------------------
+
         const historyRes = await pool.query(
-            `SELECT id, order_id, order_reference, leg_type, amount, status, created_at
-             FROM rider_earnings 
-             WHERE delivery_agent_id = $1 
-             ORDER BY created_at DESC 
-             LIMIT 50`,
+            `
+            SELECT
+                id,
+                order_id,
+                order_reference,
+                earning_type,
+                leg_type,
+                amount,
+                status,
+                created_at
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+            ORDER BY created_at DESC
+            LIMIT 50
+            `,
             [rider.id]
         );
+
+        // ---------------------------------------------------------
+        // 10. Response
+        // ---------------------------------------------------------
 
         return res.status(200).json({
             message: "Earnings summary retrieved successfully",
+
             data: {
-                totalEarnings: parseFloat(totalRes.rows[0].total_earnings || '0'),
-                todayEarnings: parseFloat(todayRes.rows[0].today_earnings || '0'),
-                totalPickups: legCountsRes.rows[0].total_pickups || 0,
-                totalDrops: legCountsRes.rows[0].total_drops || 0,
-                bankDetails: {
-                    bankName: rider.bank_name || null,
-                    accountNumber: rider.account_number || null,
-                    ifscCode: rider.ifsc_code || null,
-                    accountHolderName: rider.account_holder_name || null,
+                today: {
+                    date: new Date().toLocaleDateString("en-CA", {timeZone: "Asia/Kolkata",}),
+
+                    totalDeliveries: completedOrders,
+
+                    vendorPickups:
+                        Number(today.total_pickups || 0),
+
+                    clientDrops:
+                        Number(today.total_drops || 0),
+
+                    pickupEarnings:
+                        Number(today.pickup_earnings || 0),
+
+                    dropEarnings:
+                        Number(today.drop_earnings || 0),
+
+                    baseEarnings:
+                        Number(today.base_earnings || 0),
+
+                    incentiveEarnings:
+                        Number(today.incentive_earnings || 0),
+
+                    totalEarnings:
+                        Number(today.total_earnings || 0),
+
+                    incentive: {
+                        completedOrders,
+
+                        targetOrders: incentiveTarget,
+
+                        eligibleAmount: eligibleIncentive,
+
+                        creditedAmount: creditedIncentive,
+
+                        pendingAmount: Math.max(
+                            eligibleIncentive -
+                                creditedIncentive,
+                            0
+                        ),
+                    },
+
+                    settlementStatus:
+                        settlementRes.rows[0]
+                            ?.settlement_status || "pending",
+
+                    settledAt:
+                        settlementRes.rows[0]
+                            ?.settled_at || null,
                 },
-                history: historyRes.rows
-            }
+
+                lifetime: {
+                    totalEarnings:
+                        Number(
+                            lifetimeRes.rows[0]
+                                ?.total_earnings || 0
+                        ),
+                },
+
+                bankDetails: {
+                    bankName:
+                        rider.bank_name || null,
+
+                    accountNumber:
+                        rider.account_number || null,
+
+                    ifscCode:
+                        rider.ifsc_code || null,
+
+                    accountHolderName:
+                        rider.account_holder_name || null,
+                },
+
+                days: daysRes.rows,
+
+                history: historyRes.rows,
+            },
         });
+
     } catch (error) {
-        console.error("Error fetching rider earnings:", error);
-        return res.status(500).json({ message: "Internal server error" });
+        console.error(
+            "Error fetching rider earnings:",
+            error
+        );
+
+        return res.status(500).json({
+            message: "Internal server error",
+        });
+    }
+};
+
+// POST /api/delivery/rider/earnings/settle
+// Rider requests settlement for today's earnings.
+
+export const requestRiderSettlementController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+
+    if (!user || user.role !== "delivery_agent") {
+        return res.status(403).json({
+            message: "Unauthorized. Delivery agents only.",
+        });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        await client.query("BEGIN");
+
+        // ---------------------------------------------------------
+        // 1. Resolve rider
+        // ---------------------------------------------------------
+
+        const riderRes = await client.query(
+            `
+            SELECT id
+            FROM delivery_agents
+            WHERE user_id = $1
+              AND status = 'active'
+            FOR UPDATE
+            `,
+            [user.userId]
+        );
+
+        if (riderRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(404).json({
+                message: "Active Rider profile not found.",
+            });
+        }
+
+        const riderId = riderRes.rows[0].id;
+
+        // ---------------------------------------------------------
+        // 2. Check if today's settlement is already requested
+        // ---------------------------------------------------------
+
+        const requestedRes = await client.query(
+            `
+            SELECT
+                COALESCE(SUM(amount), 0)::numeric(12,2)
+                    AS requested_amount
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+            AND status IN ('requested', 'settled')
+            AND created_at >= (
+                (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            AND created_at < (
+                ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                AT TIME ZONE 'Asia/Kolkata'
+            )
+            `,
+            [riderId]
+        );
+
+        const requestedAmount = Number(
+            requestedRes.rows[0]?.requested_amount || 0
+        );
+
+        if (requestedAmount > 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                message: "Today's settlement has already been requested.",
+                data: {
+                    status: "requested",
+                    amount: requestedAmount,
+                },
+            });
+        }
+
+        const completedRes = await client.query(
+            `
+            SELECT
+                COUNT(DISTINCT order_id)::int AS completed_orders
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+              AND leg_type IN ('vendor_pickup', 'client_dropoff')
+              AND created_at >= (
+                        (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+
+                    AND created_at < (
+                        ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+            `,
+            [riderId]
+        );
+
+        const completedOrders = Number(
+            completedRes.rows[0]?.completed_orders || 0
+        );
+
+        const incentiveRes = await client.query(
+            `
+            SELECT
+                target_orders,
+                amount
+            FROM rider_incentives
+            WHERE active = TRUE
+              AND target_orders <= $1
+            ORDER BY target_orders DESC
+            LIMIT 1
+            `,
+            [completedOrders]
+        );
+
+        const eligibleIncentive =
+            incentiveRes.rows.length > 0
+                ? Number(incentiveRes.rows[0].amount)
+                : 0;
+
+        const existingIncentiveRes = await client.query(
+            `
+            SELECT
+                COALESCE(SUM(amount), 0)::numeric(12,2)
+                    AS incentive_amount
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+              AND earning_type = 'incentive'
+              AND created_at >= (
+                        (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+
+                    AND created_at < (
+                        ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+            `,
+            [riderId]
+        );
+
+        const existingIncentive = Number(
+            existingIncentiveRes.rows[0]?.incentive_amount || 0
+        );
+
+        if (
+            eligibleIncentive > 0 &&
+            existingIncentive === 0
+        ) {
+            await client.query(
+                `
+                INSERT INTO rider_earnings (
+                    delivery_agent_id,
+                    order_id,
+                    order_reference,
+                    earning_type,
+                    leg_type,
+                    amount,
+                    status
+                )
+                VALUES (
+                    $1,
+                    NULL,
+                    NULL,
+                    'incentive',
+                    'incentive',
+                    $2,
+                    'credited'
+                )
+                `,
+                [
+                    riderId,
+                    eligibleIncentive,
+                ]
+            );
+        }
+
+        const payableRes = await client.query(
+            `
+            SELECT
+                COALESCE(SUM(amount), 0)::numeric(12,2)
+                    AS total_amount
+            FROM rider_earnings
+            WHERE delivery_agent_id = $1
+              AND created_at >= (
+                        (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+
+                    AND created_at < (
+                        ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                        AT TIME ZONE 'Asia/Kolkata'
+                    )
+              AND status = 'credited'
+            `,
+            [riderId]
+        );
+
+        const totalAmount = Number(
+            payableRes.rows[0]?.total_amount || 0
+        );
+
+        if (totalAmount <= 0) {
+            await client.query("ROLLBACK");
+
+            return res.status(400).json({
+                message: "No earnings available for settlement.",
+            });
+        }
+
+        await client.query(
+            `
+            UPDATE rider_earnings
+            SET status = 'requested'
+            WHERE delivery_agent_id = $1
+              AND created_at >= (
+                    (NOW() AT TIME ZONE 'Asia/Kolkata')::date::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+                )
+
+                AND created_at < (
+                    ((NOW() AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+                )
+              AND status = 'credited'
+            `,
+            [riderId]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(200).json({
+            message: "Settlement requested successfully.",
+            data: {
+                date: new Date().toLocaleDateString("en-CA", {timeZone: "Asia/Kolkata",}),
+
+                completedOrders,
+
+                incentive: eligibleIncentive,
+
+                totalAmount,
+
+                status: "requested",
+            },
+        });
+
+    } catch (error) {
+        await client.query("ROLLBACK");
+
+        console.error(
+            "Error requesting rider settlement:",
+            error
+        );
+
+        return res.status(500).json({
+            message: "Internal server error.",
+        });
+    } finally {
+        client.release();
+    }
+};
+
+// POST /api/delivery/hub/riders/:riderId/settle
+// FC Hub settles the rider's requested earnings.
+
+export const settleRiderEarningsController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
+    const user = (req as any).user;
+    const { riderId } = req.params;
+    const { date } = req.body;
+
+    if (!user || user.role !== "fulfillment_center") {
+        return res.status(403).json({
+            message: "Unauthorized. Fulfillment Center only.",
+        });
+    }
+
+    if (!riderId) {
+        return res.status(400).json({
+            message: "Rider ID is required.",
+        });
+    }
+
+    if (!date) {
+        return res.status(400).json({
+            message: "Settlement date is required.",
+        });
+    }
+
+    // Settlement date must ALWAYS be YYYY-MM-DD.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+        return res.status(400).json({
+            message: "Settlement date must be in YYYY-MM-DD format.",
+        });
+    }
+
+    try {
+        const hub = await resolveHubDetails(user.userId);
+
+        if (!hub) {
+            return res.status(404).json({
+                message: "Fulfillment center profile not found.",
+            });
+        }
+
+        const riderRes = await pool.query(
+            `
+            SELECT
+                da.id,
+                da.special_rider_id,
+                da.fulfillment_center_id,
+                u.name AS rider_name
+            FROM delivery_agents da
+            JOIN users u
+                ON da.user_id = u.id
+            WHERE da.id = $1
+              AND da.fulfillment_center_id = $2
+              AND da.status != 'deleted'
+            `,
+            [riderId, hub.id]
+        );
+
+        if (riderRes.rows.length === 0) {
+            return res.status(404).json({
+                message:
+                    "Rider not found under your fulfillment center.",
+            });
+        }
+
+        const rider = riderRes.rows[0];
+
+        const settledRes = await pool.query(
+            `
+            UPDATE rider_earnings re
+            SET status = 'settled'
+            WHERE re.delivery_agent_id = $1
+
+              AND re.created_at >= (
+                    $2::date::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+              )
+
+              AND re.created_at < (
+                    ($2::date + INTERVAL '1 day')::timestamp
+                    AT TIME ZONE 'Asia/Kolkata'
+              )
+
+              AND re.status = 'requested'
+
+            RETURNING
+                re.id,
+                re.amount,
+                re.earning_type,
+                re.leg_type,
+                re.order_id
+            `,
+            [rider.id, date]
+        );
+
+        if (settledRes.rows.length === 0) {
+            return res.status(400).json({
+                message:
+                    "No requested earnings available for settlement.",
+                data: {
+                    riderId: rider.id,
+                    date,
+                    amount: 0,
+                    status: "pending",
+                },
+            });
+        }
+
+        const settledAmount = settledRes.rows.reduce(
+            (total: number, row: any) =>
+                total + Number(row.amount || 0),
+            0
+        );
+
+        return res.status(200).json({
+            message: "Rider payment settled successfully.",
+            data: {
+                riderId: rider.id,
+                specialRiderId: rider.special_rider_id,
+                riderName: rider.rider_name,
+                hubId: hub.id,
+                date,
+                settledAmount: Number(
+                    settledAmount.toFixed(2)
+                ),
+                earningCount: settledRes.rows.length,
+                status: "settled",
+            },
+        });
+
+    } catch (error) {
+        console.error(
+            "Error settling rider earnings:",
+            error
+        );
+
+        return res.status(500).json({
+            message: "Internal server error.",
+        });
     }
 };
 
@@ -2749,10 +3779,6 @@ export const getCodQrStatusController = async (
                 message: "Order not found or not assigned to you.",
             });
         }
-
-        // ---------------------------------------------------------
-        // First: check whether direct COD UPI was already successful
-        // ---------------------------------------------------------
         const successfulPaymentQ = await pool.query(
             `
             SELECT
@@ -2779,10 +3805,6 @@ export const getCodQrStatusController = async (
                 },
             });
         }
-
-        // ---------------------------------------------------------
-        // Then check active pending payment link
-        // ---------------------------------------------------------
         const paymentQ = await pool.query(
             `
             SELECT
@@ -2893,9 +3915,6 @@ export const createQuotationDeliveryPaymentQrController = async (
     }
 
     try {
-        // ---------------------------------------------------------
-        // 1. Verify order belongs to this rider and is handed over
-        // ---------------------------------------------------------
         const orderQ = await pool.query(
             `
             SELECT
@@ -2970,9 +3989,6 @@ export const createQuotationDeliveryPaymentQrController = async (
             });
         }
 
-        // ---------------------------------------------------------
-        // 2. Make sure token payment was already completed
-        // ---------------------------------------------------------
         const tokenPaymentQ = await pool.query(
             `
             SELECT
@@ -3265,7 +4281,6 @@ export const createQuotationDeliveryPaymentQrController = async (
 
 // GET /api/delivery/rider/quotation-payment/:orderId/status
 
-// GET /api/delivery/rider/quotation-payment/:orderId/status
 export const getQuotationDeliveryPaymentStatusController = async (
     req: Request,
     res: Response

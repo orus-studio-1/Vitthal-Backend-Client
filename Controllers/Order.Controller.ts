@@ -635,6 +635,7 @@ export const saveOrderDispatchDetailsController = async (req: Request, res: Resp
     const challan = files.delivery_challan?.[0];
     const invoice = files.invoice?.[0];
     const lrDoc = files.lr_document?.[0];
+    
 
     const clean = (v: unknown) => (String(v ?? "").trim() || null);
     const lrNumber = clean(req.body.lr_number);

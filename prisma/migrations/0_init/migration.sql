@@ -3604,4 +3604,3 @@ ALTER TABLE ONLY public.wishlist_items
 --
 -- PostgreSQL database dump complete
 --
-

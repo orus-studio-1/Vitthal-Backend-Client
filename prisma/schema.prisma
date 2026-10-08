@@ -751,6 +751,7 @@ model rider_earnings {
   delivery_agent_id String          @db.Uuid
   order_id          String?         @db.Uuid
   order_reference   String?         @db.VarChar(100)
+  earning_type      String          @default("base") @db.VarChar(30)
   leg_type          String          @db.VarChar(50)
   amount            Decimal         @db.Decimal(10, 2)
   status            String          @default("credited") @db.VarChar(50)
@@ -759,6 +760,23 @@ model rider_earnings {
   orders            orders?         @relation(fields: [order_id], references: [id], onUpdate: NoAction)
 
   @@index([delivery_agent_id], map: "idx_rider_earnings_rider")
+  @@index([delivery_agent_id, created_at])
+  @@index([delivery_agent_id, status])
+}
+
+model rider_incentives {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  target_orders  Int
+  amount         Decimal  @db.Decimal(10, 2)
+
+  active         Boolean  @default(true)
+
+  created_at     DateTime @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime @updatedAt @db.Timestamptz(6)
+
+  @@unique([target_orders])
+  @@map("rider_incentives")
 }
 
 model schema_migrations {

@@ -112,7 +112,7 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                         pc.image
                     ) AS image_url
                  FROM services s
-                 LEFT JOIN product_category pc ON pc.id = s.category_id
+                 LEFT JOIN service_categories pc ON pc.id = s.category_id
                  LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
                  LEFT JOIN vendor_services vs ON vs.service_id = s.id AND vs.is_active = true AND EXISTS (
                      SELECT 1 FROM vendors v
@@ -184,7 +184,7 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                 pc.image AS category_image,
                 ss.name AS subcategory_name
              FROM services s
-             LEFT JOIN product_category pc ON pc.id = s.category_id
+             LEFT JOIN service_categories pc ON pc.id = s.category_id
              LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
              WHERE s.id = $1 AND s.status = 'approved'
              LIMIT 1`,
@@ -661,7 +661,7 @@ export const getMyServiceQuotationsController = async (req: Request, res: Respon
                 COALESCE(
                     (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
                     (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
-                    (SELECT pc.image FROM product_category pc WHERE pc.id = s.category_id LIMIT 1)
+                    (SELECT pc.image FROM service_categories pc WHERE pc.id = s.category_id LIMIT 1)
                 ) AS service_image
              FROM service_quotations sq
              JOIN services s ON s.id = sq.service_id
@@ -734,10 +734,14 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
             const ticketResult = await pool.query(
                 `SELECT st.*, u.name AS client_name, u.email AS client_email,
                         pc.label AS category_name, pc.code AS category_code,
+                        service_sub.name AS service_subcategory_name,
+                        service_child.name AS service_sub_subcategory_name,
                         v.company_name AS vendor_name
                  FROM service_tickets st
                  JOIN users u ON u.id = st.client_user_id
-                 LEFT JOIN product_category pc ON pc.id = st.category_id
+                 LEFT JOIN service_categories pc ON pc.id = st.category_id
+                 LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
+                 LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
                  LEFT JOIN vendors v ON v.id = st.vendor_id
                  WHERE st.id = $1 ${isClient ? "AND st.client_user_id = $2" : ""}`,
                 isClient ? [id, authUser.userId] : [id]
@@ -749,6 +753,10 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                     `SELECT * FROM service_ticket_documents WHERE ticket_id = $1`,
                     [id]
                 );
+                const ticketDocuments = await Promise.all(docsResult.rows.map(async (document: any) => ({
+                    ...document,
+                    doc_url: await getPresignedUrlOrOriginal(document.doc_url),
+                })));
 
                 // Fetch quotes submitted for this ticket (if vendor, only fetch quotes from this vendor to maintain privacy)
                 const quotesQueryParams = isVendor ? [id, vendorId] : [id];
@@ -767,6 +775,7 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                     action: "offer" as const,
                     offer_price: String(q.total_price),
                     note: q.quote_breakdown?.notes || `Quotation submitted by ${q.vendor_name}`,
+                    quote_breakdown: q.quote_breakdown || {},
                     reason: null,
                     created_at: q.created_at,
                     sender_name: q.vendor_name,
@@ -774,6 +783,7 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
 
                 const scopeOfWork =
                     t.ticket_payload?.symptoms ||
+                    t.ticket_payload?.problem_description ||
                     t.ticket_payload?.technical_notes ||
                     t.ticket_payload?.cargo_type ||
                     t.ticket_payload?.job_title ||
@@ -791,6 +801,7 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                                 action: "reject" as any,
                                 offer_price: null as any,
                                 note: "Client has accepted another offer. The ticket room is closed.",
+                                quote_breakdown: {},
                                 reason: null as any,
                                 created_at: t.updated_at || t.created_at,
                                 sender_name: "System",
@@ -807,6 +818,7 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                                 action: "reject" as any,
                                 offer_price: null as any,
                                 note: "Client has accepted another offer. The ticket room is closed.",
+                                quote_breakdown: {},
                                 reason: null as any,
                                 created_at: t.updated_at || t.created_at,
                                 sender_name: "System",
@@ -837,6 +849,10 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                     user_id: t.client_user_id,
                     vendor_id: t.vendor_id || vendorId,
                     service_name: t.category_name || "Industrial Service",
+                    subcategory_name: t.service_subcategory_name || null,
+                    sub_subcategory_name: t.service_sub_subcategory_name || null,
+                    ticket_payload: t.ticket_payload || {},
+                    documents: ticketDocuments,
                     client_name: t.client_name,
                     client_email: t.client_email,
                     base_document_url: docsResult.rows[0]?.doc_url || null,
@@ -903,7 +919,7 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
     }
 
     const { id } = req.params;
-    const { action, offerPrice, note, reason, deliveryDays, tokenPercentage } = req.body as Record<string, unknown>;
+    const { action, offerPrice, note, reason, deliveryDays, tokenPercentage, quoteBreakdown } = req.body as Record<string, unknown>;
 
     const VALID_CLIENT_ACTIONS = new Set(["counter", "accept", "reject"]);
     const VALID_VENDOR_ACTIONS = new Set(["offer", "counter", "accept", "reject"]);
@@ -983,7 +999,11 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                             id,
                             resolvedVendorId,
                             quotePrice,
-                            JSON.stringify({ notes: note || reason || "", delivery_days: deliveryDays || 7 }),
+                            JSON.stringify({
+                                ...(quoteBreakdown && typeof quoteBreakdown === "object" && !Array.isArray(quoteBreakdown) ? quoteBreakdown : {}),
+                                notes: note || reason || "",
+                                delivery_days: deliveryDays || 7,
+                            }),
                         ]
                     );
 
@@ -1629,6 +1649,7 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
                 END AS status,
                 COALESCE(
                     st.ticket_payload->>'symptoms',
+                    st.ticket_payload->>'problem_description',
                     st.ticket_payload->>'technical_notes',
                     st.ticket_payload->>'cargo_type',
                     st.ticket_payload->>'job_title',
@@ -1640,10 +1661,14 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
                 st.created_at,
                 st.updated_at,
                 COALESCE(pc.label, 'Industrial Service') AS service_name,
+                service_sub.name AS subcategory_name,
+                service_child.name AS sub_subcategory_name,
                 u.name AS client_name
              FROM service_tickets st
              JOIN users u ON u.id = st.client_user_id
-             LEFT JOIN product_category pc ON pc.id = st.category_id
+             LEFT JOIN service_categories pc ON pc.id = st.category_id
+             LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
+             LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
              WHERE (st.vendor_id = $1 OR st.vendor_id IS NULL OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1))
              ORDER BY st.updated_at DESC`,
             [vendorId]
@@ -1665,8 +1690,8 @@ export const getSubcategoriesController = async (req: Request, res: Response): P
     try {
         let query = `
             SELECT s.id, s.category_id, s.name, s.description
-            FROM subcategories s
-            JOIN product_category pc ON pc.id = s.category_id
+            FROM service_subcategories s
+            JOIN service_categories pc ON pc.id = s.category_id
             WHERE pc.is_active = TRUE
         `;
         const params: any[] = [];
@@ -1719,8 +1744,8 @@ export const adminListPendingServicesController = async (req: Request, res: Resp
                     FROM services_media sm WHERE sm.service_id = s.id
                 ), '[]'::json) AS media_gallery
              FROM services s
-             LEFT JOIN product_category pc ON pc.id = s.category_id
-             LEFT JOIN subcategories ss ON ss.id = s.subcategory_id
+             LEFT JOIN service_categories pc ON pc.id = s.category_id
+             LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
              LEFT JOIN vendor_services vs ON vs.service_id = s.id
              LEFT JOIN vendors v ON v.id = vs.vendor_id
              LEFT JOIN users u ON u.id = v.user_id
@@ -1846,7 +1871,7 @@ export const getVendorServiceOfferingsController = async (req: Request, res: Res
                 (SELECT COUNT(*) FROM service_bookings sb WHERE sb.vendor_service_id = vs.id) AS booking_count
              FROM vendor_services vs
              JOIN services s ON s.id = vs.service_id
-             LEFT JOIN product_category pc ON pc.id = s.category_id
+             LEFT JOIN service_categories pc ON pc.id = s.category_id
              WHERE vs.vendor_id = $1
              ORDER BY vs.created_at DESC`,
             [vendorId]
@@ -1891,19 +1916,19 @@ export const createServiceAndOfferingController = async (req: Request, res: Resp
         let resolvedCategoryId: string | null = null;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(categoryId).trim());
         if (isUuid) {
-            const catCheck = await client.query(`SELECT id FROM product_category WHERE id = $1`, [categoryId]);
+            const catCheck = await client.query(`SELECT id FROM service_categories WHERE id = $1`, [categoryId]);
             if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
         }
         if (!resolvedCategoryId) {
             const catCheck = await client.query(
-                `SELECT id FROM product_category WHERE LOWER(label) = LOWER($1) OR LOWER(code) = LOWER($1) LIMIT 1`,
+                `SELECT id FROM service_categories WHERE LOWER(label) = LOWER($1) OR LOWER(code) = LOWER($1) LIMIT 1`,
                 [String(categoryId).trim()]
             );
             if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
         }
         if (!resolvedCategoryId) {
             const catCheck = await client.query(
-                `SELECT id FROM product_category WHERE label ILIKE $1 OR code ILIKE $1 LIMIT 1`,
+                `SELECT id FROM service_categories WHERE label ILIKE $1 OR code ILIKE $1 LIMIT 1`,
                 [`%${String(categoryId).trim()}%`]
             );
             if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
@@ -1918,12 +1943,12 @@ export const createServiceAndOfferingController = async (req: Request, res: Resp
         if (subcategoryId) {
             const isSubUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(subcategoryId).trim());
             if (isSubUuid) {
-                const subCheck = await client.query(`SELECT id FROM subcategories WHERE id = $1`, [subcategoryId]);
+                const subCheck = await client.query(`SELECT id FROM service_subcategories WHERE id = $1`, [subcategoryId]);
                 if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;
             }
             if (!resolvedSubcategoryId) {
                 const subCheck = await client.query(
-                    `SELECT id FROM subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+                    `SELECT id FROM service_subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
                     [String(subcategoryId).trim()]
                 );
                 if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;

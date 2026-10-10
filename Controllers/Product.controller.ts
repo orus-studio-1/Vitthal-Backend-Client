@@ -2870,7 +2870,7 @@ export const getSubcategoriesController = async (req: Request, res: Response): P
         let query = `
             SELECT s.id, s.category_id, s.name, s.description, pc.code AS category_code, pc.label AS category_label
             FROM subcategories s
-            JOIN product_category pc ON pc.id = s.category_id
+            JOIN service_categories pc ON pc.id = s.category_id
             WHERE pc.is_active = TRUE
         `;
         const params: any[] = [];

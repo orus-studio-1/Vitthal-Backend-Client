@@ -445,7 +445,7 @@ export const getVendorAnalyticsController = async (req: Request, res: Response):
             FROM service_bookings sb
             JOIN vendor_services vs ON sb.vendor_service_id = vs.id
             JOIN services s ON vs.service_id = s.id
-            JOIN product_category pc ON s.category_id = pc.id
+            JOIN service_categories pc ON s.category_id = pc.id
             WHERE sb.vendor_id = $1 AND sb.status != 'cancelled' ${dateFilter}
             GROUP BY s.id, s.name, pc.label
             ORDER BY total_sales DESC

@@ -17,23 +17,36 @@ function getAuthUser(req: Request): AuthUser | null {
 export const getServiceCategoriesWithSchema = async (_req: Request, res: Response): Promise<Response> => {
     try {
         const categoriesResult = await pool.query(
-            `SELECT pc.id, pc.code, pc.label, pc.description, pc.image,
-                    pc.category_type, pc.sort_order,
+            `SELECT sc.id, sc.code, sc.label, sc.description, sc.image,
+                    'service'::text AS category_type, sc.sort_order,
                     COALESCE(
-                        json_agg(
-                            json_build_object(
-                                'id', s.id,
-                                'name', s.name,
-                                'description', s.description,
-                                'form_schema', COALESCE(s.form_schema, '[]'::jsonb)
+                        (
+                            SELECT json_agg(
+                                json_build_object(
+                                    'id', root.id,
+                                    'name', root.name,
+                                    'description', root.description,
+                                    'form_schema', COALESCE(root.form_schema, '[]'::jsonb),
+                                    'children', COALESCE((
+                                        SELECT json_agg(json_build_object(
+                                            'id', child.id,
+                                            'name', child.name,
+                                            'description', child.description,
+                                            'form_schema', COALESCE(child.form_schema, '[]'::jsonb),
+                                            'children', '[]'::json
+                                        ) ORDER BY child.name)
+                                        FROM service_subcategories child
+                                        WHERE child.parent_id = root.id
+                                    ), '[]'::json)
+                                ) ORDER BY root.name
                             )
-                        ) FILTER (WHERE s.id IS NOT NULL), '[]'
+                            FROM service_subcategories root
+                            WHERE root.category_id = sc.id AND root.parent_id IS NULL
+                        ), '[]'::json
                     ) AS subcategories
-             FROM product_category pc
-             LEFT JOIN subcategories s ON s.category_id = pc.id
-             WHERE pc.category_type = 'service' AND pc.is_active = true
-             GROUP BY pc.id
-             ORDER BY pc.sort_order ASC, pc.label ASC`
+             FROM service_categories sc
+             WHERE sc.is_active = true
+             ORDER BY sc.sort_order ASC, sc.label ASC`
         );
 
         const rows = await Promise.all(
@@ -62,10 +75,14 @@ export const getMyAssets = async (req: Request, res: Response): Promise<Response
 
     try {
         const result = await pool.query(
-            `SELECT ca.*, pc.label AS category_name, s.name AS subcategory_name
+            `SELECT ca.*, COALESCE(sc.label, pc.label) AS category_name,
+                    sc.label AS service_category_name, s.name AS subcategory_name,
+                    service_sub.name AS service_subcategory_name
              FROM client_assets ca
              LEFT JOIN product_category pc ON pc.id = ca.category_id
+             LEFT JOIN service_categories sc ON sc.id = ca.service_category_id
              LEFT JOIN subcategories s ON s.id = ca.subcategory_id
+             LEFT JOIN service_subcategories service_sub ON service_sub.id = ca.service_subcategory_id
              WHERE ca.user_id = $1 AND ca.is_active = true
              ORDER BY ca.created_at DESC`,
             [authUser.userId]
@@ -84,7 +101,7 @@ export const createClientAsset = async (req: Request, res: Response): Promise<Re
 
     const {
         asset_name, asset_code, brand, model_number, serial_number,
-        installation_year, category_id, subcategory_id, specs,
+        installation_year, category_id, service_category_id, subcategory_id, service_subcategory_id, specs,
         location_details, documents,
     } = req.body;
 
@@ -95,15 +112,17 @@ export const createClientAsset = async (req: Request, res: Response): Promise<Re
     try {
         const result = await pool.query(
             `INSERT INTO client_assets
-                (user_id, category_id, subcategory_id, asset_name, asset_code,
+                (user_id, category_id, service_category_id, subcategory_id, service_subcategory_id, asset_name, asset_code,
                  brand, model_number, serial_number, installation_year,
                  specs, location_details, documents)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb)
              RETURNING *`,
             [
                 authUser.userId,
                 category_id || null,
+                service_category_id || null,
                 subcategory_id || null,
+                service_subcategory_id || null,
                 asset_name.trim(),
                 asset_code?.trim() || null,
                 brand?.trim() || null,
@@ -134,7 +153,7 @@ export const updateClientAsset = async (req: Request, res: Response): Promise<Re
     const { id } = req.params;
     const {
         asset_name, asset_code, brand, model_number, serial_number,
-        installation_year, category_id, subcategory_id, specs,
+        installation_year, category_id, service_category_id, subcategory_id, service_subcategory_id, specs,
         location_details, documents,
     } = req.body;
 
@@ -148,12 +167,14 @@ export const updateClientAsset = async (req: Request, res: Response): Promise<Re
                  serial_number = COALESCE($5, serial_number),
                  installation_year = COALESCE($6, installation_year),
                  category_id = COALESCE($7, category_id),
-                 subcategory_id = COALESCE($8, subcategory_id),
-                 specs = COALESCE($9::jsonb, specs),
-                 location_details = COALESCE($10::jsonb, location_details),
-                 documents = COALESCE($11::jsonb, documents),
+                 service_category_id = COALESCE($8, service_category_id),
+                 subcategory_id = COALESCE($9, subcategory_id),
+                 service_subcategory_id = COALESCE($10, service_subcategory_id),
+                 specs = COALESCE($11::jsonb, specs),
+                 location_details = COALESCE($12::jsonb, location_details),
+                 documents = COALESCE($13::jsonb, documents),
                  updated_at = NOW()
-             WHERE id = $12 AND user_id = $13
+             WHERE id = $14 AND user_id = $15
              RETURNING *`,
             [
                 asset_name?.trim() || null,
@@ -163,7 +184,9 @@ export const updateClientAsset = async (req: Request, res: Response): Promise<Re
                 serial_number?.trim() || null,
                 installation_year ? Number(installation_year) : null,
                 category_id || null,
+                service_category_id || null,
                 subcategory_id || null,
+                service_subcategory_id || null,
                 specs ? JSON.stringify(specs) : null,
                 location_details ? JSON.stringify(location_details) : null,
                 documents ? JSON.stringify(documents) : null,
@@ -215,7 +238,7 @@ export const createServiceTicket = async (req: Request, res: Response): Promise<
     if (!authUser) return res.status(401).json({ success: false, message: "Authentication required." });
 
     const {
-        category_id, subcategory_id, vendor_id, asset_id,
+        category_id, subcategory_id, service_subcategory_id, service_sub_subcategory_id, vendor_id, asset_id,
         priority, ticket_payload, documents,
     } = req.body;
 
@@ -224,6 +247,69 @@ export const createServiceTicket = async (req: Request, res: Response): Promise<
     }
 
     try {
+        const serviceCategory = await pool.query(
+            `SELECT sc.id,
+                    EXISTS (SELECT 1 FROM service_subcategories sub WHERE sub.category_id = sc.id AND sub.parent_id IS NULL) AS has_subcategories
+             FROM service_categories sc
+             WHERE sc.id = $1 AND sc.is_active = true LIMIT 1`,
+            [category_id]
+        );
+        if (serviceCategory.rows.length === 0) {
+            return res.status(400).json({ success: false, message: "Selected service category is unavailable." });
+        }
+
+        let resolvedLegacySubcategoryId: string | null = null;
+        let resolvedServiceSubcategoryId = service_subcategory_id || null;
+        let resolvedServiceSubSubcategoryId = service_sub_subcategory_id || null;
+
+        if (!resolvedServiceSubcategoryId && !subcategory_id && serviceCategory.rows[0].has_subcategories) {
+            return res.status(400).json({ success: false, message: "Select a service subcategory before submitting this request." });
+        }
+
+        // Older app versions send `subcategory_id`; keep accepting it while new web flows
+        // use the dedicated service taxonomy IDs.
+        if (!resolvedServiceSubcategoryId && subcategory_id) {
+            const legacySubcategory = await pool.query(
+                `SELECT id FROM subcategories WHERE id = $1 AND category_id = $2 LIMIT 1`,
+                [subcategory_id, category_id]
+            );
+            if (legacySubcategory.rows.length > 0) resolvedLegacySubcategoryId = legacySubcategory.rows[0].id;
+
+            const legacyMapping = await pool.query(
+                `SELECT id FROM service_subcategories WHERE id = $1 AND category_id = $2 AND parent_id IS NULL LIMIT 1`,
+                [subcategory_id, category_id]
+            );
+            if (legacyMapping.rows.length > 0) resolvedServiceSubcategoryId = legacyMapping.rows[0].id;
+        }
+
+        if (resolvedServiceSubcategoryId) {
+            const rootResult = await pool.query(
+                `SELECT id,
+                        EXISTS (SELECT 1 FROM service_subcategories child WHERE child.parent_id = service_subcategories.id) AS has_children
+                 FROM service_subcategories WHERE id = $1 AND category_id = $2 AND parent_id IS NULL LIMIT 1`,
+                [resolvedServiceSubcategoryId, category_id]
+            );
+            if (rootResult.rows.length === 0) {
+                return res.status(400).json({ success: false, message: "Selected service subcategory does not belong to this category." });
+            }
+            if (rootResult.rows[0].has_children && !resolvedServiceSubSubcategoryId) {
+                return res.status(400).json({ success: false, message: "Select a service sub-subcategory before submitting this request." });
+            }
+        }
+
+        if (resolvedServiceSubSubcategoryId) {
+            if (!resolvedServiceSubcategoryId) {
+                return res.status(400).json({ success: false, message: "Select a service subcategory before selecting a sub-subcategory." });
+            }
+            const childResult = await pool.query(
+                `SELECT id FROM service_subcategories WHERE id = $1 AND category_id = $2 AND parent_id = $3 LIMIT 1`,
+                [resolvedServiceSubSubcategoryId, category_id, resolvedServiceSubcategoryId]
+            );
+            if (childResult.rows.length === 0) {
+                return res.status(400).json({ success: false, message: "Selected service sub-subcategory does not belong to the selected subcategory." });
+            }
+        }
+
         // Generate friendly ticket number: SRV-YYYYMMDD-XXXX
         const prefix = "SRV";
         const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -245,20 +331,26 @@ export const createServiceTicket = async (req: Request, res: Response): Promise<
 
         const ticketResult = await pool.query(
             `INSERT INTO service_tickets
-                (ticket_number, category_id, subcategory_id, client_user_id, vendor_id,
+                (ticket_number, category_id, subcategory_id, service_subcategory_id, service_sub_subcategory_id, client_user_id, vendor_id,
                  asset_id, status, priority, ticket_payload, completion_otp, timeline_logs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11::jsonb)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb)
              RETURNING *`,
             [
                 ticketNumber,
                 category_id,
-                subcategory_id || null,
+                resolvedLegacySubcategoryId,
+                resolvedServiceSubcategoryId,
+                resolvedServiceSubSubcategoryId,
                 authUser.userId,
                 vendor_id || null,
                 asset_id || null,
                 initialStatus,
                 priority || "medium",
-                JSON.stringify(ticket_payload || {}),
+                JSON.stringify({
+                    ...(ticket_payload || {}),
+                    service_subcategory_id: resolvedServiceSubcategoryId,
+                    service_sub_subcategory_id: resolvedServiceSubSubcategoryId,
+                }),
                 completionOtp,
                 JSON.stringify(initialTimeline),
             ]
@@ -308,7 +400,7 @@ export const createServiceTicket = async (req: Request, res: Response): Promise<
                 vendorQuery += ` AND v.id = $1`;
                 vParams.push(vendor_id);
             } else if (category_id) {
-                vendorQuery += ` AND (s.category_id = $1 OR EXISTS (SELECT 1 FROM product_category pc WHERE pc.id = $1 AND pc.category_type = 'service'))`;
+                vendorQuery += ` AND (s.category_id = $1 OR EXISTS (SELECT 1 FROM service_categories sc WHERE sc.id = $1))`;
                 vParams.push(category_id);
             }
 
@@ -409,14 +501,18 @@ export const getMyServiceTickets = async (req: Request, res: Response): Promise<
 
         const result = await pool.query(
             `SELECT st.*,
-                    pc.label AS category_name,
+                    sc.label AS category_name,
                     s.name AS subcategory_name,
+                    service_sub.name AS service_subcategory_name,
+                    service_child.name AS service_sub_subcategory_name,
                     v.company_name AS vendor_name,
                     ca.asset_name, ca.brand AS asset_brand, ca.model_number AS asset_model,
                     (SELECT COUNT(*)::int FROM service_ticket_quotations stq WHERE stq.ticket_id = st.id) AS quotes_count
              FROM service_tickets st
-             LEFT JOIN product_category pc ON pc.id = st.category_id
+             LEFT JOIN service_categories sc ON sc.id = st.category_id
              LEFT JOIN subcategories s ON s.id = st.subcategory_id
+             LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
+             LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
              LEFT JOIN vendors v ON v.id = st.vendor_id
              LEFT JOIN client_assets ca ON ca.id = st.asset_id
              ${whereClause}
@@ -445,15 +541,19 @@ export const getServiceTicketDetail = async (req: Request, res: Response): Promi
     try {
         const ticketResult = await pool.query(
             `SELECT st.*,
-                    pc.label AS category_name,
+                    sc.label AS category_name,
                     s.name AS subcategory_name,
+                    service_sub.name AS service_subcategory_name,
+                    service_child.name AS service_sub_subcategory_name,
                     v.company_name AS vendor_name, v.phone AS vendor_phone,
                     ca.asset_name, ca.brand AS asset_brand, ca.model_number AS asset_model,
                     ca.serial_number AS asset_serial, ca.specs AS asset_specs,
                     agent.name AS agent_name, agent.email AS agent_email
              FROM service_tickets st
-             LEFT JOIN product_category pc ON pc.id = st.category_id
+             LEFT JOIN service_categories sc ON sc.id = st.category_id
              LEFT JOIN subcategories s ON s.id = st.subcategory_id
+             LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
+             LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
              LEFT JOIN vendors v ON v.id = st.vendor_id
              LEFT JOIN client_assets ca ON ca.id = st.asset_id
              LEFT JOIN users agent ON agent.id = st.assigned_agent_id

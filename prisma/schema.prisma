@@ -621,6 +621,13 @@ model products {
   product_type                   String?
   attributes                     Json                    @default("{}")
   item_code                      String?
+  size                           String?
+  brand                          String?
+  grade                          String?
+  colour                         String?
+  warranty                       String?
+  manufacturer                   String?
+  unit                           String?                 @default("nos")
   approval_status                String                  @default("pending")
   approval_notes                 String?
   created_by_user_id             String?                 @db.Uuid
@@ -1225,7 +1232,7 @@ model vendor_products {
   commision_percentage Int?                  @default(0)
   is_active            Boolean               @default(false)
   status               vendor_product_status @default(waiting)
-  gst_percentage       Decimal?              @default(0.00) @db.Decimal(5, 2)
+  gst_percentage       Decimal?              @default(18.00) @db.Decimal(5, 2)
   pending_price        Decimal?              @db.Decimal(12, 2)
   discounted_price     Decimal?              @db.Decimal(12, 2)
   created_at           DateTime              @default(now()) @db.Timestamptz(6)

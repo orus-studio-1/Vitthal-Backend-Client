@@ -57,7 +57,7 @@ function normalizeOffer(row: any) {
     const originalPrice = Number(row.price) || 0;
     const discountedPrice = row.discounted_price !== null && row.discounted_price !== undefined ? Number(row.discounted_price) : null;
     const activePrice = discountedPrice !== null && discountedPrice > 0 && discountedPrice < originalPrice ? discountedPrice : originalPrice;
-    const gstPercentage = row.gst_percentage !== null && row.gst_percentage !== undefined ? Number(row.gst_percentage) : 0;
+    const gstPercentage = row.gst_percentage !== null && row.gst_percentage !== undefined ? Number(row.gst_percentage) : 18;
     const moq = Number(row.moq) || 1;
 
     return {
@@ -247,6 +247,15 @@ async function getVendorProfileIfExists(userId: string) {
 
 export const addProductController = async (req: Request, res: Response): Promise<Response> => {
     const { name, description, category, productType, specifications, quotationLimit, material, grade, application, standard } = req.body;
+    const catalogFields = {
+        size: req.body.size ?? null,
+        brand: req.body.brand ?? null,
+        grade: req.body.grade ?? grade ?? null,
+        colour: req.body.colour ?? req.body.color ?? null,
+        warranty: req.body.warranty ?? req.body.guarantee ?? null,
+        manufacturer: req.body.manufacturer ?? null,
+        unit: req.body.unit || "nos",
+    };
     const itemCode = req.body.itemCode || req.body.item_code || null;
 
     const { role, userId } = (req as any).user;
@@ -295,6 +304,9 @@ export const addProductController = async (req: Request, res: Response): Promise
     if (grade) attributesObj.grade = String(grade).trim();
     if (application) attributesObj.application = String(application).trim();
     if (standard) attributesObj.standard = String(standard).trim();
+    Object.entries(catalogFields).forEach(([key, value]) => {
+        if (value !== null && String(value).trim()) attributesObj[key] = String(value).trim();
+    });
 
     // Map attributes into parsedSpecifications so they are also saved in product_specification
     Object.entries(attributesObj).forEach(([key, val]) => {
@@ -376,9 +388,16 @@ export const addProductController = async (req: Request, res: Response): Promise
                 created_by_user_id,
                 is_active,
                 quotation_limit,
-                item_code
+                item_code,
+                size,
+                brand,
+                grade,
+                colour,
+                warranty,
+                manufacturer,
+                unit
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             returning *
         `;
         const values = [
@@ -392,7 +411,14 @@ export const addProductController = async (req: Request, res: Response): Promise
             userId,
             !actsAsVendor,
             parsedQuotationLimit,
-            itemCode
+            itemCode,
+            catalogFields.size,
+            catalogFields.brand,
+            catalogFields.grade,
+            catalogFields.colour,
+            catalogFields.warranty,
+            catalogFields.manufacturer,
+            catalogFields.unit
         ];
         const result = await client.query(query, values);
 
@@ -521,7 +547,7 @@ export const addVendorProductController = async (req: Request, res: Response): P
             }
         }
 
-        const resolvedGst = gstPercentage !== undefined ? Number(gstPercentage) : 0.00;
+        const resolvedGst = gstPercentage !== undefined ? Number(gstPercentage) : 18.00;
 
         const query = `
             INSERT INTO vendor_products (product_id, product_variant_id, vendor_id, price, moq, stock_quantity, quotation_enabled, quotation_min_qty, is_active, status, gst_percentage, discounted_price)
@@ -671,8 +697,27 @@ export const updateProduct = async (req: Request, res: Response): Promise<Respon
             else newAttributes.standard = String(standard).trim();
         }
 
-        const query = `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4, attributes = $5 WHERE id = $6`;
-        const values = [name, description, category, productType, JSON.stringify(newAttributes), productId];
+        const catalogKeys = ["size", "brand", "grade", "colour", "warranty", "manufacturer", "unit"] as const;
+        const catalogFields: Record<string, string | null> = {};
+        for (const key of catalogKeys) {
+            const submitted = req.body[key] ?? (key === "colour" ? req.body.color : undefined);
+            if (submitted !== undefined) {
+                catalogFields[key] = submitted === null || submitted === "" ? null : String(submitted).trim();
+                if (catalogFields[key] === null) delete newAttributes[key];
+                else newAttributes[key] = catalogFields[key] as string;
+            }
+        }
+
+        const query = `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4, attributes = $5,
+            size = CASE WHEN $6 THEN $7 ELSE size END, brand = CASE WHEN $8 THEN $9 ELSE brand END,
+            grade = CASE WHEN $10 THEN $11 ELSE grade END, colour = CASE WHEN $12 THEN $13 ELSE colour END,
+            warranty = CASE WHEN $14 THEN $15 ELSE warranty END, manufacturer = CASE WHEN $16 THEN $17 ELSE manufacturer END,
+            unit = CASE WHEN $18 THEN $19 ELSE unit END WHERE id = $20`;
+        const values = [name, description, category, productType, JSON.stringify(newAttributes),
+            "size" in catalogFields, catalogFields.size ?? null, "brand" in catalogFields, catalogFields.brand ?? null,
+            "grade" in catalogFields, catalogFields.grade ?? null, "colour" in catalogFields, catalogFields.colour ?? null,
+            "warranty" in catalogFields, catalogFields.warranty ?? null, "manufacturer" in catalogFields, catalogFields.manufacturer ?? null,
+            "unit" in catalogFields, catalogFields.unit ?? null, productId];
         const result = await pool.query(query, values);
 
         // Sync newAttributes into product_specification table
@@ -717,7 +762,8 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const offsetValue = Number(offset) * limitValue;
 
         let baseQuery = `
-            SELECT p.id, p.name, p.description, p.category,p.subcategory_id, p.product_type,p.item_code,p.attributes
+            SELECT p.id, p.name, p.description, p.category,p.subcategory_id, p.product_type,p.item_code,p.attributes,
+                p.size, p.brand, p.grade, p.colour, p.warranty, p.manufacturer, p.unit
             FROM products p
             WHERE p.approval_status = 'approved' AND p.is_active = TRUE
               AND EXISTS (
@@ -826,8 +872,13 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                 psub.name AS subcategory_name,
                 p.product_type,
                 p.item_code AS product_code,
-                p.attributes->>'brand' AS brand,
-                COALESCE(
+                p.size,
+                COALESCE(p.brand, p.attributes->>'brand') AS brand,
+                p.grade,
+                p.colour,
+                p.warranty,
+                p.manufacturer,
+                COALESCE(p.unit,
                     NULLIF(p.attributes->>'unit', ''),
                     NULLIF(p.attributes->>'uom', ''),
                     NULLIF(p.attributes->>'unit_of_measure', ''),
@@ -835,6 +886,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
                     NULLIF(specAgg.specifications->>'unit', ''),
                     'Unit'
                 ) AS unit,
+                p.attributes,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -953,19 +1005,14 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
                 p.product_type,
                 p.item_code AS product_code,
                 p.attributes,
-                p.attributes->>'brand' AS brand,
+                p.size,
+                COALESCE(p.brand, p.attributes->>'brand') AS brand,
+                COALESCE(p.grade, p.attributes->>'grade') AS grade,
+                p.colour, p.warranty, p.manufacturer,
+                COALESCE(p.unit, NULLIF(p.attributes->>'unit', ''), NULLIF(p.attributes->>'uom', ''), 'nos') AS unit,
                 p.attributes->>'material' AS material,
-                p.attributes->>'grade' AS grade,
                 p.attributes->>'application' AS application,
                 p.attributes->>'standard' AS standard,
-                COALESCE(
-                    NULLIF(p.attributes->>'unit', ''),
-                    NULLIF(p.attributes->>'uom', ''),
-                    NULLIF(p.attributes->>'unit_of_measure', ''),
-                    NULLIF(specAgg.specifications->>'Unit', ''),
-                    NULLIF(specAgg.specifications->>'unit', ''),
-                    'Unit'
-                ) AS unit,
                 p.rating,
                 p.review_count,
                 p.quotation_limit,
@@ -1243,7 +1290,9 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 psub.name AS subcategory_name,
                 p.product_type,
                 p.item_code AS product_code,
-                p.attributes->>'brand' AS brand,
+                p.size,
+                COALESCE(p.brand, p.attributes->>'brand') AS brand,
+                p.grade, p.colour, p.warranty, p.manufacturer, p.unit, p.attributes,
                 ${approvedSpecificationsSelect},
 
                 -- Primary image
@@ -1263,7 +1312,8 @@ export const getProductsByCategory = async (req: Request, res: Response): Promis
                 COALESCE(pr.min_moq, 1)::int AS min_moq
 
             FROM (
-                SELECT id, name, description, category,subcategory_id, product_type,item_code,attributes
+                SELECT id, name, description, category,subcategory_id, product_type,item_code,attributes,
+                    size, brand, grade, colour, warranty, manufacturer, unit
                 FROM products
                 WHERE ${filterConditions}
                 ORDER BY created_at DESC, id ASC
@@ -1762,8 +1812,11 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.category,
                 p.product_type,
                 p.attributes,
+                p.size, COALESCE(p.brand, p.attributes->>'brand') AS brand,
+                COALESCE(p.grade, p.attributes->>'grade') AS grade,
+                p.colour, p.warranty, p.manufacturer,
+                COALESCE(p.unit, NULLIF(p.attributes->>'unit', ''), NULLIF(p.attributes->>'uom', ''), 'nos') AS unit,
                 p.attributes->>'material' AS material,
-                p.attributes->>'grade' AS grade,
                 p.attributes->>'application' AS application,
                 p.attributes->>'standard' AS standard,
                 p.quotation_limit,
@@ -1910,6 +1963,25 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         const existingVP = existingProductResult.rows[0];
+        if (req.body.attributes && typeof req.body.attributes === "object") {
+            const attrs: Record<string, string> = {};
+            for (const key of ["size", "brand", "grade", "colour", "warranty", "manufacturer", "unit"]) {
+                const value = req.body.attributes[key];
+                if (value !== undefined && value !== null && String(value).trim()) attrs[key] = String(value).trim();
+            }
+            if (Object.keys(attrs).length) {
+                await pool.query(
+                    `UPDATE products SET attributes = COALESCE(attributes, '{}'::jsonb) || $1::jsonb,
+                        size = COALESCE($2, size), brand = COALESCE($3, brand), grade = COALESCE($4, grade),
+                        colour = COALESCE($5, colour), warranty = COALESCE($6, warranty),
+                        manufacturer = COALESCE($7, manufacturer), unit = COALESCE($8, unit)
+                     WHERE id = $9 AND created_by_user_id = $10`,
+                    [JSON.stringify(attrs), attrs.size ?? null, attrs.brand ?? null, attrs.grade ?? null,
+                        attrs.colour ?? null, attrs.warranty ?? null, attrs.manufacturer ?? null, attrs.unit ?? null,
+                        resolvedProductId, userId]
+                );
+            }
+        }
         const requestedIsActive = Boolean(isActive);
 
         // Supreme control: vendor cannot set is_active = true if the catalog mapping status is not active (i.e. not approved by admin)
@@ -2450,6 +2522,7 @@ export const getRelatedProducts = async (req: Request, res: Response): Promise<R
                 p.category,
                 p.product_type,
                 p.item_code AS product_code,
+                p.size, p.grade, p.colour, p.warranty, p.manufacturer, p.unit, p.attributes,
                 p.attributes->>'brand' AS brand,
                 p.rating,
                 p.review_count,

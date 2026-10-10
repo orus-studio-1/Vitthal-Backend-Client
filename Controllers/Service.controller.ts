@@ -3,104 +3,126 @@ import type { PoolClient } from "pg";
 import crypto from "crypto";
 import pool from "../DbConnect";
 import { sendEmail } from "../helpers/mailer.helper";
-import { uploadBufferToS3, getPresignedUrlOrOriginal, getPresignedUrl } from "../services/s3.service";
+import {
+  uploadBufferToS3,
+  getPresignedUrlOrOriginal,
+  getPresignedUrl,
+} from "../services/s3.service";
 import { createNotification } from "./Notification.controller";
-import { generateBaseServiceQuotationDocument, generateVendorServiceQuotationDocument } from "../services/serviceQuotationDocument.service";
+import {
+  generateBaseServiceQuotationDocument,
+  generateVendorServiceQuotationDocument,
+} from "../services/serviceQuotationDocument.service";
 
 type AuthUser = { userId: string; role: string; email?: string };
 
 function getAuthUser(req: Request): AuthUser | null {
-    const user = (req as any).user;
-    if (!user?.userId) return null;
-    return user as AuthUser;
+  const user = (req as any).user;
+  if (!user?.userId) return null;
+  return user as AuthUser;
 }
 
 function normalizeText(value: unknown): string | null {
-    if (typeof value !== "string") return null;
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function parseRating(value: unknown): number | null {
-    const r = Number(value);
-    if (!Number.isInteger(r) || r < 1 || r > 5) return null;
-    return r;
+  const r = Number(value);
+  if (!Number.isInteger(r) || r < 1 || r > 5) return null;
+  return r;
 }
 
 function parsePositiveInt(value: unknown): number | null {
-    const n = Number(value);
-    if (!Number.isInteger(n) || n <= 0) return null;
-    return n;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
 }
 
 function parsePositiveDecimal(value: unknown): string | null {
-    const n = parseFloat(String(value));
-    if (isNaN(n) || n < 0) return null;
-    return n.toFixed(2);
+  const n = parseFloat(String(value));
+  if (isNaN(n) || n < 0) return null;
+  return n.toFixed(2);
 }
 
 async function getVendorIdByUserId(userId: string): Promise<string | null> {
-    const result = await pool.query(
-        `SELECT id FROM vendors WHERE user_id = $1 AND approval_status = 'approved' LIMIT 1`,
-        [userId]
-    );
-    return result.rows[0]?.id ?? null;
+  const result = await pool.query(
+    `SELECT id FROM vendors WHERE user_id = $1 AND approval_status = 'approved' LIMIT 1`,
+    [userId],
+  );
+  return result.rows[0]?.id ?? null;
 }
 
-async function updateServiceAggregate(client: PoolClient, serviceId: string, rating: number) {
-    return client.query(
-        `UPDATE services
+async function updateServiceAggregate(
+  client: PoolClient,
+  serviceId: string,
+  rating: number,
+) {
+  return client.query(
+    `UPDATE services
          SET rating = ROUND((((COALESCE(rating, 0.0) * COALESCE(review_count, 0)) + $1)::numeric / (COALESCE(review_count, 0) + 1)), 1),
              review_count = COALESCE(review_count, 0) + 1,
              updated_at = NOW()
          WHERE id = $2`,
-        [rating, serviceId]
-    );
+    [rating, serviceId],
+  );
 }
 
-async function updateVendorAggregate(client: PoolClient, vendorId: string, rating: number) {
-    return client.query(
-        `UPDATE vendors
+async function updateVendorAggregate(
+  client: PoolClient,
+  vendorId: string,
+  rating: number,
+) {
+  return client.query(
+    `UPDATE vendors
          SET rating = ROUND((((COALESCE(rating, 0.0) * COALESCE(review_count, 0)) + $1)::numeric / (COALESCE(review_count, 0) + 1)), 1),
              review_count = COALESCE(review_count, 0) + 1,
              updated_at = NOW()
          WHERE id = $2`,
-        [rating, vendorId]
-    );
+    [rating, vendorId],
+  );
 }
 
-export const browseServicesController = async (req: Request, res: Response): Promise<Response> => {
-    const { category, subcategory, search, page, limit } = req.query;
-    const pageNum = Math.max(1, parseInt(String(page || "1"), 10));
-    const limitNum = Math.min(50, Math.max(1, parseInt(String(limit || "20"), 10)));
-    const offset = (pageNum - 1) * limitNum;
+export const browseServicesController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const { category, subcategory, search, page, limit } = req.query;
+  const pageNum = Math.max(1, parseInt(String(page || "1"), 10));
+  const limitNum = Math.min(
+    50,
+    Math.max(1, parseInt(String(limit || "20"), 10)),
+  );
+  const offset = (pageNum - 1) * limitNum;
 
-    const conditions: string[] = [`s.status = 'approved'`];
-    const values: unknown[] = [];
-    let idx = 1;
+  const conditions: string[] = [`s.status = 'approved'`];
+  const values: unknown[] = [];
+  let idx = 1;
 
-    if (category && typeof category === "string") {
-        conditions.push(`s.category_id = $${idx++}`);
-        values.push(category);
-    }
+  if (category && typeof category === "string") {
+    conditions.push(`s.category_id = $${idx++}`);
+    values.push(category);
+  }
 
-    if (subcategory && typeof subcategory === "string") {
-        conditions.push(`s.subcategory_id = $${idx++}`);
-        values.push(subcategory);
-    }
+  if (subcategory && typeof subcategory === "string") {
+    conditions.push(`s.subcategory_id = $${idx++}`);
+    values.push(subcategory);
+  }
 
-    if (search && typeof search === "string" && search.trim().length > 0) {
-        conditions.push(`(s.name ILIKE $${idx} OR s.description ILIKE $${idx})`);
-        values.push(`%${search.trim()}%`);
-        idx++;
-    }
+  if (search && typeof search === "string" && search.trim().length > 0) {
+    conditions.push(`(s.name ILIKE $${idx} OR s.description ILIKE $${idx})`);
+    values.push(`%${search.trim()}%`);
+    idx++;
+  }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const where =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    try {
-        const [dataResult, countResult] = await Promise.all([
-            pool.query(
-                `SELECT
+  try {
+    const [dataResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT
                     s.id, s.name, s.description, s.rating, s.review_count, s.category_id, s.subcategory_id,
                     pc.label AS category_label,
                     ss.name AS subcategory_name,
@@ -128,56 +150,63 @@ export const browseServicesController = async (req: Request, res: Response): Pro
                  GROUP BY s.id, pc.label, pc.image, ss.name
                  ORDER BY s.rating DESC NULLS LAST, s.review_count DESC
                  LIMIT $${idx} OFFSET $${idx + 1}`,
-                [...values, limitNum, offset]
-            ),
-            pool.query(
-                `SELECT COUNT(*) FROM services s ${where}`,
-                values
-            ),
-        ]);
+        [...values, limitNum, offset],
+      ),
+      pool.query(`SELECT COUNT(*) FROM services s ${where}`, values),
+    ]);
 
-        const rows = await Promise.all(
-            dataResult.rows.map(async (row) => ({
-                ...row,
-                image_url: await getPresignedUrlOrOriginal(row.image_url),
-            }))
-        );
+    const rows = await Promise.all(
+      dataResult.rows.map(async (row) => ({
+        ...row,
+        image_url: await getPresignedUrlOrOriginal(row.image_url),
+      })),
+    );
 
-        return res.status(200).json({
-            data: rows,
-            pagination: {
-                page: pageNum,
-                limit: limitNum,
-                total: parseInt(countResult.rows[0].count, 10),
-            },
-        });
-    } catch (error) {
-        console.error("Error browsing services:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({
+      data: rows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: parseInt(countResult.rows[0].count, 10),
+      },
+    });
+  } catch (error) {
+    console.error("Error browsing services:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-function haversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
+function haversineDistance(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-export const getServiceDetailController = async (req: Request, res: Response): Promise<Response> => {
-    const { id } = req.params;
-    const { userLat, userLng } = req.query;
-    const parsedLat = userLat ? Number(userLat) : null;
-    const parsedLng = userLng ? Number(userLng) : null;
+export const getServiceDetailController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const { id } = req.params;
+  const { userLat, userLng } = req.query;
+  const parsedLat = userLat ? Number(userLat) : null;
+  const parsedLng = userLng ? Number(userLng) : null;
 
-    try {
-        const serviceResult = await pool.query(
-            `SELECT
+  try {
+    const serviceResult = await pool.query(
+      `SELECT
                 s.id, s.name, s.description, s.rating, s.review_count, s.status, s.category_id, s.subcategory_id,
                 pc.label AS category_label,
                 pc.code AS category_code,
@@ -188,23 +217,24 @@ export const getServiceDetailController = async (req: Request, res: Response): P
              LEFT JOIN service_subcategories ss ON ss.id = s.subcategory_id
              WHERE s.id = $1 AND s.status = 'approved'
              LIMIT 1`,
-            [id]
-        );
+      [id],
+    );
 
-        if (serviceResult.rows.length === 0) {
-            return res.status(404).json({ message: "Service not found" });
-        }
+    if (serviceResult.rows.length === 0) {
+      return res.status(404).json({ message: "Service not found" });
+    }
 
-        const [mediaResult, vendorOfferingsResult, reviewsResult] = await Promise.all([
-            pool.query(
-                `SELECT id, media_url, media_type, is_primary, display_order
+    const [mediaResult, vendorOfferingsResult, reviewsResult] =
+      await Promise.all([
+        pool.query(
+          `SELECT id, media_url, media_type, is_primary, display_order
                  FROM services_media
                  WHERE service_id = $1 AND approval_status = 'approved'
                  ORDER BY is_primary DESC, display_order ASC`,
-                [id]
-            ),
-            pool.query(
-                `SELECT
+          [id],
+        ),
+        pool.query(
+          `SELECT
                     vs.id AS vendor_service_id, vs.pricing_type, vs.price, vs.moq, vs.is_active,
                     v.id AS vendor_id, v.company_name, v.rating AS vendor_rating, v.review_count AS vendor_review_count,
                     va.latitude, va.longitude, va.city, va.state
@@ -221,198 +251,237 @@ export const getServiceDetailController = async (req: Request, res: Response): P
                       ORDER BY user_id, created_at DESC
                   ) va ON v.user_id = va.user_id
                   WHERE vs.service_id = $1 AND vs.is_active = true`,
-                [id]
-            ),
-            pool.query(
-                `SELECT
+          [id],
+        ),
+        pool.query(
+          `SELECT
                     sr.id, sr.rating, sr.review_title, sr.review_text, sr.images, sr.created_at,
                     u.name AS reviewer_name
                  FROM service_reviews sr
                  JOIN users u ON u.id = sr.user_id
                  WHERE sr.service_id = $1
                  ORDER BY sr.created_at DESC`,
-                [id]
-            ),
-        ]);
+          [id],
+        ),
+      ]);
 
-        const mediaWithUrls = await Promise.all(
-            mediaResult.rows.map(async (m) => ({
-                ...m,
-                media_url: await getPresignedUrlOrOriginal(m.media_url),
-            }))
+    const mediaWithUrls = await Promise.all(
+      mediaResult.rows.map(async (m) => ({
+        ...m,
+        media_url: await getPresignedUrlOrOriginal(m.media_url),
+      })),
+    );
+
+    let vendorOfferings = vendorOfferingsResult.rows.map((row) => {
+      const price = Number(row.price) || 0;
+      const rating = Number(row.vendor_rating) || 0;
+      const reviewCount = Number(row.vendor_review_count) || 0;
+      const vendorLat = row.latitude !== null ? Number(row.latitude) : null;
+      const vendorLng = row.longitude !== null ? Number(row.longitude) : null;
+
+      let distance: number | null = null;
+      if (
+        parsedLat !== null &&
+        parsedLng !== null &&
+        !isNaN(parsedLat) &&
+        !isNaN(parsedLng) &&
+        vendorLat !== null &&
+        vendorLng !== null
+      ) {
+        distance = haversineDistance(
+          parsedLat,
+          parsedLng,
+          vendorLat,
+          vendorLng,
         );
+      }
 
-        let vendorOfferings = vendorOfferingsResult.rows.map((row) => {
-            const price = Number(row.price) || 0;
-            const rating = Number(row.vendor_rating) || 0;
-            const reviewCount = Number(row.vendor_review_count) || 0;
-            const vendorLat = row.latitude !== null ? Number(row.latitude) : null;
-            const vendorLng = row.longitude !== null ? Number(row.longitude) : null;
+      return {
+        ...row,
+        price,
+        vendor_rating: rating,
+        vendor_review_count: reviewCount,
+        latitude: vendorLat,
+        longitude: vendorLng,
+        distance,
+      };
+    });
 
-            let distance: number | null = null;
-            if (parsedLat !== null && parsedLng !== null && !isNaN(parsedLat) && !isNaN(parsedLng) && vendorLat !== null && vendorLng !== null) {
-                distance = haversineDistance(parsedLat, parsedLng, vendorLat, vendorLng);
-            }
+    if (
+      parsedLat !== null &&
+      parsedLng !== null &&
+      !isNaN(parsedLat) &&
+      !isNaN(parsedLng) &&
+      vendorOfferings.length > 0
+    ) {
+      const prices = vendorOfferings.map((v) => v.price).filter((p) => p > 0);
+      const distances = vendorOfferings
+        .map((v) => v.distance)
+        .filter((d): d is number => d !== null);
+      const ratings = vendorOfferings.map((v) => v.vendor_rating);
 
-            return {
-                ...row,
-                price,
-                vendor_rating: rating,
-                vendor_review_count: reviewCount,
-                latitude: vendorLat,
-                longitude: vendorLng,
-                distance,
-            };
-        });
+      const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+      const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+      const minDist = distances.length > 0 ? Math.min(...distances) : 0;
+      const maxDist = distances.length > 0 ? Math.max(...distances) : 0;
+      const maxRating = ratings.length > 0 ? Math.max(...ratings) : 5;
 
-        if (parsedLat !== null && parsedLng !== null && !isNaN(parsedLat) && !isNaN(parsedLng) && vendorOfferings.length > 0) {
-            const prices = vendorOfferings.map((v) => v.price).filter((p) => p > 0);
-            const distances = vendorOfferings.map((v) => v.distance).filter((d): d is number => d !== null);
-            const ratings = vendorOfferings.map((v) => v.vendor_rating);
+      const PRICE_WEIGHT = 0.4;
+      const DISTANCE_WEIGHT = 0.4;
+      const REVIEW_WEIGHT = 0.2;
 
-            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
-            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
-            const minDist = distances.length > 0 ? Math.min(...distances) : 0;
-            const maxDist = distances.length > 0 ? Math.max(...distances) : 0;
-            const maxRating = ratings.length > 0 ? Math.max(...ratings) : 5;
+      vendorOfferings = vendorOfferings.map((v) => {
+        const priceScore =
+          maxPrice > minPrice
+            ? (maxPrice - v.price) / (maxPrice - minPrice)
+            : 1;
+        const distanceScore =
+          v.distance !== null && maxDist > minDist
+            ? (maxDist - v.distance) / (maxDist - minDist)
+            : v.distance !== null
+              ? 1
+              : 0.5;
+        const reviewScore = maxRating > 0 ? v.vendor_rating / maxRating : 0;
 
-            const PRICE_WEIGHT = 0.4;
-            const DISTANCE_WEIGHT = 0.4;
-            const REVIEW_WEIGHT = 0.2;
+        const totalScore =
+          PRICE_WEIGHT * priceScore +
+          DISTANCE_WEIGHT * distanceScore +
+          REVIEW_WEIGHT * reviewScore;
 
-            vendorOfferings = vendorOfferings.map((v) => {
-                const priceScore = maxPrice > minPrice ? (maxPrice - v.price) / (maxPrice - minPrice) : 1;
-                const distanceScore = v.distance !== null && maxDist > minDist
-                    ? (maxDist - v.distance) / (maxDist - minDist)
-                    : v.distance !== null ? 1 : 0.5;
-                const reviewScore = maxRating > 0 ? v.vendor_rating / maxRating : 0;
+        return {
+          ...v,
+          price_score: Math.round(priceScore * 100) / 100,
+          distance_score: Math.round(distanceScore * 100) / 100,
+          review_score: Math.round(reviewScore * 100) / 100,
+          total_score: Math.round(totalScore * 100) / 100,
+        };
+      });
 
-                const totalScore = (PRICE_WEIGHT * priceScore) + (DISTANCE_WEIGHT * distanceScore) + (REVIEW_WEIGHT * reviewScore);
-
-                return {
-                    ...v,
-                    price_score: Math.round(priceScore * 100) / 100,
-                    distance_score: Math.round(distanceScore * 100) / 100,
-                    review_score: Math.round(reviewScore * 100) / 100,
-                    total_score: Math.round(totalScore * 100) / 100,
-                };
-            });
-
-            vendorOfferings.sort((a, b) => (b.total_score || 0) - (a.total_score || 0));
-        } else {
-            // Default sort by price ASC
-            vendorOfferings.sort((a, b) => a.price - b.price);
-        }
-
-        return res.status(200).json({
-            data: {
-                ...serviceResult.rows[0],
-                media: mediaWithUrls,
-                vendor_offerings: vendorOfferings,
-                reviews: reviewsResult.rows,
-            },
-        });
-    } catch (error) {
-        console.error("Error fetching service detail:", error);
-        return res.status(500).json({ message: "Internal server error" });
+      vendorOfferings.sort(
+        (a, b) => (b.total_score || 0) - (a.total_score || 0),
+      );
+    } else {
+      // Default sort by price ASC
+      vendorOfferings.sort((a, b) => a.price - b.price);
     }
+
+    return res.status(200).json({
+      data: {
+        ...serviceResult.rows[0],
+        media: mediaWithUrls,
+        vendor_offerings: vendorOfferings,
+        reviews: reviewsResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching service detail:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const createServiceBookingController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Only clients can create service bookings" });
-    }
+export const createServiceBookingController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res
+      .status(403)
+      .json({ message: "Only clients can create service bookings" });
+  }
 
-    const {
-        vendorServiceId,
-        scheduledStart,
-        scheduledEnd,
-        bookingNotes,
-    } = req.body as Record<string, unknown>;
+  const { vendorServiceId, scheduledStart, scheduledEnd, bookingNotes } =
+    req.body as Record<string, unknown>;
 
-    if (!vendorServiceId || typeof vendorServiceId !== "string") {
-        return res.status(400).json({ message: "vendorServiceId is required" });
-    }
+  if (!vendorServiceId || typeof vendorServiceId !== "string") {
+    return res.status(400).json({ message: "vendorServiceId is required" });
+  }
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-        const vsResult = await client.query(
-            `SELECT vs.id, vs.service_id, vs.vendor_id, vs.price, vs.pricing_type, vs.moq, vs.is_active,
+    const vsResult = await client.query(
+      `SELECT vs.id, vs.service_id, vs.vendor_id, vs.price, vs.pricing_type, vs.moq, vs.is_active,
                     v.approval_status, v.user_id AS vendor_user_id
              FROM vendor_services vs
              JOIN vendors v ON v.id = vs.vendor_id
              WHERE vs.id = $1 LIMIT 1`,
-            [vendorServiceId]
-        );
+      [vendorServiceId],
+    );
 
-        if (vsResult.rows.length === 0 || !vsResult.rows[0].is_active) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Vendor service offering not found or inactive" });
-        }
+    if (vsResult.rows.length === 0 || !vsResult.rows[0].is_active) {
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ message: "Vendor service offering not found or inactive" });
+    }
 
-        const vs = vsResult.rows[0];
+    const vs = vsResult.rows[0];
 
-        if (vs.approval_status !== "approved") {
-            await client.query("ROLLBACK");
-            return res.status(403).json({ message: "This vendor is not approved to offer services" });
-        }
+    if (vs.approval_status !== "approved") {
+      await client.query("ROLLBACK");
+      return res
+        .status(403)
+        .json({ message: "This vendor is not approved to offer services" });
+    }
 
-        const bookingResult = await client.query(
-            `INSERT INTO service_bookings (user_id, vendor_id, vendor_service_id, total_amount, scheduled_start, scheduled_end, booking_notes)
+    const bookingResult = await client.query(
+      `INSERT INTO service_bookings (user_id, vendor_id, vendor_service_id, total_amount, scheduled_start, scheduled_end, booking_notes)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING id, status, payment_status, total_amount, scheduled_start, scheduled_end, created_at`,
-            [
-                authUser.userId,
-                vs.vendor_id,
-                vendorServiceId,
-                vs.price,
-                scheduledStart || null,
-                scheduledEnd || null,
-                normalizeText(bookingNotes),
-            ]
-        );
+      [
+        authUser.userId,
+        vs.vendor_id,
+        vendorServiceId,
+        vs.price,
+        scheduledStart || null,
+        scheduledEnd || null,
+        normalizeText(bookingNotes),
+      ],
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        // Trigger notification to vendor
-        if (vs.vendor_user_id) {
-            await createNotification({
-                userId: vs.vendor_user_id,
-                type: "general",
-                title: "New Service Booking",
-                body: "You received a new service booking",
-                referenceType: "service_booking",
-                referenceId: bookingResult.rows[0].id,
-            }).catch((err) => {
-                console.error("Error sending booking creation notification:", err);
-            });
-        }
-
-        return res.status(201).json({
-            message: "Service booking created successfully",
-            data: bookingResult.rows[0],
-        });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error creating service booking:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+    // Trigger notification to vendor
+    if (vs.vendor_user_id) {
+      await createNotification({
+        userId: vs.vendor_user_id,
+        type: "general",
+        title: "New Service Booking",
+        body: "You received a new service booking",
+        referenceType: "service_booking",
+        referenceId: bookingResult.rows[0].id,
+      }).catch((err) => {
+        console.error("Error sending booking creation notification:", err);
+      });
     }
+
+    return res.status(201).json({
+      message: "Service booking created successfully",
+      data: bookingResult.rows[0],
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error creating service booking:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const getMyBookingsController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getMyBookingsController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    try {
-        const result = await pool.query(
-            `SELECT
+  try {
+    const result = await pool.query(
+      `SELECT
                 sb.id, sb.status, sb.payment_status, sb.total_amount,
                 sb.scheduled_start, sb.scheduled_end, sb.booking_notes, sb.created_at,
                 s.name AS service_name, s.description AS service_description,
@@ -425,235 +494,275 @@ export const getMyBookingsController = async (req: Request, res: Response): Prom
              JOIN vendors v ON v.id = sb.vendor_id
              WHERE sb.user_id = $1
              ORDER BY sb.created_at DESC`,
-            [authUser.userId]
-        );
+      [authUser.userId],
+    );
 
-        return res.status(200).json({ data: result.rows });
-    } catch (error) {
-        console.error("Error fetching client bookings:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: result.rows });
+  } catch (error) {
+    console.error("Error fetching client bookings:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const generateCompletionOtpController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const generateCompletionOtpController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const { id } = req.params;
+  const { id } = req.params;
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-        const bookingResult = await client.query(
-            `SELECT sb.id, sb.status, sb.completion_otp_failed_attempts, u.email, u.name
+    const bookingResult = await client.query(
+      `SELECT sb.id, sb.status, sb.completion_otp_failed_attempts, u.email, u.name
              FROM service_bookings sb
              JOIN users u ON u.id = sb.user_id
              WHERE sb.id = $1 AND sb.user_id = $2 LIMIT 1`,
-            [id, authUser.userId]
-        );
+      [id, authUser.userId],
+    );
 
-        if (bookingResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Booking not found" });
-        }
+    if (bookingResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Booking not found" });
+    }
 
-        const booking = bookingResult.rows[0];
+    const booking = bookingResult.rows[0];
 
-        if (booking.status !== "in_progress") {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "OTP can only be generated for in-progress bookings" });
-        }
+    if (booking.status !== "in_progress") {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({
+          message: "OTP can only be generated for in-progress bookings",
+        });
+    }
 
-        const otp = crypto.randomInt(100000, 999999).toString();
-        const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const otp = crypto.randomInt(100000, 999999).toString();
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-        await client.query(
-            `UPDATE service_bookings
+    await client.query(
+      `UPDATE service_bookings
              SET completion_otp_hash = $1,
                  completion_otp_expires_at = $2,
                  completion_otp_failed_attempts = 0,
                  updated_at = NOW()
              WHERE id = $3`,
-            [otpHash, expiresAt, id]
-        );
+      [otpHash, expiresAt, id],
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        await sendEmail({
-            to: booking.email,
-            subject: "Your Service Completion OTP",
-            htmlContent: `
+    await sendEmail({
+      to: booking.email,
+      subject: "Your Service Completion OTP",
+      htmlContent: `
                 <p>Hi ${booking.name},</p>
                 <p>Your service completion OTP is: <strong style="font-size:24px;letter-spacing:4px">${otp}</strong></p>
                 <p>Share this OTP with your vendor to confirm the service has been completed satisfactorily.</p>
                 <p>This OTP is valid for <strong>10 minutes</strong>. Do not share it with anyone other than your assigned vendor.</p>
             `,
-        });
+    });
 
-        return res.status(200).json({ message: "OTP sent to your registered email address" });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error generating completion OTP:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
-    }
+    return res
+      .status(200)
+      .json({ message: "OTP sent to your registered email address" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error generating completion OTP:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const createServiceQuotationController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Only clients can request service quotations" });
+export const createServiceQuotationController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res
+      .status(403)
+      .json({ message: "Only clients can request service quotations" });
+  }
+
+  const { vendorId, serviceId, scopeOfWork, requestedPrice } =
+    req.body as Record<string, unknown>;
+
+  if (!vendorId || typeof vendorId !== "string") {
+    return res.status(400).json({ message: "vendorId is required" });
+  }
+  if (!serviceId || typeof serviceId !== "string") {
+    return res.status(400).json({ message: "serviceId is required" });
+  }
+  const scopeText = normalizeText(scopeOfWork);
+  if (!scopeText) {
+    return res.status(400).json({ message: "scopeOfWork is required" });
+  }
+
+  const priceVal =
+    requestedPrice != null ? parsePositiveDecimal(requestedPrice) : null;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const [serviceCheck, vendorCheck] = await Promise.all([
+      client.query(
+        `SELECT id, name FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`,
+        [serviceId],
+      ),
+      client.query(
+        `SELECT id, user_id FROM vendors WHERE id = $1 AND approval_status = 'approved' LIMIT 1`,
+        [vendorId],
+      ),
+    ]);
+
+    if (serviceCheck.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Service not found" });
+    }
+    if (vendorCheck.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(404)
+        .json({ message: "Vendor not found or not approved" });
     }
 
-    const { vendorId, serviceId, scopeOfWork, requestedPrice } = req.body as Record<string, unknown>;
+    const serviceName = serviceCheck.rows[0].name;
+    const vendorUserId = vendorCheck.rows[0].user_id;
 
-    if (!vendorId || typeof vendorId !== "string") {
-        return res.status(400).json({ message: "vendorId is required" });
-    }
-    if (!serviceId || typeof serviceId !== "string") {
-        return res.status(400).json({ message: "serviceId is required" });
-    }
-    const scopeText = normalizeText(scopeOfWork);
-    if (!scopeText) {
-        return res.status(400).json({ message: "scopeOfWork is required" });
-    }
+    const vendorServiceCheck = await client.query(
+      `SELECT price, delivery_days, token_percentage FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
+      [vendorId, serviceId],
+    );
 
-    const priceVal = requestedPrice != null ? parsePositiveDecimal(requestedPrice) : null;
+    let defaultPrice: number | null = null;
+    let defaultDeliveryDays: number | null = null;
+    let defaultTokenPercentage: number | null = null;
+    let defaultTokenAmount: number | null = null;
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
-
-        const [serviceCheck, vendorCheck] = await Promise.all([
-            client.query(`SELECT id, name FROM services WHERE id = $1 AND status = 'approved' LIMIT 1`, [serviceId]),
-            client.query(`SELECT id, user_id FROM vendors WHERE id = $1 AND approval_status = 'approved' LIMIT 1`, [vendorId]),
-        ]);
-
-        if (serviceCheck.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Service not found" });
-        }
-        if (vendorCheck.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Vendor not found or not approved" });
-        }
-
-        const serviceName = serviceCheck.rows[0].name;
-        const vendorUserId = vendorCheck.rows[0].user_id;
-
-        const vendorServiceCheck = await client.query(
-            `SELECT price, delivery_days, token_percentage FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
-            [vendorId, serviceId]
+    if (vendorServiceCheck.rows.length > 0) {
+      const row = vendorServiceCheck.rows[0];
+      defaultPrice = row.price != null ? Number(row.price) : null;
+      defaultDeliveryDays =
+        row.delivery_days != null ? Number(row.delivery_days) : null;
+      defaultTokenPercentage =
+        row.token_percentage != null ? Number(row.token_percentage) : null;
+      if (defaultPrice != null && defaultTokenPercentage != null) {
+        defaultTokenAmount = Number(
+          ((defaultTokenPercentage / 100) * (defaultPrice * 1.18)).toFixed(2),
         );
+      }
+    }
 
-        let defaultPrice: number | null = null;
-        let defaultDeliveryDays: number | null = null;
-        let defaultTokenPercentage: number | null = null;
-        let defaultTokenAmount: number | null = null;
-
-        if (vendorServiceCheck.rows.length > 0) {
-            const row = vendorServiceCheck.rows[0];
-            defaultPrice = row.price != null ? Number(row.price) : null;
-            defaultDeliveryDays = row.delivery_days != null ? Number(row.delivery_days) : null;
-            defaultTokenPercentage = row.token_percentage != null ? Number(row.token_percentage) : null;
-            if (defaultPrice != null && defaultTokenPercentage != null) {
-                defaultTokenAmount = Number(((defaultTokenPercentage / 100) * (defaultPrice * 1.18)).toFixed(2));
-            }
-        }
-
-        const quotationResult = await client.query(
-            `INSERT INTO service_quotations (
+    const quotationResult = await client.query(
+      `INSERT INTO service_quotations (
                 user_id, vendor_id, service_id, scope_of_work, requested_price, status,
                 current_offer_price, delivery_days, token_percentage, token_amount, current_offer_by
              )
              VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6, $7, $8, $9, 'vendor')
              RETURNING id, status, scope_of_work, requested_price, created_at`,
-            [
-                authUser.userId, 
-                vendorId, 
-                serviceId, 
-                scopeText, 
-                priceVal,
-                defaultPrice,
-                defaultDeliveryDays,
-                defaultTokenPercentage,
-                defaultTokenAmount
-            ]
-        );
+      [
+        authUser.userId,
+        vendorId,
+        serviceId,
+        scopeText,
+        priceVal,
+        defaultPrice,
+        defaultDeliveryDays,
+        defaultTokenPercentage,
+        defaultTokenAmount,
+      ],
+    );
 
-        const quotation = quotationResult.rows[0];
+    const quotation = quotationResult.rows[0];
 
-        await client.query(
-            `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
+    await client.query(
+      `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
              VALUES ($1, $2, 'client', 'request', $3, $4)`,
-            [quotation.id, authUser.userId, priceVal, scopeText]
-        );
+      [quotation.id, authUser.userId, priceVal, scopeText],
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        // Fetch client address details and generate base quotation PDF in background
-        pool.query(
-            `SELECT city, state, pincode, country FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
-            [authUser.userId]
-        ).then((addrResult) => {
-            const address = addrResult.rows[0] || {};
-            generateBaseServiceQuotationDocument({
-                serviceQuotationId: quotation.id,
-                userId: authUser.userId,
-                serviceId,
-                serviceName,
-                scopeOfWork: scopeText,
-                targetPrice: priceVal ? Number(priceVal) : undefined,
-                clientCity: address.city || "",
-                clientState: address.state || "",
-                clientPincode: address.pincode || "",
-                clientCountry: address.country || "India",
-            }).catch((err) => {
-                console.error(`[ServiceQuotationDocument] Failed to generate base document for service quotation ${quotation.id}:`, err);
-            });
+    // Fetch client address details and generate base quotation PDF in background
+    pool
+      .query(
+        `SELECT city, state, pincode, country FROM addresses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [authUser.userId],
+      )
+      .then((addrResult) => {
+        const address = addrResult.rows[0] || {};
+        generateBaseServiceQuotationDocument({
+          serviceQuotationId: quotation.id,
+          userId: authUser.userId,
+          serviceId,
+          serviceName,
+          scopeOfWork: scopeText,
+          targetPrice: priceVal ? Number(priceVal) : undefined,
+          clientCity: address.city || "",
+          clientState: address.state || "",
+          clientPincode: address.pincode || "",
+          clientCountry: address.country || "India",
         }).catch((err) => {
-            console.error(`[ServiceQuotationDocument] Failed to query address details for base service document ${quotation.id}:`, err);
+          console.error(
+            `[ServiceQuotationDocument] Failed to generate base document for service quotation ${quotation.id}:`,
+            err,
+          );
         });
+      })
+      .catch((err) => {
+        console.error(
+          `[ServiceQuotationDocument] Failed to query address details for base service document ${quotation.id}:`,
+          err,
+        );
+      });
 
-        // Trigger real-time notification to vendor
-        if (vendorUserId) {
-            await createNotification({
-                userId: vendorUserId,
-                type: "quotation_request_received",
-                title: "New service quotation request",
-                body: `You received a service quotation request for ${serviceName}`,
-                referenceType: "service_quotation",
-                referenceId: quotation.id,
-            });
-        }
-
-        return res.status(201).json({
-            message: "Service quotation request submitted",
-            data: quotation,
-        });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error creating service quotation:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+    // Trigger real-time notification to vendor
+    if (vendorUserId) {
+      await createNotification({
+        userId: vendorUserId,
+        type: "quotation_request_received",
+        title: "New service quotation request",
+        body: `You received a service quotation request for ${serviceName}`,
+        referenceType: "service_quotation",
+        referenceId: quotation.id,
+      });
     }
+
+    return res.status(201).json({
+      message: "Service quotation request submitted",
+      data: quotation,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error creating service quotation:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const getMyServiceQuotationsController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getMyServiceQuotationsController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    try {
-        const result = await pool.query(
-            `SELECT
+  try {
+    const result = await pool.query(
+      `SELECT
                 sq.id, sq.status, sq.scope_of_work, sq.requested_price, sq.agreed_price, sq.created_at, sq.updated_at,
                 sq.service_id, sq.vendor_id,
                 s.name AS service_name,
@@ -668,42 +777,46 @@ export const getMyServiceQuotationsController = async (req: Request, res: Respon
              JOIN vendors v ON v.id = sq.vendor_id
              WHERE sq.user_id = $1
              ORDER BY sq.updated_at DESC`,
-            [authUser.userId]
-        );
+      [authUser.userId],
+    );
 
-        return res.status(200).json({ data: result.rows });
-    } catch (error) {
-        console.error("Error fetching client service quotations:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: result.rows });
+  } catch (error) {
+    console.error("Error fetching client service quotations:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const getServiceQuotationDetailController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser) {
-        return res.status(401).json({ message: "Unauthorized" });
+export const getServiceQuotationDetailController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const { id } = req.params;
+  const isClient = authUser.role === "client";
+  const isVendor = authUser.role === "vendor";
+
+  if (!isClient && !isVendor) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
+  try {
+    let quotationResult;
+    let vendorId: string | null = null;
+
+    if (isVendor) {
+      vendorId = await getVendorIdByUserId(authUser.userId);
+      if (!vendorId)
+        return res.status(403).json({ message: "Vendor profile not found" });
     }
 
-    const { id } = req.params;
-    const isClient = authUser.role === "client";
-    const isVendor = authUser.role === "vendor";
-
-    if (!isClient && !isVendor) {
-        return res.status(403).json({ message: "Forbidden" });
-    }
-
-    try {
-        let quotationResult;
-        let vendorId: string | null = null;
-
-        if (isVendor) {
-            vendorId = await getVendorIdByUserId(authUser.userId);
-            if (!vendorId) return res.status(403).json({ message: "Vendor profile not found" });
-        }
-
-        if (isClient) {
-            quotationResult = await pool.query(
-                `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name, 
+    if (isClient) {
+      quotationResult = await pool.query(
+        `SELECT sq.*, s.name AS service_name, v.company_name AS vendor_name, 
                         sqd.document_url AS base_document_url, sqd.s3_key AS base_document_s3_key,
                         vs.pricing_type, vs.moq
                  FROM service_quotations sq
@@ -712,11 +825,11 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                  LEFT JOIN vendor_services vs ON vs.vendor_id = sq.vendor_id AND vs.service_id = sq.service_id
                  LEFT JOIN service_quotation_documents sqd ON sqd.service_quotation_id = sq.id
                  WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
-                [id, authUser.userId]
-            );
-        } else {
-            quotationResult = await pool.query(
-                `SELECT sq.*, s.name AS service_name, u.name AS client_name, u.email AS client_email, 
+        [id, authUser.userId],
+      );
+    } else {
+      quotationResult = await pool.query(
+        `SELECT sq.*, s.name AS service_name, u.name AS client_name, u.email AS client_email, 
                         sqd.document_url AS base_document_url, sqd.s3_key AS base_document_s3_key,
                         vs.pricing_type, vs.moq
                  FROM service_quotations sq
@@ -725,14 +838,14 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                  LEFT JOIN vendor_services vs ON vs.vendor_id = sq.vendor_id AND vs.service_id = sq.service_id
                  LEFT JOIN service_quotation_documents sqd ON sqd.service_quotation_id = sq.id
                  WHERE sq.id = $1 AND sq.vendor_id = $2 LIMIT 1`,
-                [id, vendorId]
-            );
-        }
+        [id, vendorId],
+      );
+    }
 
-        // If not found in legacy service_quotations, check universal service_tickets!
-        if (quotationResult.rows.length === 0) {
-            const ticketResult = await pool.query(
-                `SELECT st.*, u.name AS client_name, u.email AS client_email,
+    // If not found in legacy service_quotations, check universal service_tickets!
+    if (quotationResult.rows.length === 0) {
+      const ticketResult = await pool.query(
+        `SELECT st.*, u.name AS client_name, u.email AS client_email,
                         pc.label AS category_name, pc.code AS category_code,
                         service_sub.name AS service_subcategory_name,
                         service_child.name AS service_sub_subcategory_name,
@@ -744,405 +857,566 @@ export const getServiceQuotationDetailController = async (req: Request, res: Res
                  LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
                  LEFT JOIN vendors v ON v.id = st.vendor_id
                  WHERE st.id = $1 ${isClient ? "AND st.client_user_id = $2" : ""}`,
-                isClient ? [id, authUser.userId] : [id]
-            );
+        isClient ? [id, authUser.userId] : [id],
+      );
 
-            if (ticketResult.rows.length > 0) {
-                const t = ticketResult.rows[0];
-                const docsResult = await pool.query(
-                    `SELECT * FROM service_ticket_documents WHERE ticket_id = $1`,
-                    [id]
-                );
-                const ticketDocuments = await Promise.all(docsResult.rows.map(async (document: any) => ({
-                    ...document,
-                    doc_url: await getPresignedUrlOrOriginal(document.doc_url),
-                })));
+      if (ticketResult.rows.length > 0) {
+        const t = ticketResult.rows[0];
+        const docsResult = await pool.query(
+          `SELECT * FROM service_ticket_documents WHERE ticket_id = $1`,
+          [id],
+        );
+        const ticketDocuments = await Promise.all(
+          docsResult.rows.map(async (document: any) => ({
+            ...document,
+            doc_url: await getPresignedUrlOrOriginal(document.doc_url),
+          })),
+        );
 
-                // Fetch quotes submitted for this ticket (if vendor, only fetch quotes from this vendor to maintain privacy)
-                const quotesQueryParams = isVendor ? [id, vendorId] : [id];
-                const quotesResult = await pool.query(
-                    `SELECT stq.*, v.company_name AS vendor_name
+        // Fetch quotes submitted for this ticket (if vendor, only fetch quotes from this vendor to maintain privacy)
+        const quotesQueryParams = isVendor ? [id, vendorId] : [id];
+        const quotesResult = await pool.query(
+          `SELECT stq.*, v.company_name AS vendor_name
                      FROM service_ticket_quotations stq
                      JOIN vendors v ON v.id = stq.vendor_id
                      WHERE stq.ticket_id = $1 ${isVendor ? "AND stq.vendor_id = $2" : ""}
                      ORDER BY stq.created_at ASC`,
-                    quotesQueryParams
-                );
+          quotesQueryParams,
+        );
 
-                const messages = quotesResult.rows.map((q: any) => ({
-                    id: q.id,
-                    sender_role: "vendor" as const,
-                    action: "offer" as const,
-                    offer_price: String(q.total_price),
-                    note: q.quote_breakdown?.notes || `Quotation submitted by ${q.vendor_name}`,
-                    quote_breakdown: q.quote_breakdown || {},
-                    reason: null,
-                    created_at: q.created_at,
-                    sender_name: q.vendor_name,
-                }));
+        const messages = quotesResult.rows.map((q: any) => ({
+          id: q.id,
+          sender_role: "vendor" as const,
+          action: "offer" as const,
+          offer_price: String(q.total_price),
+          note:
+            q.quote_breakdown?.notes ||
+            `Quotation submitted by ${q.vendor_name}`,
+          quote_breakdown: q.quote_breakdown || {},
+          reason: null,
+          created_at: q.created_at,
+          sender_name: q.vendor_name,
+        }));
 
-                const scopeOfWork =
-                    t.ticket_payload?.symptoms ||
-                    t.ticket_payload?.problem_description ||
-                    t.ticket_payload?.technical_notes ||
-                    t.ticket_payload?.cargo_type ||
-                    t.ticket_payload?.job_title ||
-                    t.ticket_payload?.machine_name ||
-                    "Service Request";
+        const scopeOfWork =
+          t.ticket_payload?.symptoms ||
+          t.ticket_payload?.problem_description ||
+          t.ticket_payload?.technical_notes ||
+          t.ticket_payload?.cargo_type ||
+          t.ticket_payload?.job_title ||
+          t.ticket_payload?.machine_name ||
+          "Service Request";
 
-                let computedStatus = t.status;
-                if (isVendor) {
-                    if (t.status === "completed") {
-                        if (t.vendor_id && t.vendor_id !== vendorId) {
-                            computedStatus = "closed_accepted_by_other";
-                            messages.push({
-                                id: "closed_accepted_msg",
-                                sender_role: "client" as any,
-                                action: "reject" as any,
-                                offer_price: null as any,
-                                note: "Client has accepted another offer. The ticket room is closed.",
-                                quote_breakdown: {},
-                                reason: null as any,
-                                created_at: t.updated_at || t.created_at,
-                                sender_name: "System",
-                            });
-                        } else {
-                            computedStatus = "completed";
-                        }
-                    } else if (t.status === "accepted" || t.status === "in_progress") {
-                        if (t.vendor_id && t.vendor_id !== vendorId) {
-                            computedStatus = "closed_accepted_by_other";
-                            messages.push({
-                                id: "closed_accepted_msg",
-                                sender_role: "client" as any,
-                                action: "reject" as any,
-                                offer_price: null as any,
-                                note: "Client has accepted another offer. The ticket room is closed.",
-                                quote_breakdown: {},
-                                reason: null as any,
-                                created_at: t.updated_at || t.created_at,
-                                sender_name: "System",
-                            });
-                        } else if (t.vendor_id === vendorId) {
-                            computedStatus = "client_accepted";
-                        } else {
-                            computedStatus = "closed_accepted_by_other";
-                        }
-                    } else if (t.status === "broadcasted" || t.status === "quoted") {
-                        computedStatus = quotesResult.rows.length > 0 ? "vendor_offered" : "pending_vendor";
-                    }
-                } else if (isClient) {
-                    if (t.status === "broadcasted") computedStatus = "pending_vendor";
-                    else if (t.status === "quoted") computedStatus = "vendor_offered";
-                    else if (t.status === "accepted") computedStatus = "client_accepted";
-                }
-
-                const quotationRow = {
-                    id: t.id,
-                    status: computedStatus,
-                    scope_of_work: scopeOfWork,
-                    requested_price: t.ticket_payload?.estimated_fare || null,
-                    agreed_price: t.total_amount ? String(t.total_amount) : null,
-                    created_at: t.created_at,
-                    updated_at: t.updated_at,
-                    service_id: t.category_id,
-                    user_id: t.client_user_id,
-                    vendor_id: t.vendor_id || vendorId,
-                    service_name: t.category_name || "Industrial Service",
-                    subcategory_name: t.service_subcategory_name || null,
-                    sub_subcategory_name: t.service_sub_subcategory_name || null,
-                    ticket_payload: t.ticket_payload || {},
-                    documents: ticketDocuments,
-                    client_name: t.client_name,
-                    client_email: t.client_email,
-                    base_document_url: docsResult.rows[0]?.doc_url || null,
-                    delivery_days: 7,
-                    pricing_type: "custom",
-                    moq: 1,
-                };
-
-                return res.status(200).json({
-                    data: {
-                        quotation: quotationRow,
-                        messages,
-                    },
-                });
+        let computedStatus = t.status;
+        if (isVendor) {
+          if (t.status === "completed") {
+            if (t.vendor_id && t.vendor_id !== vendorId) {
+              computedStatus = "closed_accepted_by_other";
+              messages.push({
+                id: "closed_accepted_msg",
+                sender_role: "client" as any,
+                action: "reject" as any,
+                offer_price: null as any,
+                note: "Client has accepted another offer. The ticket room is closed.",
+                quote_breakdown: {},
+                reason: null as any,
+                created_at: t.updated_at || t.created_at,
+                sender_name: "System",
+              });
+            } else {
+              computedStatus = "completed";
             }
-
-            return res.status(404).json({ message: "Quotation not found" });
+          } else if (t.status === "accepted" || t.status === "in_progress") {
+            if (t.vendor_id && t.vendor_id !== vendorId) {
+              computedStatus = "closed_accepted_by_other";
+              messages.push({
+                id: "closed_accepted_msg",
+                sender_role: "client" as any,
+                action: "reject" as any,
+                offer_price: null as any,
+                note: "Client has accepted another offer. The ticket room is closed.",
+                quote_breakdown: {},
+                reason: null as any,
+                created_at: t.updated_at || t.created_at,
+                sender_name: "System",
+              });
+            } else if (t.vendor_id === vendorId) {
+              computedStatus = "client_accepted";
+            } else {
+              computedStatus = "closed_accepted_by_other";
+            }
+          } else if (t.status === "broadcasted" || t.status === "quoted") {
+            computedStatus =
+              quotesResult.rows.length > 0
+                ? "vendor_offered"
+                : "pending_vendor";
+          }
+        } else if (isClient) {
+          if (t.status === "broadcasted") computedStatus = "pending_vendor";
+          else if (t.status === "quoted") computedStatus = "vendor_offered";
+          else if (t.status === "accepted") computedStatus = "client_accepted";
         }
 
-        const quotationRow = quotationResult.rows[0];
+        const quotationRow = {
+          id: t.id,
+          status: computedStatus,
+          scope_of_work: scopeOfWork,
+          requested_price: t.ticket_payload?.estimated_fare || null,
+          agreed_price: t.total_amount ? String(t.total_amount) : null,
+          created_at: t.created_at,
+          updated_at: t.updated_at,
+          service_id: t.category_id,
+          user_id: t.client_user_id,
+          vendor_id: t.vendor_id || vendorId,
+          service_name: t.category_name || "Industrial Service",
+          subcategory_name: t.service_subcategory_name || null,
+          sub_subcategory_name: t.service_sub_subcategory_name || null,
+          ticket_payload: t.ticket_payload || {},
+          documents: ticketDocuments,
+          client_name: t.client_name,
+          client_email: t.client_email,
+          base_document_url: docsResult.rows[0]?.doc_url || null,
+          delivery_days: 7,
+          pricing_type: "custom",
+          moq: 1,
+        };
 
-        // Presign S3 documents
-        if (quotationRow.base_document_s3_key) {
-            try {
-                quotationRow.base_document_url = await getPresignedUrl(quotationRow.base_document_s3_key);
-            } catch (s3Err) {
-                console.error("Failed to generate presigned URL for service base doc:", s3Err);
-            }
-        }
-        if (quotationRow.vendor_document_s3_key) {
-            try {
-                quotationRow.vendor_document_url = await getPresignedUrl(quotationRow.vendor_document_s3_key);
-            } catch (s3Err) {
-                console.error("Failed to generate presigned URL for service vendor doc:", s3Err);
-            }
-        }
+        return res.status(200).json({
+          data: {
+            quotation: quotationRow,
+            messages,
+          },
+        });
+      }
 
-        const messagesResult = await pool.query(
-            `SELECT sqm.id, sqm.sender_role, sqm.action, sqm.offer_price, sqm.note, sqm.reason, sqm.created_at,
+      return res.status(404).json({ message: "Quotation not found" });
+    }
+
+    const quotationRow = quotationResult.rows[0];
+
+    // Presign S3 documents
+    if (quotationRow.base_document_s3_key) {
+      try {
+        quotationRow.base_document_url = await getPresignedUrl(
+          quotationRow.base_document_s3_key,
+        );
+      } catch (s3Err) {
+        console.error(
+          "Failed to generate presigned URL for service base doc:",
+          s3Err,
+        );
+      }
+    }
+    if (quotationRow.vendor_document_s3_key) {
+      try {
+        quotationRow.vendor_document_url = await getPresignedUrl(
+          quotationRow.vendor_document_s3_key,
+        );
+      } catch (s3Err) {
+        console.error(
+          "Failed to generate presigned URL for service vendor doc:",
+          s3Err,
+        );
+      }
+    }
+
+    const messagesResult = await pool.query(
+      `SELECT sqm.id, sqm.sender_role, sqm.action, sqm.offer_price, sqm.note, sqm.reason, sqm.created_at,
                     u.name AS sender_name
              FROM service_quotation_messages sqm
              JOIN users u ON u.id = sqm.sender_user_id
              WHERE sqm.quotation_id = $1
              ORDER BY sqm.created_at ASC`,
-            [id]
-        );
+      [id],
+    );
 
-        return res.status(200).json({
-            data: {
-                quotation: quotationRow,
-                messages: messagesResult.rows,
-            },
-        });
-    } catch (error) {
-        console.error("Error fetching service quotation detail:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({
+      data: {
+        quotation: quotationRow,
+        messages: messagesResult.rows,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching service quotation detail:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const respondServiceQuotationController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser) {
-        return res.status(401).json({ message: "Unauthorized" });
-    }
+export const respondServiceQuotationController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
 
-    const { id } = req.params;
-    const { action, offerPrice, note, reason, deliveryDays, tokenPercentage, quoteBreakdown } = req.body as Record<string, unknown>;
+  const { id } = req.params;
+  const {
+    action,
+    offerPrice,
+    note,
+    reason,
+    deliveryDays,
+    tokenPercentage,
+    quoteBreakdown,
+  } = req.body as Record<string, unknown>;
 
-    const VALID_CLIENT_ACTIONS = new Set(["counter", "accept", "reject"]);
-    const VALID_VENDOR_ACTIONS = new Set(["offer", "counter", "accept", "reject"]);
+  const VALID_CLIENT_ACTIONS = new Set(["counter", "accept", "reject"]);
+  const VALID_VENDOR_ACTIONS = new Set([
+    "offer",
+    "counter",
+    "accept",
+    "reject",
+  ]);
 
-    const isClient = authUser.role === "client";
-    const isVendor = authUser.role === "vendor";
+  const isClient = authUser.role === "client";
+  const isVendor = authUser.role === "vendor";
 
-    if (!isClient && !isVendor) {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+  if (!isClient && !isVendor) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const validActions = isClient ? VALID_CLIENT_ACTIONS : VALID_VENDOR_ACTIONS;
-    if (!action || typeof action !== "string" || !validActions.has(action)) {
-        return res.status(400).json({ message: `Invalid action. Allowed: ${[...validActions].join(", ")}` });
-    }
+  const validActions = isClient ? VALID_CLIENT_ACTIONS : VALID_VENDOR_ACTIONS;
+  if (!action || typeof action !== "string" || !validActions.has(action)) {
+    return res
+      .status(400)
+      .json({
+        message: `Invalid action. Allowed: ${[...validActions].join(", ")}`,
+      });
+  }
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-        let quotationResult;
-        let senderRole: string;
-        let vendorUserId: string | null = null;
-        let vendorId: string | null = null;
-        let createdBookingId: string | null = null;
+    let quotationResult;
+    let senderRole: string;
+    let vendorUserId: string | null = null;
+    let vendorId: string | null = null;
+    let createdBookingId: string | null = null;
 
-        if (isClient) {
-            quotationResult = await client.query(
-                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id, v.user_id AS vendor_user_id 
+    if (isClient) {
+      quotationResult = await client.query(
+        `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id, v.user_id AS vendor_user_id 
                  FROM service_quotations sq 
                  LEFT JOIN vendors v ON v.id = sq.vendor_id 
                  WHERE sq.id = $1 AND sq.user_id = $2 LIMIT 1`,
-                [id, authUser.userId]
-            );
-            senderRole = "client";
-            if (quotationResult.rows.length > 0) {
-                vendorUserId = quotationResult.rows[0].vendor_user_id;
-            }
-        } else {
-            vendorId = await getVendorIdByUserId(authUser.userId);
-            if (!vendorId) {
-                await client.query("ROLLBACK");
-                return res.status(403).json({ message: "Vendor profile not found" });
-            }
-            quotationResult = await client.query(
-                `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id 
+        [id, authUser.userId],
+      );
+      senderRole = "client";
+      if (quotationResult.rows.length > 0) {
+        vendorUserId = quotationResult.rows[0].vendor_user_id;
+      }
+    } else {
+      vendorId = await getVendorIdByUserId(authUser.userId);
+      if (!vendorId) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({ message: "Vendor profile not found" });
+      }
+      quotationResult = await client.query(
+        `SELECT sq.id, sq.status, sq.vendor_id, sq.service_id, sq.scope_of_work, sq.user_id, sq.broadcast_group_id 
                  FROM service_quotations sq 
                  WHERE sq.id = $1 AND sq.vendor_id = $2 LIMIT 1`,
-                [id, vendorId]
+        [id, vendorId],
+      );
+      senderRole = "vendor";
+    }
+
+    if (quotationResult.rows.length === 0) {
+      // Check if this is a universal service ticket
+      const ticketResult = await client.query(
+        `SELECT * FROM service_tickets WHERE id = $1`,
+        [id],
+      );
+
+      if (ticketResult.rows.length > 0) {
+        const t = ticketResult.rows[0];
+        const resolvedVendorId =
+          vendorId || (await getVendorIdByUserId(authUser.userId));
+
+        if (action === "offer" || action === "counter") {
+          if (!resolvedVendorId) {
+            await client.query("ROLLBACK");
+            return res
+              .status(403)
+              .json({ message: "Vendor profile required to submit offer." });
+          }
+
+          const isJobInquiryTicket =
+            t.ticket_payload?.service_code === "job_inquiry" ||
+            t.ticket_payload?.service_name === "Job Inquiry";
+          let safeQuoteBreakdown =
+            quoteBreakdown &&
+            typeof quoteBreakdown === "object" &&
+            !Array.isArray(quoteBreakdown)
+              ? quoteBreakdown
+              : {};
+          let quotePrice = offerPrice ? Number(offerPrice) : 0;
+          if (isJobInquiryTicket) {
+            const requestedItems = Array.isArray(
+              t.ticket_payload?.job_work_items,
+            )
+              ? t.ticket_payload.job_work_items
+              : [];
+            const submittedItems = Array.isArray(
+              (safeQuoteBreakdown as any).items,
+            )
+              ? (safeQuoteBreakdown as any).items
+              : [];
+            const pricedItems = requestedItems.map(
+              (requested: any, index: number) => {
+                const submitted =
+                  submittedItems.find(
+                    (item: any) => item.request_item_id === requested.id,
+                  ) || submittedItems[index];
+                const rate = Number(submitted?.unit_price ?? submitted?.rate);
+                if (!Number.isFinite(rate) || rate <= 0)
+                  throw new Error(
+                    "A positive rate is required for each requested item.",
+                  );
+                const quantity = Number(requested.quantity);
+                return {
+                  name: requested.item_name || requested.name,
+                  item_name: requested.item_name || requested.name,
+                  quantity,
+                  unit: requested.unit,
+                  unit_price: rate,
+                  rate,
+                  amount: quantity * rate,
+                  request_item_id: requested.id,
+                  material_grade: requested.material_grade || "",
+                  last_accepted_delivery_date:
+                    requested.last_accepted_delivery_date || "",
+                  preferred_delivery_date:
+                    requested.preferred_delivery_date || "",
+                };
+              },
             );
-            senderRole = "vendor";
-        }
-
-        if (quotationResult.rows.length === 0) {
-            // Check if this is a universal service ticket
-            const ticketResult = await client.query(
-                `SELECT * FROM service_tickets WHERE id = $1`,
-                [id]
+            const subtotal = pricedItems.reduce(
+              (sum: number, item: any) => sum + item.amount,
+              0,
             );
-
-            if (ticketResult.rows.length > 0) {
-                const t = ticketResult.rows[0];
-                const resolvedVendorId = vendorId || (await getVendorIdByUserId(authUser.userId));
-
-                if (action === "offer" || action === "counter") {
-                    if (!resolvedVendorId) {
-                        await client.query("ROLLBACK");
-                        return res.status(403).json({ message: "Vendor profile required to submit offer." });
-                    }
-
-                    const quotePrice = offerPrice ? Number(offerPrice) : 0;
-                    await client.query(
-                        `INSERT INTO service_ticket_quotations 
+            const gstAmount = subtotal * 0.18;
+            quotePrice = Math.round((subtotal + gstAmount) * 100) / 100;
+            safeQuoteBreakdown = {
+              items: pricedItems,
+              service_charge: 0,
+              travel_charge: 0,
+              other_charge: 0,
+              subtotal,
+              gst_rate: 18,
+              gst_amount: gstAmount,
+              total: quotePrice,
+            };
+          }
+          await client.query(
+            `INSERT INTO service_ticket_quotations 
                             (ticket_id, vendor_id, total_price, quote_breakdown, status)
                          VALUES ($1, $2, $3, $4, 'pending')`,
-                        [
-                            id,
-                            resolvedVendorId,
-                            quotePrice,
-                            JSON.stringify({
-                                ...(quoteBreakdown && typeof quoteBreakdown === "object" && !Array.isArray(quoteBreakdown) ? quoteBreakdown : {}),
-                                notes: note || reason || "",
-                                delivery_days: deliveryDays || 7,
-                            }),
-                        ]
-                    );
+            [
+              id,
+              resolvedVendorId,
+              quotePrice,
+              JSON.stringify({
+                ...safeQuoteBreakdown,
+                ...(!isJobInquiryTicket
+                  ? {
+                      notes: note || reason || "",
+                      delivery_days: deliveryDays || 7,
+                    }
+                  : {}),
+              }),
+            ],
+          );
 
-                    await client.query(
-                        `UPDATE service_tickets 
+          await client.query(
+            `UPDATE service_tickets 
                          SET status = 'quoted', updated_at = NOW()
                          WHERE id = $1`,
-                        [id]
-                    );
+            [id],
+          );
 
-                    await client.query("COMMIT");
+          await client.query("COMMIT");
 
-                    if (t.client_user_id) {
-                        const vendorRow = await client.query(`SELECT company_name FROM vendors WHERE id = $1`, [resolvedVendorId]);
-                        const vendorName = vendorRow.rows[0]?.company_name || "Vendor";
+          if (t.client_user_id) {
+            const vendorRow = await client.query(
+              `SELECT company_name FROM vendors WHERE id = $1`,
+              [resolvedVendorId],
+            );
+            const vendorName = vendorRow.rows[0]?.company_name || "Vendor";
 
-                        await createNotification({
-                            userId: t.client_user_id,
-                            type: "quotation_offer_received",
-                            title: "New Quotation Received",
-                            body: `Vendor ${vendorName} submitted a quotation of ₹${quotePrice} for your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}".`,
-                            referenceType: "service_ticket",
-                            referenceId: id as string,
-                        }).catch((err) => console.error("[Notification] Failed to notify client of service offer:", err));
-                    }
+            await createNotification({
+              userId: t.client_user_id,
+              type: "quotation_offer_received",
+              title: "New Quotation Received",
+              body: `Vendor ${vendorName} submitted a quotation of ₹${quotePrice} for your service request "${t.ticket_payload?.job_title || t.ticket_number || "Service Request"}".`,
+              referenceType: "service_ticket",
+              referenceId: id as string,
+            }).catch((err) =>
+              console.error(
+                "[Notification] Failed to notify client of service offer:",
+                err,
+              ),
+            );
+          }
 
-                    return res.status(200).json({ message: "Quotation offer submitted successfully." });
-                }
+          return res
+            .status(200)
+            .json({ message: "Quotation offer submitted successfully." });
+        }
 
-                if (action === "accept") {
-                    await client.query(
-                        `UPDATE service_tickets 
+        if (action === "accept") {
+          await client.query(
+            `UPDATE service_tickets 
                          SET status = 'accepted', total_amount = COALESCE($1, total_amount), updated_at = NOW()
                          WHERE id = $2`,
-                        [offerPrice ? Number(offerPrice) : null, id]
-                    );
+            [offerPrice ? Number(offerPrice) : null, id],
+          );
 
-                    await client.query("COMMIT");
+          await client.query("COMMIT");
 
-                    if (t.client_user_id) {
-                        await createNotification({
-                            userId: t.client_user_id,
-                            type: "quotation_accepted",
-                            title: "Service Proposal Accepted",
-                            body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}" status has been updated to accepted.`,
-                            referenceType: "service_ticket",
-                            referenceId: id as string,
-                        }).catch((err) => console.error("[Notification] Failed to notify client of accept:", err));
-                    }
+          if (t.client_user_id) {
+            await createNotification({
+              userId: t.client_user_id,
+              type: "quotation_accepted",
+              title: "Service Proposal Accepted",
+              body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || "Service Request"}" status has been updated to accepted.`,
+              referenceType: "service_ticket",
+              referenceId: id as string,
+            }).catch((err) =>
+              console.error(
+                "[Notification] Failed to notify client of accept:",
+                err,
+              ),
+            );
+          }
 
-                    return res.status(200).json({ message: "Service quotation accepted." });
-                }
+          return res
+            .status(200)
+            .json({ message: "Service quotation accepted." });
+        }
 
-                if (action === "reject") {
-                    await client.query(
-                        `UPDATE service_tickets 
+        if (action === "reject") {
+          await client.query(
+            `UPDATE service_tickets 
                          SET status = 'cancelled', updated_at = NOW()
                          WHERE id = $1`,
-                        [id]
-                    );
+            [id],
+          );
 
-                    await client.query("COMMIT");
+          await client.query("COMMIT");
 
-                    if (t.client_user_id) {
-                        await createNotification({
-                            userId: t.client_user_id,
-                            type: "quotation_rejected",
-                            title: "Service Request Closed",
-                            body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || 'Service Request'}" was declined or cancelled.`,
-                            referenceType: "service_ticket",
-                            referenceId: id as string,
-                        }).catch((err) => console.error("[Notification] Failed to notify client of reject:", err));
-                    }
-
-                    return res.status(200).json({ message: "Service quotation rejected." });
-                }
-            }
-
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Quotation not found" });
-        }
-
-        const quotation = quotationResult.rows[0];
-        const terminalStatuses = new Set(["client_accepted", "client_rejected", "vendor_rejected", "cancelled"]);
-        if (terminalStatuses.has(quotation.status)) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "This quotation is already finalised" });
-        }
-
-        const statusMap: Record<string, string> = {
-            offer: "vendor_offered",
-            counter: isClient ? "client_countered" : "vendor_countered",
-            accept: isClient ? "client_accepted" : "vendor_offered",
-            reject: isClient ? "client_rejected" : "vendor_rejected",
-        };
-
-        const newStatus = statusMap[action]!;
-        const priceVal = offerPrice != null ? parsePositiveDecimal(offerPrice) : null;
-
-        // When client accepts, the agreed_price is the vendor's current offered price (already on the row as agreed_price)
-        // When vendor offers/counters, the agreed_price is the price they send
-        let agreedPrice: string | null = null;
-        if (action === "offer" || action === "counter") {
-            agreedPrice = priceVal;
-        } else if (action === "accept" && isClient) {
-            // Use the vendor's offered price from the DB row
-            const currentPriceResult = await client.query(
-                `SELECT agreed_price, current_offer_price FROM service_quotations WHERE id = $1`,
-                [id]
+          if (t.client_user_id) {
+            await createNotification({
+              userId: t.client_user_id,
+              type: "quotation_rejected",
+              title: "Service Request Closed",
+              body: `Your service request "${t.ticket_payload?.job_title || t.ticket_number || "Service Request"}" was declined or cancelled.`,
+              referenceType: "service_ticket",
+              referenceId: id as string,
+            }).catch((err) =>
+              console.error(
+                "[Notification] Failed to notify client of reject:",
+                err,
+              ),
             );
-            const rawPrice = currentPriceResult.rows[0]?.agreed_price;
-            const currentOfferPrice = currentPriceResult.rows[0]?.current_offer_price;
+          }
 
-            if (rawPrice == null && currentOfferPrice == null) {
-                await client.query("ROLLBACK");
-                return res.status(400).json({ message: "Cannot accept a quotation with no offer price set by vendor." });
-            }
-
-            agreedPrice = rawPrice != null ? String(rawPrice) : (currentOfferPrice != null ? String(currentOfferPrice) : null);
+          return res
+            .status(200)
+            .json({ message: "Service quotation rejected." });
         }
+      }
 
-        // On vendor first offer, delivery_days and token_percentage are required
-        if (isVendor && action === "offer" && (deliveryDays == null || tokenPercentage == null)) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "Timeline days and token money percentage are required for the first offer" });
-        }
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Quotation not found" });
+    }
 
-        // Calculate token amount if provided
-        let tokenAmt: number | null = null;
-        if (priceVal != null && tokenPercentage != null) {
-            const priceNum = Number(priceVal);
-            const totalVal = priceNum;
-            const gstAmount = totalVal * 0.18; // 18% GST
-            const grandTotal = totalVal + gstAmount;
-            tokenAmt = (Number(tokenPercentage) / 100) * grandTotal;
-        }
+    const quotation = quotationResult.rows[0];
+    const terminalStatuses = new Set([
+      "client_accepted",
+      "client_rejected",
+      "vendor_rejected",
+      "cancelled",
+    ]);
+    if (terminalStatuses.has(quotation.status)) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ message: "This quotation is already finalised" });
+    }
 
-        await client.query(
-            `UPDATE service_quotations
+    const statusMap: Record<string, string> = {
+      offer: "vendor_offered",
+      counter: isClient ? "client_countered" : "vendor_countered",
+      accept: isClient ? "client_accepted" : "vendor_offered",
+      reject: isClient ? "client_rejected" : "vendor_rejected",
+    };
+
+    const newStatus = statusMap[action]!;
+    const priceVal =
+      offerPrice != null ? parsePositiveDecimal(offerPrice) : null;
+
+    // When client accepts, the agreed_price is the vendor's current offered price (already on the row as agreed_price)
+    // When vendor offers/counters, the agreed_price is the price they send
+    let agreedPrice: string | null = null;
+    if (action === "offer" || action === "counter") {
+      agreedPrice = priceVal;
+    } else if (action === "accept" && isClient) {
+      // Use the vendor's offered price from the DB row
+      const currentPriceResult = await client.query(
+        `SELECT agreed_price, current_offer_price FROM service_quotations WHERE id = $1`,
+        [id],
+      );
+      const rawPrice = currentPriceResult.rows[0]?.agreed_price;
+      const currentOfferPrice = currentPriceResult.rows[0]?.current_offer_price;
+
+      if (rawPrice == null && currentOfferPrice == null) {
+        await client.query("ROLLBACK");
+        return res
+          .status(400)
+          .json({
+            message:
+              "Cannot accept a quotation with no offer price set by vendor.",
+          });
+      }
+
+      agreedPrice =
+        rawPrice != null
+          ? String(rawPrice)
+          : currentOfferPrice != null
+            ? String(currentOfferPrice)
+            : null;
+    }
+
+    // On vendor first offer, delivery_days and token_percentage are required
+    if (
+      isVendor &&
+      action === "offer" &&
+      (deliveryDays == null || tokenPercentage == null)
+    ) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({
+          message:
+            "Timeline days and token money percentage are required for the first offer",
+        });
+    }
+
+    // Calculate token amount if provided
+    let tokenAmt: number | null = null;
+    if (priceVal != null && tokenPercentage != null) {
+      const priceNum = Number(priceVal);
+      const totalVal = priceNum;
+      const gstAmount = totalVal * 0.18; // 18% GST
+      const grandTotal = totalVal + gstAmount;
+      tokenAmt = (Number(tokenPercentage) / 100) * grandTotal;
+    }
+
+    await client.query(
+      `UPDATE service_quotations
              SET status = $1, 
                  agreed_price = COALESCE($2, agreed_price), 
                  delivery_days = COALESCE($4, delivery_days),
@@ -1152,282 +1426,359 @@ export const respondServiceQuotationController = async (req: Request, res: Respo
                  current_offer_by = $8,
                  updated_at = NOW()
              WHERE id = $3`,
-            [
-                newStatus, 
-                agreedPrice, 
-                id, 
-                deliveryDays != null ? Number(deliveryDays) : null,
-                tokenPercentage != null ? Number(tokenPercentage) : null,
-                tokenAmt,
-                priceVal != null ? Number(priceVal) : null,
-                senderRole
-            ]
-        );
+      [
+        newStatus,
+        agreedPrice,
+        id,
+        deliveryDays != null ? Number(deliveryDays) : null,
+        tokenPercentage != null ? Number(tokenPercentage) : null,
+        tokenAmt,
+        priceVal != null ? Number(priceVal) : null,
+        senderRole,
+      ],
+    );
 
-        // Broadcast group handling: Only expire other vendors' requests when a quotation is accepted by the client
-        if (newStatus === "client_accepted" && quotation.broadcast_group_id) {
-            const otherBroadcastQuotes = await client.query(
-                `SELECT sq.id, v.user_id AS vendor_user_id
+    // Broadcast group handling: Only expire other vendors' requests when a quotation is accepted by the client
+    if (newStatus === "client_accepted" && quotation.broadcast_group_id) {
+      const otherBroadcastQuotes = await client.query(
+        `SELECT sq.id, v.user_id AS vendor_user_id
                  FROM service_quotations sq
                  JOIN vendors v ON v.id = sq.vendor_id
                  WHERE sq.broadcast_group_id = $1 AND sq.id != $2`,
-                [quotation.broadcast_group_id, id]
-            );
+        [quotation.broadcast_group_id, id],
+      );
 
-            await client.query(
-                `UPDATE service_quotations
+      await client.query(
+        `UPDATE service_quotations
                  SET status = 'closed_accepted_by_other', updated_at = NOW()
                  WHERE broadcast_group_id = $1 AND id != $2`,
-                [quotation.broadcast_group_id, id]
-            );
+        [quotation.broadcast_group_id, id],
+      );
 
-            for (const row of otherBroadcastQuotes.rows) {
-                if (row.vendor_user_id) {
-                    await createNotification({
-                        userId: row.vendor_user_id,
-                        type: "quotation_rejected",
-                        title: "Service request claimed by another vendor",
-                        body: "A nearby vendor's offer has been accepted by the client. This request is now closed.",
-                        referenceType: "service_quotation",
-                        referenceId: row.id,
-                    });
-                }
-            }
+      for (const row of otherBroadcastQuotes.rows) {
+        if (row.vendor_user_id) {
+          await createNotification({
+            userId: row.vendor_user_id,
+            type: "quotation_rejected",
+            title: "Service request claimed by another vendor",
+            body: "A nearby vendor's offer has been accepted by the client. This request is now closed.",
+            referenceType: "service_quotation",
+            referenceId: row.id,
+          });
         }
+      }
+    }
 
-        if (newStatus === "client_accepted") {
-            const vsResult = await client.query(
-                `SELECT id FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
-                [quotation.vendor_id, quotation.service_id]
-            );
-            if (vsResult.rows.length > 0) {
-                const vendorServiceId = vsResult.rows[0].id;
-                const bookingResult = await client.query(
-                    `INSERT INTO service_bookings (user_id, vendor_id, vendor_service_id, total_amount, status, payment_status, booking_notes, created_at, updated_at)
+    if (newStatus === "client_accepted") {
+      const vsResult = await client.query(
+        `SELECT id FROM vendor_services WHERE vendor_id = $1 AND service_id = $2 LIMIT 1`,
+        [quotation.vendor_id, quotation.service_id],
+      );
+      if (vsResult.rows.length > 0) {
+        const vendorServiceId = vsResult.rows[0].id;
+        const bookingResult = await client.query(
+          `INSERT INTO service_bookings (user_id, vendor_id, vendor_service_id, total_amount, status, payment_status, booking_notes, created_at, updated_at)
                      VALUES ($1, $2, $3, $4, 'confirmed', 'pending', $5, NOW(), NOW())
                      RETURNING id`,
-                    [quotation.user_id, quotation.vendor_id, vendorServiceId, agreedPrice || priceVal || 0, quotation.scope_of_work]
-                );
-                const bookingId = bookingResult.rows[0].id;
-                createdBookingId = bookingId;
-                await client.query(
-                    `UPDATE service_quotations SET booking_id = $1 WHERE id = $2`,
-                    [bookingId, id]
-                );
-            }
-        }
-
-        await client.query(
-            `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note, reason)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [id, authUser.userId, senderRole, action, priceVal, normalizeText(note), normalizeText(reason)]
+          [
+            quotation.user_id,
+            quotation.vendor_id,
+            vendorServiceId,
+            agreedPrice || priceVal || 0,
+            quotation.scope_of_work,
+          ],
         );
+        const bookingId = bookingResult.rows[0].id;
+        createdBookingId = bookingId;
+        await client.query(
+          `UPDATE service_quotations SET booking_id = $1 WHERE id = $2`,
+          [bookingId, id],
+        );
+      }
+    }
 
-        await client.query("COMMIT");
+    await client.query(
+      `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note, reason)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        id,
+        authUser.userId,
+        senderRole,
+        action,
+        priceVal,
+        normalizeText(note),
+        normalizeText(reason),
+      ],
+    );
 
-        // Generate vendor-specific document on offer or counter (non-blocking)
-        const finalDeliveryDays = deliveryDays !== null && deliveryDays !== undefined ? Number(deliveryDays) : null;
-        const finalTokenPercentage = tokenPercentage !== null && tokenPercentage !== undefined ? Number(tokenPercentage) : null;
+    await client.query("COMMIT");
 
-        if ((action === "offer" || action === "counter") && isVendor && vendorId && finalDeliveryDays != null && finalTokenPercentage != null) {
-            const vendorNameResult = await pool.query(
-                `SELECT company_name FROM vendors WHERE id = $1`, [vendorId]
-            );
-            const vendorName = vendorNameResult.rows[0]?.company_name || "Vendor";
+    // Generate vendor-specific document on offer or counter (non-blocking)
+    const finalDeliveryDays =
+      deliveryDays !== null && deliveryDays !== undefined
+        ? Number(deliveryDays)
+        : null;
+    const finalTokenPercentage =
+      tokenPercentage !== null && tokenPercentage !== undefined
+        ? Number(tokenPercentage)
+        : null;
 
-            generateVendorServiceQuotationDocument({
-                serviceQuotationId: id as string,
-                vendorId,
-                vendorName,
-                offerPrice: Number(priceVal),
-                deliveryDays: finalDeliveryDays,
-                tokenPercentage: finalTokenPercentage,
-            }).then(async (result) => {
-                await pool.query(
-                    `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
-                    [result.documentUrl, result.s3Key, id as string]
-                );
-            }).catch((err) => {
-                console.error(`[ServiceQuotationDocument] Failed to generate vendor document for quotation ${id as string}:`, err);
-            });
-        } else if (action === "counter" && isClient) {
-            const fullQuoteResult = await pool.query(
-                `SELECT sq.vendor_id, sq.delivery_days, sq.token_percentage, v.company_name
+    if (
+      (action === "offer" || action === "counter") &&
+      isVendor &&
+      vendorId &&
+      finalDeliveryDays != null &&
+      finalTokenPercentage != null
+    ) {
+      const vendorNameResult = await pool.query(
+        `SELECT company_name FROM vendors WHERE id = $1`,
+        [vendorId],
+      );
+      const vendorName = vendorNameResult.rows[0]?.company_name || "Vendor";
+
+      generateVendorServiceQuotationDocument({
+        serviceQuotationId: id as string,
+        vendorId,
+        vendorName,
+        offerPrice: Number(priceVal),
+        deliveryDays: finalDeliveryDays,
+        tokenPercentage: finalTokenPercentage,
+      })
+        .then(async (result) => {
+          await pool.query(
+            `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+            [result.documentUrl, result.s3Key, id as string],
+          );
+        })
+        .catch((err) => {
+          console.error(
+            `[ServiceQuotationDocument] Failed to generate vendor document for quotation ${id as string}:`,
+            err,
+          );
+        });
+    } else if (action === "counter" && isClient) {
+      const fullQuoteResult = await pool.query(
+        `SELECT sq.vendor_id, sq.delivery_days, sq.token_percentage, v.company_name
                  FROM service_quotations sq
                  JOIN vendors v ON sq.vendor_id = v.id
                  WHERE sq.id = $1 LIMIT 1`,
-                [id as string]
-            );
-            if (fullQuoteResult.rows.length > 0) {
-                const row = fullQuoteResult.rows[0];
-                if (row.delivery_days != null && row.token_percentage != null) {
-                    generateVendorServiceQuotationDocument({
-                        serviceQuotationId: id as string,
-                        vendorId: row.vendor_id,
-                        vendorName: row.company_name || "Vendor",
-                        offerPrice: Number(priceVal),
-                        deliveryDays: Number(row.delivery_days),
-                        tokenPercentage: Number(row.token_percentage),
-                    }).then(async (result) => {
-                        await pool.query(
-                            `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
-                            [result.documentUrl, result.s3Key, id as string]
-                        );
-                    }).catch((err) => {
-                        console.error(`[ServiceQuotationDocument] Failed to generate vendor document on client counter for quotation ${id as string}:`, err);
-                    });
-                }
-            }
-        }
-
-        // Trigger real-time notifications for quotation updates
-        if (isClient && vendorUserId) {
-            await createNotification({
-                userId: vendorUserId,
-                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : "quotation_counter_received",
-                title: "Quotation Update",
-                body: action === "counter"
-                    ? "Client counter-offered for your service request"
-                    : action === "accept"
-                    ? "Client accepted your service request"
-                    : "Client rejected your service request",
-                referenceType: "service_quotation",
-                referenceId: id as string,
-            });
-        } else if (isVendor && quotation.user_id) {
-            await createNotification({
-                userId: quotation.user_id,
-                type: action === "reject" ? "quotation_rejected" : action === "accept" ? "quotation_accepted" : (action === "offer" ? "quotation_offer_received" : "quotation_counter_received"),
-                title: action === "offer" ? "New Quotation Received" : "Quotation Update",
-                body: action === "offer"
-                    ? "Vendor submitted an offer for your service request"
-                    : action === "counter"
-                    ? "Vendor counter-offered for your service request"
-                    : action === "accept"
-                    ? "Vendor accepted your service request"
-                    : "Vendor rejected your service request",
-                referenceType: "service_quotation",
-                referenceId: id as string,
+        [id as string],
+      );
+      if (fullQuoteResult.rows.length > 0) {
+        const row = fullQuoteResult.rows[0];
+        if (row.delivery_days != null && row.token_percentage != null) {
+          generateVendorServiceQuotationDocument({
+            serviceQuotationId: id as string,
+            vendorId: row.vendor_id,
+            vendorName: row.company_name || "Vendor",
+            offerPrice: Number(priceVal),
+            deliveryDays: Number(row.delivery_days),
+            tokenPercentage: Number(row.token_percentage),
+          })
+            .then(async (result) => {
+              await pool.query(
+                `UPDATE service_quotations SET vendor_document_url = $1, vendor_document_s3_key = $2 WHERE id = $3`,
+                [result.documentUrl, result.s3Key, id as string],
+              );
+            })
+            .catch((err) => {
+              console.error(
+                `[ServiceQuotationDocument] Failed to generate vendor document on client counter for quotation ${id as string}:`,
+                err,
+              );
             });
         }
-
-        // Trigger real-time notification to vendor for service booking creation
-        if (createdBookingId && vendorUserId) {
-            await createNotification({
-                userId: vendorUserId,
-                type: "general",
-                title: "New Service Booking",
-                body: "A new service booking was created from your accepted quotation",
-                referenceType: "service_booking",
-                referenceId: createdBookingId,
-            }).catch((err) => {
-                console.error(`[Notification] Failed to send service booking notification for ${createdBookingId}:`, err);
-            });
-        }
-
-        return res.status(200).json({ message: "Quotation updated", data: { status: newStatus } });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error responding to service quotation:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+      }
     }
+
+    // Trigger real-time notifications for quotation updates
+    if (isClient && vendorUserId) {
+      await createNotification({
+        userId: vendorUserId,
+        type:
+          action === "reject"
+            ? "quotation_rejected"
+            : action === "accept"
+              ? "quotation_accepted"
+              : "quotation_counter_received",
+        title: "Quotation Update",
+        body:
+          action === "counter"
+            ? "Client counter-offered for your service request"
+            : action === "accept"
+              ? "Client accepted your service request"
+              : "Client rejected your service request",
+        referenceType: "service_quotation",
+        referenceId: id as string,
+      });
+    } else if (isVendor && quotation.user_id) {
+      await createNotification({
+        userId: quotation.user_id,
+        type:
+          action === "reject"
+            ? "quotation_rejected"
+            : action === "accept"
+              ? "quotation_accepted"
+              : action === "offer"
+                ? "quotation_offer_received"
+                : "quotation_counter_received",
+        title:
+          action === "offer" ? "New Quotation Received" : "Quotation Update",
+        body:
+          action === "offer"
+            ? "Vendor submitted an offer for your service request"
+            : action === "counter"
+              ? "Vendor counter-offered for your service request"
+              : action === "accept"
+                ? "Vendor accepted your service request"
+                : "Vendor rejected your service request",
+        referenceType: "service_quotation",
+        referenceId: id as string,
+      });
+    }
+
+    // Trigger real-time notification to vendor for service booking creation
+    if (createdBookingId && vendorUserId) {
+      await createNotification({
+        userId: vendorUserId,
+        type: "general",
+        title: "New Service Booking",
+        body: "A new service booking was created from your accepted quotation",
+        referenceType: "service_booking",
+        referenceId: createdBookingId,
+      }).catch((err) => {
+        console.error(
+          `[Notification] Failed to send service booking notification for ${createdBookingId}:`,
+          err,
+        );
+      });
+    }
+
+    return res
+      .status(200)
+      .json({ message: "Quotation updated", data: { status: newStatus } });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error responding to service quotation:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const submitServiceReviewController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Only clients can submit service reviews" });
-    }
+export const submitServiceReviewController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res
+      .status(403)
+      .json({ message: "Only clients can submit service reviews" });
+  }
 
-    const { bookingId, rating, reviewTitle, reviewText, images } = req.body as Record<string, unknown>;
+  const { bookingId, rating, reviewTitle, reviewText, images } =
+    req.body as Record<string, unknown>;
 
-    if (!bookingId || typeof bookingId !== "string") {
-        return res.status(400).json({ message: "bookingId is required" });
-    }
+  if (!bookingId || typeof bookingId !== "string") {
+    return res.status(400).json({ message: "bookingId is required" });
+  }
 
-    const parsedRating = parseRating(rating);
-    if (parsedRating === null) {
-        return res.status(400).json({ message: "rating must be an integer between 1 and 5" });
-    }
+  const parsedRating = parseRating(rating);
+  if (parsedRating === null) {
+    return res
+      .status(400)
+      .json({ message: "rating must be an integer between 1 and 5" });
+  }
 
-    const imageList = Array.isArray(images)
-        ? images.filter((img): img is string => typeof img === "string")
-        : [];
+  const imageList = Array.isArray(images)
+    ? images.filter((img): img is string => typeof img === "string")
+    : [];
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-        const bookingResult = await client.query(
-            `SELECT sb.id, sb.status, sb.vendor_id, vs.service_id
+    const bookingResult = await client.query(
+      `SELECT sb.id, sb.status, sb.vendor_id, vs.service_id
              FROM service_bookings sb
              JOIN vendor_services vs ON vs.id = sb.vendor_service_id
              WHERE sb.id = $1 AND sb.user_id = $2 LIMIT 1`,
-            [bookingId, authUser.userId]
-        );
+      [bookingId, authUser.userId],
+    );
 
-        if (bookingResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Booking not found" });
-        }
-
-        const booking = bookingResult.rows[0];
-
-        if (booking.status !== "completed") {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "Reviews can only be submitted after the service is completed" });
-        }
-
-        await client.query(
-            `INSERT INTO service_reviews (booking_id, user_id, service_id, vendor_id, rating, review_title, review_text, images)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [
-                bookingId,
-                authUser.userId,
-                booking.service_id,
-                booking.vendor_id,
-                parsedRating,
-                normalizeText(reviewTitle),
-                normalizeText(reviewText),
-                imageList,
-            ]
-        );
-
-        await updateServiceAggregate(client, booking.service_id, parsedRating);
-        await updateVendorAggregate(client, booking.vendor_id, parsedRating);
-
-        await client.query("COMMIT");
-
-        return res.status(201).json({ message: "Review submitted successfully" });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        const code = (error as { code?: string }).code;
-        if (code === "23505") {
-            return res.status(409).json({ message: "You have already reviewed this booking" });
-        }
-        console.error("Error submitting service review:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+    if (bookingResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Booking not found" });
     }
+
+    const booking = bookingResult.rows[0];
+
+    if (booking.status !== "completed") {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({
+          message:
+            "Reviews can only be submitted after the service is completed",
+        });
+    }
+
+    await client.query(
+      `INSERT INTO service_reviews (booking_id, user_id, service_id, vendor_id, rating, review_title, review_text, images)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        bookingId,
+        authUser.userId,
+        booking.service_id,
+        booking.vendor_id,
+        parsedRating,
+        normalizeText(reviewTitle),
+        normalizeText(reviewText),
+        imageList,
+      ],
+    );
+
+    await updateServiceAggregate(client, booking.service_id, parsedRating);
+    await updateVendorAggregate(client, booking.vendor_id, parsedRating);
+
+    await client.query("COMMIT");
+
+    return res.status(201).json({ message: "Review submitted successfully" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    const code = (error as { code?: string }).code;
+    if (code === "23505") {
+      return res
+        .status(409)
+        .json({ message: "You have already reviewed this booking" });
+    }
+    console.error("Error submitting service review:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const getVendorServiceBookingsController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getVendorServiceBookingsController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    try {
-        const result = await pool.query(
-            `SELECT
+  try {
+    const result = await pool.query(
+      `SELECT
                 sb.id, sb.status, sb.payment_status, sb.total_amount,
                 sb.scheduled_start, sb.scheduled_end, sb.booking_notes, sb.created_at,
                 sb.vendor_service_id,
@@ -1442,31 +1793,36 @@ export const getVendorServiceBookingsController = async (req: Request, res: Resp
              LEFT JOIN service_quotations sq ON sq.booking_id = sb.id
              WHERE sb.vendor_id = $1
              ORDER BY sb.created_at DESC`,
-            [vendorId]
-        );
+      [vendorId],
+    );
 
-        return res.status(200).json({ data: result.rows });
-    } catch (error) {
-        console.error("Error fetching vendor service bookings:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: result.rows });
+  } catch (error) {
+    console.error("Error fetching vendor service bookings:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const getVendorServiceBookingByIdController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getVendorServiceBookingByIdController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const { id } = req.params;
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const { id } = req.params;
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    try {
-        const result = await pool.query(
-            `SELECT
+  try {
+    const result = await pool.query(
+      `SELECT
                 sb.id, sb.status, sb.payment_status, sb.total_amount,
                 sb.scheduled_start, sb.scheduled_end, sb.booking_notes, sb.created_at,
                 sb.vendor_service_id,
@@ -1484,143 +1840,172 @@ export const getVendorServiceBookingByIdController = async (req: Request, res: R
              LEFT JOIN service_quotations sq ON sq.booking_id = sb.id
              WHERE sb.id = $1 AND sb.vendor_id = $2
              LIMIT 1`,
-            [id, vendorId]
-        );
+      [id, vendorId],
+    );
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({ message: "Booking not found" });
-        }
-
-        return res.status(200).json({ data: result.rows[0] });
-    } catch (error) {
-        console.error("Error fetching vendor service booking by ID:", error);
-        return res.status(500).json({ message: "Internal server error" });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "Booking not found" });
     }
+
+    return res.status(200).json({ data: result.rows[0] });
+  } catch (error) {
+    console.error("Error fetching vendor service booking by ID:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const vendorCompleteBookingController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const vendorCompleteBookingController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const { id } = req.params;
-    const { otp } = req.body as { otp?: unknown };
+  const { id } = req.params;
+  const { otp } = req.body as { otp?: unknown };
 
-    if (!otp || typeof otp !== "string" || !/^\d{6}$/.test(otp)) {
-        return res.status(400).json({ message: "A valid 6-digit OTP is required" });
-    }
+  if (!otp || typeof otp !== "string" || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ message: "A valid 6-digit OTP is required" });
+  }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-        const bookingResult = await client.query(
-            `SELECT id, user_id, status, completion_otp_hash, completion_otp_expires_at, completion_otp_failed_attempts
+    const bookingResult = await client.query(
+      `SELECT id, user_id, status, completion_otp_hash, completion_otp_expires_at, completion_otp_failed_attempts
              FROM service_bookings
              WHERE id = $1 AND vendor_id = $2 LIMIT 1`,
-            [id, vendorId]
-        );
+      [id, vendorId],
+    );
 
-        if (bookingResult.rows.length === 0) {
-            await client.query("ROLLBACK");
-            return res.status(404).json({ message: "Booking not found" });
-        }
+    if (bookingResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Booking not found" });
+    }
 
-        const booking = bookingResult.rows[0];
+    const booking = bookingResult.rows[0];
 
-        if (booking.status !== "in_progress") {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "Booking is not in progress" });
-        }
+    if (booking.status !== "in_progress") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "Booking is not in progress" });
+    }
 
-        if (!booking.completion_otp_hash || !booking.completion_otp_expires_at) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "No OTP has been generated for this booking. Ask the client to generate one." });
-        }
+    if (!booking.completion_otp_hash || !booking.completion_otp_expires_at) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({
+          message:
+            "No OTP has been generated for this booking. Ask the client to generate one.",
+        });
+    }
 
-        if (new Date() > new Date(booking.completion_otp_expires_at)) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: "OTP has expired. Ask the client to generate a new one." });
-        }
+    if (new Date() > new Date(booking.completion_otp_expires_at)) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({
+          message: "OTP has expired. Ask the client to generate a new one.",
+        });
+    }
 
-        const MAX_ATTEMPTS = 5;
-        if (booking.completion_otp_failed_attempts >= MAX_ATTEMPTS) {
-            await client.query("ROLLBACK");
-            return res.status(429).json({ message: "Too many failed OTP attempts. Ask the client to generate a new OTP." });
-        }
+    const MAX_ATTEMPTS = 5;
+    if (booking.completion_otp_failed_attempts >= MAX_ATTEMPTS) {
+      await client.query("ROLLBACK");
+      return res
+        .status(429)
+        .json({
+          message:
+            "Too many failed OTP attempts. Ask the client to generate a new OTP.",
+        });
+    }
 
-        const inputHash = crypto.createHash("sha256").update(otp).digest("hex");
+    const inputHash = crypto.createHash("sha256").update(otp).digest("hex");
 
-        if (inputHash !== booking.completion_otp_hash) {
-            await client.query(
-                `UPDATE service_bookings
+    if (inputHash !== booking.completion_otp_hash) {
+      await client.query(
+        `UPDATE service_bookings
                  SET completion_otp_failed_attempts = completion_otp_failed_attempts + 1, updated_at = NOW()
                  WHERE id = $1`,
-                [id]
-            );
-            await client.query("COMMIT");
-            const remaining = MAX_ATTEMPTS - (booking.completion_otp_failed_attempts + 1);
-            return res.status(400).json({ message: `Incorrect OTP. ${remaining} attempt(s) remaining.` });
-        }
+        [id],
+      );
+      await client.query("COMMIT");
+      const remaining =
+        MAX_ATTEMPTS - (booking.completion_otp_failed_attempts + 1);
+      return res
+        .status(400)
+        .json({ message: `Incorrect OTP. ${remaining} attempt(s) remaining.` });
+    }
 
-        await client.query(
-            `UPDATE service_bookings
+    await client.query(
+      `UPDATE service_bookings
              SET status = 'completed',
                  completion_otp_hash = NULL,
                  completion_otp_expires_at = NULL,
                  completion_otp_failed_attempts = 0,
                  updated_at = NOW()
              WHERE id = $1`,
-            [id]
-        );
+      [id],
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        // Trigger notification to client
-        if (booking.user_id) {
-            await createNotification({
-                userId: booking.user_id,
-                type: "general",
-                title: "Service Booking Completed",
-                body: "Your service booking has been marked as completed",
-                referenceType: "service_booking",
-                referenceId: id as string,
-            }).catch((err) => {
-                console.error("Error sending booking completion notification:", err);
-            });
-        }
-
-        return res.status(200).json({ message: "Service booking marked as completed" });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error completing service booking:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
+    // Trigger notification to client
+    if (booking.user_id) {
+      await createNotification({
+        userId: booking.user_id,
+        type: "general",
+        title: "Service Booking Completed",
+        body: "Your service booking has been marked as completed",
+        referenceType: "service_booking",
+        referenceId: id as string,
+      }).catch((err) => {
+        console.error("Error sending booking completion notification:", err);
+      });
     }
+
+    return res
+      .status(200)
+      .json({ message: "Service booking marked as completed" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error completing service booking:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const getVendorServiceQuotationsController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getVendorServiceQuotationsController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    try {
-        // Fetch legacy service quotations
-        const legacyResult = await pool.query(
-            `SELECT
+  try {
+    // Fetch legacy service quotations
+    const legacyResult = await pool.query(
+      `SELECT
                 sq.id, sq.status, sq.scope_of_work, sq.requested_price, sq.agreed_price, sq.created_at, sq.updated_at,
                 s.name AS service_name,
                 u.name AS client_name
@@ -1629,12 +2014,12 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
              JOIN users u ON u.id = sq.user_id
              WHERE sq.vendor_id = $1
              ORDER BY sq.updated_at DESC`,
-            [vendorId]
-        );
+      [vendorId],
+    );
 
-        // Fetch Universal Service Hub tickets available to / assigned to this vendor
-        const ticketsResult = await pool.query(
-            `SELECT
+    // Fetch Universal Service Hub tickets available to / assigned to this vendor
+    const ticketsResult = await pool.query(
+      `SELECT
                 st.id,
                 CASE 
                     WHEN st.status = 'broadcasted' THEN 'pending_vendor'
@@ -1671,67 +2056,77 @@ export const getVendorServiceQuotationsController = async (req: Request, res: Re
              LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
              WHERE (st.vendor_id = $1 OR st.vendor_id IS NULL OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1))
              ORDER BY st.updated_at DESC`,
-            [vendorId]
-        );
+      [vendorId],
+    );
 
-        const allQuotations = [...legacyResult.rows, ...ticketsResult.rows].sort(
-            (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-        );
+    const allQuotations = [...legacyResult.rows, ...ticketsResult.rows].sort(
+      (a, b) =>
+        new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    );
 
-        return res.status(200).json({ data: allQuotations });
-    } catch (error) {
-        console.error("Error fetching vendor service quotations:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: allQuotations });
+  } catch (error) {
+    console.error("Error fetching vendor service quotations:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const getSubcategoriesController = async (req: Request, res: Response): Promise<Response> => {
-    const categoryId = req.params.categoryId || req.query.categoryId;
-    try {
-        let query = `
+export const getSubcategoriesController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const categoryId = req.params.categoryId || req.query.categoryId;
+  try {
+    let query = `
             SELECT s.id, s.category_id, s.name, s.description
             FROM service_subcategories s
             JOIN service_categories pc ON pc.id = s.category_id
             WHERE pc.is_active = TRUE
         `;
-        const params: any[] = [];
-        if (categoryId && typeof categoryId === "string") {
-            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
-            if (isUuid) {
-                query += ` AND s.category_id = $1`;
-                params.push(categoryId);
-            } else {
-                query += ` AND (LOWER(pc.code) = LOWER($1) OR LOWER(pc.label) = LOWER($1))`;
-                params.push(categoryId.trim());
-            }
-        }
-        query += ` ORDER BY s.name ASC`;
-        const result = await pool.query(query, params);
-        return res.status(200).json({ data: result.rows });
-    } catch (error) {
-        console.error("Error fetching subcategories:", error);
-        return res.status(500).json({ message: "Internal server error" });
+    const params: any[] = [];
+    if (categoryId && typeof categoryId === "string") {
+      const isUuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          categoryId,
+        );
+      if (isUuid) {
+        query += ` AND s.category_id = $1`;
+        params.push(categoryId);
+      } else {
+        query += ` AND (LOWER(pc.code) = LOWER($1) OR LOWER(pc.label) = LOWER($1))`;
+        params.push(categoryId.trim());
+      }
     }
+    query += ` ORDER BY s.name ASC`;
+    const result = await pool.query(query, params);
+    return res.status(200).json({ data: result.rows });
+  } catch (error) {
+    console.error("Error fetching subcategories:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
 // ── Admin Service Approvals & Management ────────────────────────────────────
 
-export const adminListPendingServicesController = async (req: Request, res: Response): Promise<Response> => {
-    try {
-        const { status = "all" } = req.query;
-        let whereClause = "";
-        const params: any[] = [];
+export const adminListPendingServicesController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  try {
+    const { status = "all" } = req.query;
+    let whereClause = "";
+    const params: any[] = [];
 
-        if (status === "pending") {
-            whereClause = "WHERE s.status = 'pending'";
-        } else if (status === "approved") {
-            whereClause = "WHERE s.status = 'approved'";
-        } else if (status === "rejected") {
-            whereClause = "WHERE s.status = 'rejected'";
-        }
+    if (status === "pending") {
+      whereClause = "WHERE s.status = 'pending'";
+    } else if (status === "approved") {
+      whereClause = "WHERE s.status = 'approved'";
+    } else if (status === "rejected") {
+      whereClause = "WHERE s.status = 'rejected'";
+    }
 
-        const result = await pool.query(
-            `SELECT 
+    const result = await pool.query(
+      `SELECT 
                 s.id, s.name, s.description, s.status, s.rating, s.review_count, s.created_at, s.updated_at,
                 pc.label AS category_name, pc.id AS category_id,
                 ss.name AS subcategory_name,
@@ -1751,117 +2146,152 @@ export const adminListPendingServicesController = async (req: Request, res: Resp
              LEFT JOIN users u ON u.id = v.user_id
              ${whereClause}
              ORDER BY s.created_at DESC`,
-            params
-        );
+      params,
+    );
 
-        const rows = await Promise.all(
-            result.rows.map(async (row) => {
-                const imageUrl = await getPresignedUrlOrOriginal(row.image_url);
-                const mediaGallery = Array.isArray(row.media_gallery)
-                    ? await Promise.all(row.media_gallery.map(async (m: any) => ({
-                        ...m,
-                        media_url: await getPresignedUrlOrOriginal(m.media_url),
-                      })))
-                    : [];
-                return {
-                    ...row,
-                    image_url: imageUrl,
-                    media_gallery: mediaGallery,
-                };
-            })
-        );
+    const rows = await Promise.all(
+      result.rows.map(async (row) => {
+        const imageUrl = await getPresignedUrlOrOriginal(row.image_url);
+        const mediaGallery = Array.isArray(row.media_gallery)
+          ? await Promise.all(
+              row.media_gallery.map(async (m: any) => ({
+                ...m,
+                media_url: await getPresignedUrlOrOriginal(m.media_url),
+              })),
+            )
+          : [];
+        return {
+          ...row,
+          image_url: imageUrl,
+          media_gallery: mediaGallery,
+        };
+      }),
+    );
 
-        return res.status(200).json({ data: rows });
-    } catch (error) {
-        console.error("Error listing admin pending services:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: rows });
+  } catch (error) {
+    console.error("Error listing admin pending services:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const adminApproveServiceController = async (req: Request, res: Response): Promise<Response> => {
-    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    try {
-        const serviceResult = await pool.query(`SELECT id, name FROM services WHERE id = $1 LIMIT 1`, [serviceId]);
-        if (serviceResult.rows.length === 0) {
-            return res.status(404).json({ message: "Service not found" });
-        }
-        const serviceName = serviceResult.rows[0].name;
-
-        await pool.query(`UPDATE services SET status = 'approved', updated_at = NOW() WHERE id = $1`, [serviceId]);
-        await pool.query(`UPDATE vendor_services SET is_active = true WHERE service_id = $1`, [serviceId]);
-
-        // Find associated vendor user id to send notification
-        const vendorResult = await pool.query(
-            `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
-            [serviceId]
-        );
-        if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
-            await createNotification({
-                userId: vendorResult.rows[0].user_id,
-                type: "vendor_product_approved",
-                title: "Service Approved ✓",
-                body: `Your service offering "${serviceName}" has been approved by Admin and is now live globally!`,
-                referenceType: "service",
-                referenceId: serviceId,
-            });
-        }
-
-        return res.status(200).json({ message: "Service approved successfully!" });
-    } catch (error) {
-        console.error("Error approving service:", error);
-        return res.status(500).json({ message: "Internal server error" });
+export const adminApproveServiceController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const serviceId = Array.isArray(req.params.id)
+    ? req.params.id[0]
+    : req.params.id;
+  try {
+    const serviceResult = await pool.query(
+      `SELECT id, name FROM services WHERE id = $1 LIMIT 1`,
+      [serviceId],
+    );
+    if (serviceResult.rows.length === 0) {
+      return res.status(404).json({ message: "Service not found" });
     }
+    const serviceName = serviceResult.rows[0].name;
+
+    await pool.query(
+      `UPDATE services SET status = 'approved', updated_at = NOW() WHERE id = $1`,
+      [serviceId],
+    );
+    await pool.query(
+      `UPDATE vendor_services SET is_active = true WHERE service_id = $1`,
+      [serviceId],
+    );
+
+    // Find associated vendor user id to send notification
+    const vendorResult = await pool.query(
+      `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
+      [serviceId],
+    );
+    if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
+      await createNotification({
+        userId: vendorResult.rows[0].user_id,
+        type: "vendor_product_approved",
+        title: "Service Approved ✓",
+        body: `Your service offering "${serviceName}" has been approved by Admin and is now live globally!`,
+        referenceType: "service",
+        referenceId: serviceId,
+      });
+    }
+
+    return res.status(200).json({ message: "Service approved successfully!" });
+  } catch (error) {
+    console.error("Error approving service:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const adminRejectServiceController = async (req: Request, res: Response): Promise<Response> => {
-    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const { reason } = req.body || {};
-    try {
-        const serviceResult = await pool.query(`SELECT id, name FROM services WHERE id = $1 LIMIT 1`, [serviceId]);
-        if (serviceResult.rows.length === 0) {
-            return res.status(404).json({ message: "Service not found" });
-        }
-        const serviceName = serviceResult.rows[0].name;
-
-        await pool.query(`UPDATE services SET status = 'rejected', updated_at = NOW() WHERE id = $1`, [serviceId]);
-        await pool.query(`UPDATE vendor_services SET is_active = false WHERE service_id = $1`, [serviceId]);
-
-        const vendorResult = await pool.query(
-            `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
-            [serviceId]
-        );
-        if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
-            await createNotification({
-                userId: vendorResult.rows[0].user_id,
-                type: "vendor_product_rejected",
-                title: "Service Rejected",
-                body: `Your service offering "${serviceName}" was rejected by Admin. ${reason ? `Reason: ${reason}` : ""}`,
-                referenceType: "service",
-                referenceId: serviceId,
-            });
-        }
-
-        return res.status(200).json({ message: "Service rejected successfully." });
-    } catch (error) {
-        console.error("Error rejecting service:", error);
-        return res.status(500).json({ message: "Internal server error" });
+export const adminRejectServiceController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const serviceId = Array.isArray(req.params.id)
+    ? req.params.id[0]
+    : req.params.id;
+  const { reason } = req.body || {};
+  try {
+    const serviceResult = await pool.query(
+      `SELECT id, name FROM services WHERE id = $1 LIMIT 1`,
+      [serviceId],
+    );
+    if (serviceResult.rows.length === 0) {
+      return res.status(404).json({ message: "Service not found" });
     }
+    const serviceName = serviceResult.rows[0].name;
+
+    await pool.query(
+      `UPDATE services SET status = 'rejected', updated_at = NOW() WHERE id = $1`,
+      [serviceId],
+    );
+    await pool.query(
+      `UPDATE vendor_services SET is_active = false WHERE service_id = $1`,
+      [serviceId],
+    );
+
+    const vendorResult = await pool.query(
+      `SELECT v.user_id FROM vendor_services vs JOIN vendors v ON v.id = vs.vendor_id WHERE vs.service_id = $1 LIMIT 1`,
+      [serviceId],
+    );
+    if (vendorResult.rows.length > 0 && vendorResult.rows[0].user_id) {
+      await createNotification({
+        userId: vendorResult.rows[0].user_id,
+        type: "vendor_product_rejected",
+        title: "Service Rejected",
+        body: `Your service offering "${serviceName}" was rejected by Admin. ${reason ? `Reason: ${reason}` : ""}`,
+        referenceType: "service",
+        referenceId: serviceId,
+      });
+    }
+
+    return res.status(200).json({ message: "Service rejected successfully." });
+  } catch (error) {
+    console.error("Error rejecting service:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const getVendorServiceOfferingsController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const getVendorServiceOfferingsController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    try {
-        const result = await pool.query(
-            `SELECT 
+  try {
+    const result = await pool.query(
+      `SELECT 
                 vs.id, vs.price, vs.pricing_type, vs.moq, 
                 CASE WHEN s.status = 'approved' THEN true ELSE vs.is_active END AS is_active, 
                 vs.created_at, vs.service_id,
@@ -1874,241 +2304,315 @@ export const getVendorServiceOfferingsController = async (req: Request, res: Res
              LEFT JOIN service_categories pc ON pc.id = s.category_id
              WHERE vs.vendor_id = $1
              ORDER BY vs.created_at DESC`,
-            [vendorId]
-        );
+      [vendorId],
+    );
 
-        const rows = await Promise.all(
-            result.rows.map(async (row) => ({
-                ...row,
-                service_image: await getPresignedUrlOrOriginal(row.service_image),
-            }))
-        );
+    const rows = await Promise.all(
+      result.rows.map(async (row) => ({
+        ...row,
+        service_image: await getPresignedUrlOrOriginal(row.service_image),
+      })),
+    );
 
-        return res.status(200).json({ data: rows });
-    } catch (error) {
-        console.error("Error fetching vendor service offerings:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(200).json({ data: rows });
+  } catch (error) {
+    console.error("Error fetching vendor service offerings:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const createServiceAndOfferingController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
+export const createServiceAndOfferingController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
+
+  const {
+    name,
+    description,
+    categoryId,
+    subcategoryId,
+    price,
+    pricingType,
+    moq,
+    deliveryDays,
+    tokenPercentage,
+  } = req.body;
+
+  if (!name || !categoryId) {
+    return res
+      .status(400)
+      .json({ message: "Service name and categoryId are required" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Resolve Category ID (whether passed as UUID, code, or label)
+    let resolvedCategoryId: string | null = null;
+    const isUuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        String(categoryId).trim(),
+      );
+    if (isUuid) {
+      const catCheck = await client.query(
+        `SELECT id FROM service_categories WHERE id = $1`,
+        [categoryId],
+      );
+      if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+    }
+    if (!resolvedCategoryId) {
+      const catCheck = await client.query(
+        `SELECT id FROM service_categories WHERE LOWER(label) = LOWER($1) OR LOWER(code) = LOWER($1) LIMIT 1`,
+        [String(categoryId).trim()],
+      );
+      if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+    }
+    if (!resolvedCategoryId) {
+      const catCheck = await client.query(
+        `SELECT id FROM service_categories WHERE label ILIKE $1 OR code ILIKE $1 LIMIT 1`,
+        [`%${String(categoryId).trim()}%`],
+      );
+      if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
+    }
+    if (!resolvedCategoryId) {
+      await client.query("ROLLBACK");
+      return res
+        .status(400)
+        .json({ message: `Invalid category reference: "${categoryId}"` });
     }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
+    // Resolve Subcategory ID if present
+    let resolvedSubcategoryId: string | null = null;
+    if (subcategoryId) {
+      const isSubUuid =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          String(subcategoryId).trim(),
+        );
+      if (isSubUuid) {
+        const subCheck = await client.query(
+          `SELECT id FROM service_subcategories WHERE id = $1`,
+          [subcategoryId],
+        );
+        if (subCheck.rows.length > 0)
+          resolvedSubcategoryId = subCheck.rows[0].id;
+      }
+      if (!resolvedSubcategoryId) {
+        const subCheck = await client.query(
+          `SELECT id FROM service_subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+          [String(subcategoryId).trim()],
+        );
+        if (subCheck.rows.length > 0)
+          resolvedSubcategoryId = subCheck.rows[0].id;
+      }
     }
 
-    const { name, description, categoryId, subcategoryId, price, pricingType, moq, deliveryDays, tokenPercentage } = req.body;
-
-    if (!name || !categoryId) {
-        return res.status(400).json({ message: "Service name and categoryId are required" });
-    }
-
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
-
-        // Resolve Category ID (whether passed as UUID, code, or label)
-        let resolvedCategoryId: string | null = null;
-        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(categoryId).trim());
-        if (isUuid) {
-            const catCheck = await client.query(`SELECT id FROM service_categories WHERE id = $1`, [categoryId]);
-            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
-        }
-        if (!resolvedCategoryId) {
-            const catCheck = await client.query(
-                `SELECT id FROM service_categories WHERE LOWER(label) = LOWER($1) OR LOWER(code) = LOWER($1) LIMIT 1`,
-                [String(categoryId).trim()]
-            );
-            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
-        }
-        if (!resolvedCategoryId) {
-            const catCheck = await client.query(
-                `SELECT id FROM service_categories WHERE label ILIKE $1 OR code ILIKE $1 LIMIT 1`,
-                [`%${String(categoryId).trim()}%`]
-            );
-            if (catCheck.rows.length > 0) resolvedCategoryId = catCheck.rows[0].id;
-        }
-        if (!resolvedCategoryId) {
-            await client.query("ROLLBACK");
-            return res.status(400).json({ message: `Invalid category reference: "${categoryId}"` });
-        }
-
-        // Resolve Subcategory ID if present
-        let resolvedSubcategoryId: string | null = null;
-        if (subcategoryId) {
-            const isSubUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(subcategoryId).trim());
-            if (isSubUuid) {
-                const subCheck = await client.query(`SELECT id FROM service_subcategories WHERE id = $1`, [subcategoryId]);
-                if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;
-            }
-            if (!resolvedSubcategoryId) {
-                const subCheck = await client.query(
-                    `SELECT id FROM service_subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
-                    [String(subcategoryId).trim()]
-                );
-                if (subCheck.rows.length > 0) resolvedSubcategoryId = subCheck.rows[0].id;
-            }
-        }
-
-        // Create Master Service with status 'pending'
-        const sRes = await client.query(
-            `INSERT INTO services (name, description, category_id, subcategory_id, status, created_at, updated_at)
+    // Create Master Service with status 'pending'
+    const sRes = await client.query(
+      `INSERT INTO services (name, description, category_id, subcategory_id, status, created_at, updated_at)
              VALUES ($1, $2, $3, $4, 'pending', NOW(), NOW())
              RETURNING *`,
-            [name.trim(), description || null, resolvedCategoryId, resolvedSubcategoryId || null]
-        );
-        const newService = sRes.rows[0];
+      [
+        name.trim(),
+        description || null,
+        resolvedCategoryId,
+        resolvedSubcategoryId || null,
+      ],
+    );
+    const newService = sRes.rows[0];
 
-        // Create Vendor Service Offering with is_active = false (pending admin approval)
-        const vsRes = await client.query(
-            `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
+    // Create Vendor Service Offering with is_active = false (pending admin approval)
+    const vsRes = await client.query(
+      `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, false, NOW(), NOW())
              RETURNING *`,
-            [
-                vendorId,
-                newService.id,
-                price != null ? parseFloat(price) : 0,
-                pricingType || "flat",
-                moq != null ? parseInt(moq) : 1,
-                deliveryDays != null ? parseInt(deliveryDays) : null,
-                tokenPercentage != null ? parseFloat(tokenPercentage) : null,
-            ]
-        );
+      [
+        vendorId,
+        newService.id,
+        price != null ? parseFloat(price) : 0,
+        pricingType || "flat",
+        moq != null ? parseInt(moq) : 1,
+        deliveryDays != null ? parseInt(deliveryDays) : null,
+        tokenPercentage != null ? parseFloat(tokenPercentage) : null,
+      ],
+    );
 
-        await client.query("COMMIT");
+    await client.query("COMMIT");
 
-        return res.status(201).json({
-            message: "Custom service submitted and pending admin approval!",
-            data: {
-                ...newService,
-                offering: vsRes.rows[0],
-            },
-        });
-    } catch (error) {
-        await client.query("ROLLBACK");
-        console.error("Error creating service & offering:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    } finally {
-        client.release();
-    }
+    return res.status(201).json({
+      message: "Custom service submitted and pending admin approval!",
+      data: {
+        ...newService,
+        offering: vsRes.rows[0],
+      },
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Error creating service & offering:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  } finally {
+    client.release();
+  }
 };
 
-export const createVendorServiceOfferingController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "vendor") {
-        return res.status(403).json({ message: "Forbidden" });
-    }
+export const createVendorServiceOfferingController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
 
-    const vendorId = await getVendorIdByUserId(authUser.userId);
-    if (!vendorId) {
-        return res.status(403).json({ message: "Vendor profile not found or not approved" });
-    }
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) {
+    return res
+      .status(403)
+      .json({ message: "Vendor profile not found or not approved" });
+  }
 
-    const { serviceId, price, pricingType, moq, deliveryDays, tokenPercentage } = req.body;
-    if (!serviceId) {
-        return res.status(400).json({ message: "serviceId is required" });
-    }
+  const { serviceId, price, pricingType, moq, deliveryDays, tokenPercentage } =
+    req.body;
+  if (!serviceId) {
+    return res.status(400).json({ message: "serviceId is required" });
+  }
 
-    try {
-        const vsRes = await pool.query(
-            `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
+  try {
+    const vsRes = await pool.query(
+      `INSERT INTO vendor_services (vendor_id, service_id, price, pricing_type, moq, delivery_days, token_percentage, is_active, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, false, NOW(), NOW())
              RETURNING *`,
-            [
-                vendorId,
-                serviceId,
-                price != null ? parseFloat(price) : 0,
-                pricingType || "flat",
-                moq != null ? parseInt(moq) : 1,
-                deliveryDays != null ? parseInt(deliveryDays) : null,
-                tokenPercentage != null ? parseFloat(tokenPercentage) : null,
-            ]
-        );
+      [
+        vendorId,
+        serviceId,
+        price != null ? parseFloat(price) : 0,
+        pricingType || "flat",
+        moq != null ? parseInt(moq) : 1,
+        deliveryDays != null ? parseInt(deliveryDays) : null,
+        tokenPercentage != null ? parseFloat(tokenPercentage) : null,
+      ],
+    );
 
-        return res.status(201).json({
-            message: "Vendor service offering added!",
-            data: vsRes.rows[0],
-        });
-    } catch (error) {
-        console.error("Error adding vendor service offering:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(201).json({
+      message: "Vendor service offering added!",
+      data: vsRes.rows[0],
+    });
+  } catch (error) {
+    console.error("Error adding vendor service offering:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const uploadServiceMediaController = async (req: Request, res: Response): Promise<Response> => {
-    const serviceId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const file = req.file;
+export const uploadServiceMediaController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const serviceId = Array.isArray(req.params.id)
+    ? req.params.id[0]
+    : req.params.id;
+  const file = req.file;
 
-    if (!file) {
-        return res.status(400).json({ message: "No file uploaded" });
-    }
+  if (!file) {
+    return res.status(400).json({ message: "No file uploaded" });
+  }
 
-    try {
-        const isVideo = file.mimetype.startsWith("video/");
-        const isImage = file.mimetype.startsWith("image/");
-        const mediaType = isVideo ? "video" : "image";
+  try {
+    const isVideo = file.mimetype.startsWith("video/");
+    const isImage = file.mimetype.startsWith("image/");
+    const mediaType = isVideo ? "video" : "image";
 
-        const uploadResult = await uploadBufferToS3(file.buffer, file.originalname, file.mimetype);
-        
-        const countRes = await pool.query(
-            `SELECT COUNT(*) FROM services_media WHERE service_id = $1 AND is_primary = true`, [serviceId]
-        );
-        const isPrimary = parseInt(countRes.rows[0].count, 10) === 0 && isImage;
+    const uploadResult = await uploadBufferToS3(
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+    );
 
-        const mediaRes = await pool.query(
-            `INSERT INTO services_media (service_id, media_url, s3_key, media_type, is_primary, approval_status, created_at)
+    const countRes = await pool.query(
+      `SELECT COUNT(*) FROM services_media WHERE service_id = $1 AND is_primary = true`,
+      [serviceId],
+    );
+    const isPrimary = parseInt(countRes.rows[0].count, 10) === 0 && isImage;
+
+    const mediaRes = await pool.query(
+      `INSERT INTO services_media (service_id, media_url, s3_key, media_type, is_primary, approval_status, created_at)
              VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
              RETURNING *`,
-            [serviceId, uploadResult.url, uploadResult.s3Key, mediaType, isPrimary]
-        );
+      [serviceId, uploadResult.url, uploadResult.s3Key, mediaType, isPrimary],
+    );
 
-        return res.status(201).json({
-            message: "Media uploaded successfully",
-            data: mediaRes.rows[0],
-        });
-    } catch (error) {
-        console.error("Error uploading service media:", error);
-        return res.status(500).json({ message: "Internal server error" });
-    }
+    return res.status(201).json({
+      message: "Media uploaded successfully",
+      data: mediaRes.rows[0],
+    });
+  } catch (error) {
+    console.error("Error uploading service media:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };
 
-export const reviewServiceController = async (req: Request, res: Response): Promise<Response> => {
-    const { decision, notes, reason } = req.body || {};
-    if (decision === "approved") {
-        return adminApproveServiceController(req, res);
-    } else if (decision === "rejected") {
-        req.body.reason = notes || reason;
-        return adminRejectServiceController(req, res);
-    }
-    return res.status(400).json({ message: "Invalid decision. Must be 'approved' or 'rejected'." });
+export const reviewServiceController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const { decision, notes, reason } = req.body || {};
+  if (decision === "approved") {
+    return adminApproveServiceController(req, res);
+  } else if (decision === "rejected") {
+    req.body.reason = notes || reason;
+    return adminRejectServiceController(req, res);
+  }
+  return res
+    .status(400)
+    .json({ message: "Invalid decision. Must be 'approved' or 'rejected'." });
 };
 
 // ── Geolocation 10-Vendor Broadcast Matching Controller ───────────────────
 
-export const broadcastServiceCategoryRequestController = async (req: Request, res: Response): Promise<Response> => {
-    const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "client") {
-        return res.status(403).json({ message: "Only clients can broadcast service category requests" });
-    }
+export const broadcastServiceCategoryRequestController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "client") {
+    return res
+      .status(403)
+      .json({
+        message: "Only clients can broadcast service category requests",
+      });
+  }
 
-    const { serviceId, categoryId, scopeOfWork, requestedPrice, latitude, longitude } = req.body as Record<string, unknown>;
-    const scopeText = normalizeText(scopeOfWork);
-    if (!scopeText) {
-        return res.status(400).json({ message: "scopeOfWork is required" });
-    }
+  const {
+    serviceId,
+    categoryId,
+    scopeOfWork,
+    requestedPrice,
+    latitude,
+    longitude,
+  } = req.body as Record<string, unknown>;
+  const scopeText = normalizeText(scopeOfWork);
+  if (!scopeText) {
+    return res.status(400).json({ message: "scopeOfWork is required" });
+  }
 
-    const clientLat = latitude != null ? Number(latitude) : null;
-    const clientLng = longitude != null ? Number(longitude) : null;
-    const priceVal = requestedPrice != null ? parsePositiveDecimal(requestedPrice) : null;
+  const clientLat = latitude != null ? Number(latitude) : null;
+  const clientLng = longitude != null ? Number(longitude) : null;
+  const priceVal =
+    requestedPrice != null ? parsePositiveDecimal(requestedPrice) : null;
 
-    try {
-        // 1. Find up to 10 nearest approved service vendors in this service/category
-        let vendorQuery = `
+  try {
+    // 1. Find up to 10 nearest approved service vendors in this service/category
+    let vendorQuery = `
             SELECT DISTINCT v.id AS vendor_id, v.user_id AS vendor_user_id, va.latitude, va.longitude
             FROM vendors v
             JOIN vendor_services vs ON vs.vendor_id = v.id AND vs.is_active = true
@@ -2124,112 +2628,131 @@ export const broadcastServiceCategoryRequestController = async (req: Request, re
               AND v.vendor_type IN ('service', 'both')
         `;
 
-        const queryParams: any[] = [];
-        if (serviceId && typeof serviceId === "string") {
-            vendorQuery += ` AND s.id = $1`;
-            queryParams.push(serviceId);
-        } else if (categoryId && typeof categoryId === "string") {
-            vendorQuery += ` AND s.category_id = $1`;
-            queryParams.push(categoryId);
+    const queryParams: any[] = [];
+    if (serviceId && typeof serviceId === "string") {
+      vendorQuery += ` AND s.id = $1`;
+      queryParams.push(serviceId);
+    } else if (categoryId && typeof categoryId === "string") {
+      vendorQuery += ` AND s.category_id = $1`;
+      queryParams.push(categoryId);
+    }
+
+    const vendorResult = await pool.query(vendorQuery, queryParams);
+    let vendors = vendorResult.rows;
+
+    if (vendors.length === 0) {
+      return res
+        .status(404)
+        .json({
+          message:
+            "No active approved vendors found for this service category in your area.",
+        });
+    }
+
+    // Calculate distance if coordinates are present
+    if (
+      clientLat !== null &&
+      clientLng !== null &&
+      !isNaN(clientLat) &&
+      !isNaN(clientLng)
+    ) {
+      vendors = vendors.map((v) => {
+        const vLat = v.latitude != null ? Number(v.latitude) : null;
+        const vLng = v.longitude != null ? Number(v.longitude) : null;
+        let distance = 99999;
+        if (vLat !== null && vLng !== null && !isNaN(vLat) && !isNaN(vLng)) {
+          // Haversine formula
+          const R = 6371;
+          const dLat = (vLat - clientLat) * (Math.PI / 180);
+          const dLng = (vLng - clientLng) * (Math.PI / 180);
+          const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(clientLat * (Math.PI / 180)) *
+              Math.cos(vLat * (Math.PI / 180)) *
+              Math.sin(dLng / 2) *
+              Math.sin(dLng / 2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          distance = R * c;
         }
+        return { ...v, distance };
+      });
+      vendors.sort((a, b) => a.distance - b.distance);
+    }
 
-        const vendorResult = await pool.query(vendorQuery, queryParams);
-        let vendors = vendorResult.rows;
+    // Select top 10 nearest vendors
+    const top10Vendors = vendors.slice(0, 10);
+    const broadcastGroupId = crypto.randomUUID();
 
-        if (vendors.length === 0) {
-            return res.status(404).json({ message: "No active approved vendors found for this service category in your area." });
+    const clientDb = await pool.connect();
+    const createdQuotations: any[] = [];
+
+    try {
+      await clientDb.query("BEGIN");
+
+      for (const v of top10Vendors) {
+        // Get service_id from vendor_services if only categoryId was provided
+        let targetServiceId = serviceId as string;
+        if (!targetServiceId) {
+          const sRes = await clientDb.query(
+            `SELECT service_id FROM vendor_services vs JOIN services s ON s.id = vs.service_id WHERE vs.vendor_id = $1 AND s.category_id = $2 LIMIT 1`,
+            [v.vendor_id, categoryId],
+          );
+          targetServiceId = sRes.rows[0]?.service_id;
         }
+        if (!targetServiceId) continue;
 
-        // Calculate distance if coordinates are present
-        if (clientLat !== null && clientLng !== null && !isNaN(clientLat) && !isNaN(clientLng)) {
-            vendors = vendors.map((v) => {
-                const vLat = v.latitude != null ? Number(v.latitude) : null;
-                const vLng = v.longitude != null ? Number(v.longitude) : null;
-                let distance = 99999;
-                if (vLat !== null && vLng !== null && !isNaN(vLat) && !isNaN(vLng)) {
-                    // Haversine formula
-                    const R = 6371;
-                    const dLat = (vLat - clientLat) * (Math.PI / 180);
-                    const dLng = (vLng - clientLng) * (Math.PI / 180);
-                    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                              Math.cos(clientLat * (Math.PI / 180)) * Math.cos(vLat * (Math.PI / 180)) *
-                              Math.sin(dLng / 2) * Math.sin(dLng / 2);
-                    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                    distance = R * c;
-                }
-                return { ...v, distance };
-            });
-            vendors.sort((a, b) => a.distance - b.distance);
-        }
-
-        // Select top 10 nearest vendors
-        const top10Vendors = vendors.slice(0, 10);
-        const broadcastGroupId = crypto.randomUUID();
-
-        const clientDb = await pool.connect();
-        const createdQuotations: any[] = [];
-
-        try {
-            await clientDb.query("BEGIN");
-
-            for (const v of top10Vendors) {
-                // Get service_id from vendor_services if only categoryId was provided
-                let targetServiceId = serviceId as string;
-                if (!targetServiceId) {
-                    const sRes = await clientDb.query(
-                        `SELECT service_id FROM vendor_services vs JOIN services s ON s.id = vs.service_id WHERE vs.vendor_id = $1 AND s.category_id = $2 LIMIT 1`,
-                        [v.vendor_id, categoryId]
-                    );
-                    targetServiceId = sRes.rows[0]?.service_id;
-                }
-                if (!targetServiceId) continue;
-
-                const qRes = await clientDb.query(
-                    `INSERT INTO service_quotations (
+        const qRes = await clientDb.query(
+          `INSERT INTO service_quotations (
                         user_id, vendor_id, service_id, scope_of_work, requested_price, status, broadcast_group_id
                      )
                      VALUES ($1, $2, $3, $4, $5, 'pending_vendor', $6)
                      RETURNING id, status, created_at`,
-                    [authUser.userId, v.vendor_id, targetServiceId, scopeText, priceVal, broadcastGroupId]
-                );
-
-                const quotationId = qRes.rows[0].id;
-                createdQuotations.push(qRes.rows[0]);
-
-                await clientDb.query(
-                    `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
-                     VALUES ($1, $2, 'client', 'request', $3, $4)`,
-                    [quotationId, authUser.userId, priceVal, scopeText]
-                );
-
-                if (v.vendor_user_id) {
-                    await createNotification({
-                        userId: v.vendor_user_id,
-                        type: "quotation_request_received",
-                        title: "New nearby service request",
-                        body: `You received a nearby service category quotation request. Respond first to claim this order!`,
-                        referenceType: "service_quotation",
-                        referenceId: quotationId,
-                    });
-                }
-            }
-
-            await clientDb.query("COMMIT");
-        } catch (err) {
-            await clientDb.query("ROLLBACK");
-            throw err;
-        } finally {
-            clientDb.release();
-        }
-
-        return res.status(200).json({
-            message: `Service request successfully broadcasted to ${createdQuotations.length} nearby vendors!`,
+          [
+            authUser.userId,
+            v.vendor_id,
+            targetServiceId,
+            scopeText,
+            priceVal,
             broadcastGroupId,
-            quotationsCount: createdQuotations.length,
-        });
+          ],
+        );
 
-    } catch (error) {
-        console.error("Error broadcasting service request:", error);
-        return res.status(500).json({ message: "Internal server error" });
+        const quotationId = qRes.rows[0].id;
+        createdQuotations.push(qRes.rows[0]);
+
+        await clientDb.query(
+          `INSERT INTO service_quotation_messages (quotation_id, sender_user_id, sender_role, action, offer_price, note)
+                     VALUES ($1, $2, 'client', 'request', $3, $4)`,
+          [quotationId, authUser.userId, priceVal, scopeText],
+        );
+
+        if (v.vendor_user_id) {
+          await createNotification({
+            userId: v.vendor_user_id,
+            type: "quotation_request_received",
+            title: "New nearby service request",
+            body: `You received a nearby service category quotation request. Respond first to claim this order!`,
+            referenceType: "service_quotation",
+            referenceId: quotationId,
+          });
+        }
+      }
+
+      await clientDb.query("COMMIT");
+    } catch (err) {
+      await clientDb.query("ROLLBACK");
+      throw err;
+    } finally {
+      clientDb.release();
     }
+
+    return res.status(200).json({
+      message: `Service request successfully broadcasted to ${createdQuotations.length} nearby vendors!`,
+      broadcastGroupId,
+      quotationsCount: createdQuotations.length,
+    });
+  } catch (error) {
+    console.error("Error broadcasting service request:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 };

@@ -713,6 +713,8 @@ export async function ensureMarketplaceSchema() {
         ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS gst_percentage NUMERIC(5,2) DEFAULT 0.00;
         ALTER TABLE products_images ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'image';
         ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS pending_price NUMERIC(12,2) DEFAULT NULL CHECK (pending_price >= 0);
+          ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS pending_modifications JSONB DEFAULT NULL;
+          ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS modification_status VARCHAR(50) DEFAULT NULL;
         ALTER TABLE vendor_products ADD COLUMN IF NOT EXISTS discounted_price NUMERIC(12,2) DEFAULT NULL CHECK (discounted_price >= 0);
         ALTER TABLE order_items ADD COLUMN IF NOT EXISTS original_price NUMERIC(12,2) DEFAULT NULL;
         ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS name TEXT;

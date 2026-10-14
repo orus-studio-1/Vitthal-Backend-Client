@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import type { PoolClient } from "pg";
 import pool from "../DbConnect";
 import { getPresignedUrlOrOriginal } from "../services/s3.service";
 import { createNotification } from "./Notification.controller";
@@ -11,6 +12,10 @@ function getAuthUser(req: Request): AuthUser | null {
   const user = (req as any).user;
   if (!user?.userId) return null;
   return user as AuthUser;
+}
+
+function isGoogleMapsLink(value: unknown) {
+  return typeof value === "string" && (/^https:\/\/(?:[a-z0-9-]+\.)*google\.[a-z.]+(?:\/maps)?(?:\/|[?#]|$)/i.test(value) || /^https:\/\/maps\.app\.goo\.gl\//i.test(value));
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -70,6 +75,136 @@ export const getServiceCategoriesWithSchema = async (
     return res
       .status(500)
       .json({ success: false, message: "Failed to load service categories." });
+  }
+};
+
+const MAX_VENDOR_SERVICE_CATEGORIES = 3;
+
+export const getVendorServiceCoverage = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ success: false, message: "Vendor access required." });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT service_category_id, service_subcategory_id
+       FROM vendor_service_category_selections
+       WHERE vendor_id = (SELECT id FROM vendors WHERE user_id = $1)`,
+      [authUser.userId],
+    );
+    return res.status(200).json({
+      success: true,
+      data: {
+        category_ids: result.rows.filter((row) => row.service_subcategory_id === null).map((row) => row.service_category_id),
+        subcategory_ids: result.rows.filter((row) => row.service_subcategory_id !== null).map((row) => row.service_subcategory_id),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching vendor service coverage:", error);
+    return res.status(500).json({ success: false, message: "Failed to load service coverage." });
+  }
+};
+
+export const saveVendorServiceCoverage = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ success: false, message: "Vendor access required." });
+  }
+
+  const requestedCategoryIds = Array.isArray(req.body?.category_ids)
+    ? [...new Set(req.body.category_ids.filter((id: unknown) => typeof id === "string"))] as string[]
+    : [];
+  let categoryIds: string[] = [];
+  const subcategoryIds = Array.isArray(req.body?.subcategory_ids)
+    ? [...new Set(req.body.subcategory_ids.filter((id: unknown) => typeof id === "string"))] as string[]
+    : [];
+
+  if (requestedCategoryIds.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ||
+      subcategoryIds.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+    return res.status(400).json({ success: false, message: "Invalid service category selection." });
+  }
+
+  let transactionClient: PoolClient | undefined;
+  try {
+    const vendorResult = await pool.query(`SELECT id FROM vendors WHERE user_id = $1`, [authUser.userId]);
+    const vendorId = vendorResult.rows[0]?.id;
+    if (!vendorId) return res.status(404).json({ success: false, message: "Vendor profile not found." });
+
+    const assignedCategories = await pool.query(
+      `SELECT DISTINCT service_category_id
+       FROM vendor_service_category_selections
+       WHERE vendor_id = $1 AND service_subcategory_id IS NULL`,
+      [vendorId],
+    );
+    categoryIds = assignedCategories.rows.map((row) => row.service_category_id);
+    if (categoryIds.length > MAX_VENDOR_SERVICE_CATEGORIES) {
+      return res.status(400).json({ success: false, message: `Contact an administrator to change your assigned service categories.` });
+    }
+    if (!categoryIds.length) {
+      return res.status(400).json({ success: false, message: "Main service categories are managed by an administrator." });
+    }
+    if (requestedCategoryIds.length) {
+      const requestedSet = new Set(requestedCategoryIds);
+      if (requestedSet.size !== categoryIds.length || categoryIds.some((id) => !requestedSet.has(id))) {
+        return res.status(403).json({ success: false, message: "Main service categories are managed by an administrator." });
+      }
+    }
+
+    if (categoryIds.length) {
+      const categories = await pool.query(
+        `SELECT id FROM service_categories WHERE id = ANY($1::uuid[]) AND is_active = true`,
+        [categoryIds],
+      );
+      if (categories.rows.length !== categoryIds.length) {
+        return res.status(400).json({ success: false, message: "One or more selected service categories are unavailable." });
+      }
+    }
+
+    if (subcategoryIds.length) {
+      const nodes = await pool.query(
+        `SELECT id, category_id, parent_id FROM service_subcategories WHERE id = ANY($1::uuid[])`,
+        [subcategoryIds],
+      );
+      if (nodes.rows.length !== subcategoryIds.length || nodes.rows.some((node) => !categoryIds.includes(node.category_id))) {
+        return res.status(400).json({ success: false, message: "Selected subcategories must belong to one of your selected service categories." });
+      }
+      const selectedNodeIds = new Set(subcategoryIds);
+      if (nodes.rows.some((node) => node.parent_id && !selectedNodeIds.has(node.parent_id))) {
+        return res.status(400).json({ success: false, message: "Select the parent subcategory before its sub-subcategory." });
+      }
+    }
+
+    const client = await pool.connect();
+    transactionClient = client;
+    await client.query("BEGIN");
+    await client.query(
+      `DELETE FROM vendor_service_category_selections
+       WHERE vendor_id = $1 AND service_subcategory_id IS NOT NULL`,
+      [vendorId],
+    );
+    if (subcategoryIds.length) {
+      await client.query(
+        `INSERT INTO vendor_service_category_selections (vendor_id, service_category_id, service_subcategory_id)
+         SELECT $1, sub.category_id, sub.id
+         FROM service_subcategories sub WHERE sub.id = ANY($2::uuid[])`,
+        [vendorId, subcategoryIds],
+      );
+    }
+    await client.query("COMMIT");
+    return res.status(200).json({ success: true, message: "Service coverage saved." });
+  } catch (error) {
+    if (transactionClient) await transactionClient.query("ROLLBACK");
+    console.error("Error saving vendor service coverage:", error);
+    return res.status(500).json({ success: false, message: "Failed to save service coverage." });
+  } finally {
+    transactionClient?.release();
   }
 };
 
@@ -135,7 +270,6 @@ export const createClientAsset = async (
     location_details,
     documents,
   } = req.body;
-
   if (!asset_name) {
     return res
       .status(400)
@@ -319,6 +453,9 @@ export const createServiceTicket = async (
     ticket_payload,
     documents,
   } = req.body;
+  const safeTicketPayload = ticket_payload && typeof ticket_payload === "object" && !Array.isArray(ticket_payload)
+    ? { ...ticket_payload }
+    : {};
 
   if (!category_id) {
     return res
@@ -328,7 +465,7 @@ export const createServiceTicket = async (
 
   try {
     const serviceCategory = await pool.query(
-      `SELECT sc.id,
+      `SELECT sc.id, sc.code,
                     EXISTS (SELECT 1 FROM service_subcategories sub WHERE sub.category_id = sc.id AND sub.parent_id IS NULL) AS has_subcategories
              FROM service_categories sc
              WHERE sc.id = $1 AND sc.is_active = true LIMIT 1`,
@@ -339,6 +476,50 @@ export const createServiceTicket = async (
         success: false,
         message: "Selected service category is unavailable.",
       });
+    }
+
+      const serviceCategoryCode = String(serviceCategory.rows[0].code || "").toLowerCase();
+      const isLogisticsRequest = serviceCategoryCode === "logistics";
+    const requiresVendorFleet = isLogisticsRequest && safeTicketPayload.web_vehicle_selection === true;
+    const vehicleClassKey = requiresVendorFleet && typeof safeTicketPayload.vehicle_class_key === "string"
+      ? safeTicketPayload.vehicle_class_key.trim().toLowerCase()
+      : "";
+    if (requiresVendorFleet) {
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(vehicleClassKey)) {
+        return res.status(400).json({ success: false, message: "Select a vehicle class from the available fleet." });
+      }
+      const lat = Number(safeTicketPayload.pickup_latitude);
+      const lng = Number(safeTicketPayload.pickup_longitude);
+      const dropLat = Number(safeTicketPayload.delivery_latitude);
+      const dropLng = Number(safeTicketPayload.delivery_longitude);
+      const deliveryDate = typeof safeTicketPayload.delivery_date === "string" ? safeTicketPayload.delivery_date : "";
+      if (!isGoogleMapsLink(safeTicketPayload.pickup_google_maps_url) || !isGoogleMapsLink(safeTicketPayload.delivery_google_maps_url) || ![lat, lng, dropLat, dropLng].every(Number.isFinite) || Math.abs(lat) > 90 || Math.abs(dropLat) > 90 || Math.abs(lng) > 180 || Math.abs(dropLng) > 180 || !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)) {
+        return res.status(400).json({ success: false, message: "Choose Google Maps pickup and delivery locations and a delivery date." });
+      }
+      const matchingVehicle = await pool.query(
+        `SELECT vlv.vehicle_class, vlv.vehicle_name, vlv.payload, vlv.dimensions, vlv.image_key FROM vendor_logistics_vehicles vlv
+         JOIN vendors v ON v.id = vlv.vendor_id
+         WHERE vlv.vehicle_class_key = $1 AND vlv.is_active = true
+           AND v.approval_status = 'approved' AND v.is_active = true AND v.is_blocked = false
+           AND v.vendor_type IN ('service', 'both')
+           AND ($2::uuid IS NULL OR v.id = $2)
+         LIMIT 1`,
+        [vehicleClassKey, vendor_id || null],
+      );
+      if (!matchingVehicle.rows.length) {
+        return res.status(400).json({ success: false, message: "No approved vendor currently offers that vehicle class. Please choose another vehicle." });
+      }
+      safeTicketPayload.vehicle_class_key = vehicleClassKey;
+      safeTicketPayload.vehicle_class = matchingVehicle.rows[0].vehicle_class;
+      safeTicketPayload.vehicle_name = matchingVehicle.rows[0].vehicle_name;
+      safeTicketPayload.vehicle_payload = matchingVehicle.rows[0].payload;
+      safeTicketPayload.vehicle_dimensions = matchingVehicle.rows[0].dimensions;
+      safeTicketPayload.vehicle_image_key = matchingVehicle.rows[0].image_key;
+      const rad = (degrees: number) => degrees * Math.PI / 180;
+      const dLat = rad(dropLat - lat);
+      const dLng = rad(dropLng - lng);
+      const haversine = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat)) * Math.cos(rad(dropLat)) * Math.sin(dLng / 2) ** 2;
+      safeTicketPayload.approximate_distance_km = Number((6371 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))).toFixed(1));
     }
 
     let resolvedLegacySubcategoryId: string | null = null;
@@ -422,6 +603,36 @@ export const createServiceTicket = async (
       }
     }
 
+    if (vendor_id) {
+      const selectedVendorCoverage = await pool.query(
+        `SELECT 1
+         FROM vendor_service_category_selections category_coverage
+         WHERE category_coverage.vendor_id = $1
+           AND category_coverage.service_category_id = $2
+           AND category_coverage.service_subcategory_id IS NULL
+           AND ($3::uuid IS NULL OR EXISTS (
+             SELECT 1 FROM vendor_service_category_selections subcategory_coverage
+             WHERE subcategory_coverage.vendor_id = category_coverage.vendor_id
+               AND subcategory_coverage.service_category_id = $2
+               AND subcategory_coverage.service_subcategory_id = $3
+           ))
+           AND ($4::uuid IS NULL OR EXISTS (
+             SELECT 1 FROM vendor_service_category_selections child_coverage
+             WHERE child_coverage.vendor_id = category_coverage.vendor_id
+               AND child_coverage.service_category_id = $2
+               AND child_coverage.service_subcategory_id = $4
+           ))
+         LIMIT 1`,
+        [vendor_id, category_id, resolvedServiceSubcategoryId, resolvedServiceSubSubcategoryId],
+      );
+      if (!selectedVendorCoverage.rows.length) {
+        return res.status(400).json({
+          success: false,
+          message: "The selected vendor does not accept this service category and subcategory combination.",
+        });
+      }
+    }
+
     // Generate friendly ticket number: SRV-YYYYMMDD-XXXX
     const prefix = "SRV";
     const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -461,7 +672,7 @@ export const createServiceTicket = async (
         initialStatus,
         priority || "medium",
         JSON.stringify({
-          ...(ticket_payload || {}),
+          ...safeTicketPayload,
           service_subcategory_id: resolvedServiceSubcategoryId,
           service_sub_subcategory_id: resolvedServiceSubSubcategoryId,
         }),
@@ -513,9 +724,43 @@ export const createServiceTicket = async (
       if (vendor_id) {
         vendorQuery += ` AND v.id = $1`;
         vParams.push(vendor_id);
-      } else if (category_id) {
-        vendorQuery += ` AND (s.category_id = $1 OR EXISTS (SELECT 1 FROM service_categories sc WHERE sc.id = $1))`;
+      }
+      if (category_id) {
+        const categoryParam = vParams.length + 1;
         vParams.push(category_id);
+        vendorQuery += ` AND EXISTS (
+          SELECT 1 FROM vendor_service_category_selections coverage
+          WHERE coverage.vendor_id = v.id
+            AND coverage.service_category_id = $${categoryParam}
+            AND coverage.service_subcategory_id IS NULL
+        )`;
+        if (resolvedServiceSubcategoryId) {
+          const subcategoryParam = vParams.length + 1;
+          vParams.push(resolvedServiceSubcategoryId);
+          vendorQuery += ` AND EXISTS (
+            SELECT 1 FROM vendor_service_category_selections coverage
+            WHERE coverage.vendor_id = v.id
+              AND coverage.service_category_id = $${categoryParam}
+              AND coverage.service_subcategory_id = $${subcategoryParam}
+          )`;
+        }
+        if (resolvedServiceSubSubcategoryId) {
+          const childParam = vParams.length + 1;
+          vParams.push(resolvedServiceSubSubcategoryId);
+          vendorQuery += ` AND EXISTS (
+            SELECT 1 FROM vendor_service_category_selections coverage
+            WHERE coverage.vendor_id = v.id
+              AND coverage.service_category_id = $${categoryParam}
+              AND coverage.service_subcategory_id = $${childParam}
+          )`;
+        }
+        if (serviceCategoryCode === "freelancer_work") {
+          vendorQuery += ` AND EXISTS (SELECT 1 FROM vendor_services freelancer_vs JOIN services freelancer_s ON freelancer_s.id = freelancer_vs.service_id WHERE freelancer_vs.vendor_id = v.id AND freelancer_vs.is_active = true AND freelancer_s.category_id = $${categoryParam})`;
+        }
+      }
+      if (requiresVendorFleet) {
+        vendorQuery += ` AND EXISTS (SELECT 1 FROM vendor_logistics_vehicles vlv WHERE vlv.vendor_id = v.id AND vlv.vehicle_class_key = $${vParams.length + 1} AND vlv.is_active = true)`;
+        vParams.push(vehicleClassKey);
       }
 
       const vendorRes = await pool.query(vendorQuery, vParams);
@@ -758,6 +1003,12 @@ export const getServiceTicketDetail = async (
       success: true,
       data: {
         ...ticketRow,
+        ticket_payload: {
+          ...(ticketRow.ticket_payload || {}),
+          vehicle_image_url: ticketRow.ticket_payload?.vehicle_image_key
+            ? await getPresignedUrlOrOriginal(ticketRow.ticket_payload.vehicle_image_key)
+            : undefined,
+        },
         quotations,
         documents: docsResult.rows,
       },
@@ -792,7 +1043,7 @@ export const acceptTicketQuote = async (
   const quoteId = String(req.params.quoteId);
 
   const paidCheck = await pool.query(
-    `SELECT 1 FROM payments WHERE user_id = $1 AND status = 'successful' AND payment_type = 'service_maintenance' AND $2 = ANY(booking_ids) AND $3 = ANY(order_ids) LIMIT 1`,
+    `SELECT 1 FROM payments WHERE user_id = $1 AND status = 'successful' AND payment_type IN ('service_maintenance', 'service_logistics', 'service_goods_ticket') AND $2 = ANY(booking_ids) AND $3 = ANY(order_ids) LIMIT 1`,
     [authUser.userId, id, quoteId],
   );
   if (paidCheck.rows.length === 0)
@@ -940,7 +1191,7 @@ export const createMaintenancePaymentOrder = async (
   const quoteId = String(req.params.quoteId);
   try {
     const quote = await pool.query(
-      `SELECT stq.total_price, stq.status, st.client_user_id FROM service_ticket_quotations stq JOIN service_tickets st ON st.id = stq.ticket_id WHERE stq.id = $1 AND st.id = $2 AND st.client_user_id = $3`,
+      `SELECT stq.total_price, stq.status, st.client_user_id, st.ticket_payload->>'service_code' AS service_code FROM service_ticket_quotations stq JOIN service_tickets st ON st.id = stq.ticket_id WHERE stq.id = $1 AND st.id = $2 AND st.client_user_id = $3`,
       [quoteId, id, authUser.userId],
     );
     if (!quote.rows[0])
@@ -957,15 +1208,17 @@ export const createMaintenancePaymentOrder = async (
       return res
         .status(400)
         .json({ success: false, message: "Quotation amount is invalid." });
+    const serviceCode = quote.rows[0].service_code;
+    const paymentType = serviceCode === "logistics" ? "service_logistics" : serviceCode === "goods_ticket_inquiry" ? "service_goods_ticket" : "service_maintenance";
     const order = await razorpay.orders.create({
       amount: Math.round(amount * 100),
       currency: "INR",
-      receipt: `maint_${id.slice(0, 8)}_${Date.now()}`,
+      receipt: `${paymentType === "service_logistics" ? "log" : paymentType === "service_goods_ticket" ? "goods" : "maint"}_${id.slice(0, 8)}_${Date.now()}`,
       notes: { ticketId: id, quoteId, clientId: authUser.userId },
     });
     await pool.query(
-      `INSERT INTO payments (user_id, amount, status, payment_method, razorpay_order_id, booking_ids, order_ids, payment_type) VALUES ($1, $2, 'pending', 'razorpay', $3, ARRAY[$4]::uuid[], ARRAY[$5]::uuid[], 'service_maintenance')`,
-      [authUser.userId, amount, order.id, id, quoteId],
+      `INSERT INTO payments (user_id, amount, status, payment_method, razorpay_order_id, booking_ids, order_ids, payment_type) VALUES ($1, $2, 'pending', 'razorpay', $3, ARRAY[$4]::uuid[], ARRAY[$5]::uuid[], $6)`,
+      [authUser.userId, amount, order.id, id, quoteId, paymentType],
     );
     return res.status(200).json({
       success: true,
@@ -1013,7 +1266,7 @@ export const verifyMaintenancePayment = async (
         .json({ success: false, message: "Invalid payment signature." });
     await client.query("BEGIN");
     const paid = await client.query(
-      `UPDATE payments SET status = 'successful', razorpay_payment_id = $1, razorpay_signature = $2, updated_at = NOW() WHERE razorpay_order_id = $3 AND user_id = $4 AND payment_type = 'service_maintenance' AND $5 = ANY(booking_ids) AND $6 = ANY(order_ids) RETURNING amount`,
+      `UPDATE payments SET status = 'successful', razorpay_payment_id = $1, razorpay_signature = $2, updated_at = NOW() WHERE razorpay_order_id = $3 AND user_id = $4 AND payment_type IN ('service_maintenance', 'service_logistics', 'service_goods_ticket') AND $5 = ANY(booking_ids) AND $6 = ANY(order_ids) RETURNING amount`,
       [
         razorpay_payment_id,
         razorpay_signature,

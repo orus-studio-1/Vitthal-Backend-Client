@@ -856,12 +856,25 @@ export const getServiceQuotationDetailController = async (
                  LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
                  LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
                  LEFT JOIN vendors v ON v.id = st.vendor_id
-                 WHERE st.id = $1 ${isClient ? "AND st.client_user_id = $2" : ""}`,
-        isClient ? [id, authUser.userId] : [id],
+                 WHERE st.id = $1 ${isClient ? "AND st.client_user_id = $2" : ""}
+                   ${isVendor ? `AND (pc.code IS DISTINCT FROM 'logistics' OR COALESCE(st.ticket_payload->>'vehicle_class_key', '') = '' OR EXISTS (SELECT 1 FROM vendor_logistics_vehicles vlv WHERE vlv.vendor_id = $2 AND vlv.vehicle_class_key = st.ticket_payload->>'vehicle_class_key' AND vlv.is_active = true)) AND (pc.code IS DISTINCT FROM 'freelancer_work' OR EXISTS (SELECT 1 FROM vendor_services freelancer_vs JOIN services freelancer_s ON freelancer_s.id = freelancer_vs.service_id WHERE freelancer_vs.vendor_id = $2 AND freelancer_vs.is_active = true AND freelancer_s.category_id = st.category_id))` : ""}`,
+        isClient ? [id, authUser.userId] : isVendor ? [id, vendorId] : [id],
       );
 
       if (ticketResult.rows.length > 0) {
         const t = ticketResult.rows[0];
+        let vendorLogisticsVehicle: any = null;
+        if (isVendor && t.category_code === "logistics" && t.ticket_payload?.vehicle_class_key) {
+          const fleetResult = await pool.query(
+            `SELECT id, vehicle_class, vehicle_name, payload, dimensions, image_key
+             FROM vendor_logistics_vehicles WHERE vendor_id = $1 AND vehicle_class_key = $2 AND is_active = true
+             ORDER BY created_at DESC LIMIT 1`,
+            [vendorId, t.ticket_payload.vehicle_class_key],
+          );
+          if (fleetResult.rows[0]) {
+            vendorLogisticsVehicle = { ...fleetResult.rows[0], image_url: await getPresignedUrlOrOriginal(fleetResult.rows[0].image_key) };
+          }
+        }
         const docsResult = await pool.query(
           `SELECT * FROM service_ticket_documents WHERE ticket_id = $1`,
           [id],
@@ -972,6 +985,7 @@ export const getServiceQuotationDetailController = async (
           subcategory_name: t.service_subcategory_name || null,
           sub_subcategory_name: t.service_sub_subcategory_name || null,
           ticket_payload: t.ticket_payload || {},
+          vendor_logistics_vehicle: vendorLogisticsVehicle,
           documents: ticketDocuments,
           client_name: t.client_name,
           client_email: t.client_email,
@@ -1146,6 +1160,18 @@ export const respondServiceQuotationController = async (
           const isJobInquiryTicket =
             t.ticket_payload?.service_code === "job_inquiry" ||
             t.ticket_payload?.service_name === "Job Inquiry";
+          const isLogisticsTicket = t.ticket_payload?.service_code === "logistics" || /logistic|freight|transport/i.test(String(t.ticket_payload?.service_name || ""));
+          const isGoodsTicket = t.ticket_payload?.service_code === "goods_ticket_inquiry" || /goods[_\s-]*ticket|goods[_\s-]*inquiry/i.test(String(t.ticket_payload?.service_name || ""));
+          if (isLogisticsTicket && t.ticket_payload?.vehicle_class_key) {
+            const fleetMatch = await client.query(
+              `SELECT 1 FROM vendor_logistics_vehicles WHERE vendor_id = $1 AND vehicle_class_key = $2 AND is_active = true LIMIT 1`,
+              [resolvedVendorId, t.ticket_payload?.vehicle_class_key || ""],
+            );
+            if (!fleetMatch.rows.length) {
+              await client.query("ROLLBACK");
+              return res.status(403).json({ message: "Your fleet does not include the vehicle class requested by this client." });
+            }
+          }
           let safeQuoteBreakdown =
             quoteBreakdown &&
             typeof quoteBreakdown === "object" &&
@@ -1209,6 +1235,41 @@ export const respondServiceQuotationController = async (
               gst_amount: gstAmount,
               total: quotePrice,
             };
+          } else if (isLogisticsTicket) {
+            const distanceKm = Number((safeQuoteBreakdown as any).distance_km);
+            const tripRate = Number((safeQuoteBreakdown as any).rate_of_trip ?? offerPrice);
+            if (!Number.isFinite(distanceKm) || distanceKm <= 0 || !Number.isFinite(tripRate) || tripRate <= 0) {
+              throw new Error("A positive route distance and trip rate are required.");
+            }
+            quotePrice = Math.round(tripRate * 100) / 100;
+            safeQuoteBreakdown = {
+              distance_km: distanceKm,
+              rate_of_trip: quotePrice,
+              items: [{ name: "Transport trip", item_name: "Transport trip", quantity: distanceKm, unit: "km", unit_price: quotePrice / distanceKm, rate: quotePrice / distanceKm, amount: quotePrice }],
+              subtotal: quotePrice,
+              total: quotePrice,
+              notes: typeof (quoteBreakdown as any)?.notes === "string" ? (quoteBreakdown as any).notes : "",
+              terms: typeof (quoteBreakdown as any)?.terms === "string" ? (quoteBreakdown as any).terms : "",
+            };
+          } else if (isGoodsTicket) {
+            const total = Number(offerPrice);
+            if (!Number.isFinite(total) || total <= 0) {
+              throw new Error("A positive goods quotation total is required.");
+            }
+            quotePrice = Math.round(total * 100) / 100;
+            const attachment = (safeQuoteBreakdown as any).quote_attachment;
+            safeQuoteBreakdown = {
+              subtotal: quotePrice,
+              total: quotePrice,
+              notes: typeof (safeQuoteBreakdown as any).notes === "string" ? (safeQuoteBreakdown as any).notes.slice(0, 2000) : "",
+              terms: typeof (safeQuoteBreakdown as any).terms === "string" ? (safeQuoteBreakdown as any).terms.slice(0, 4000) : "",
+              quote_attachment:
+                attachment && typeof attachment === "object" &&
+                typeof attachment.url === "string" && attachment.url.length <= 2048 &&
+                !/^javascript:/i.test(attachment.url.trim())
+                  ? { name: typeof attachment.name === "string" ? attachment.name.slice(0, 255) : "Quotation attachment", url: attachment.url.trim() }
+                  : null,
+            };
           }
           await client.query(
             `INSERT INTO service_ticket_quotations 
@@ -1220,7 +1281,7 @@ export const respondServiceQuotationController = async (
               quotePrice,
               JSON.stringify({
                 ...safeQuoteBreakdown,
-                ...(!isJobInquiryTicket
+                ...(!isJobInquiryTicket && !isGoodsTicket
                   ? {
                       notes: note || reason || "",
                       delivery_days: deliveryDays || 7,
@@ -2054,7 +2115,23 @@ export const getVendorServiceQuotationsController = async (
              LEFT JOIN service_categories pc ON pc.id = st.category_id
              LEFT JOIN service_subcategories service_sub ON service_sub.id = st.service_subcategory_id
              LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
-             WHERE (st.vendor_id = $1 OR st.vendor_id IS NULL OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1))
+             WHERE (st.vendor_id = $1
+                    OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1)
+                    OR (st.vendor_id IS NULL
+                        AND EXISTS (
+                          SELECT 1
+                          FROM notifications request_notice
+                          JOIN vendors notified_vendor ON notified_vendor.user_id = request_notice.user_id
+                          WHERE notified_vendor.id = $1
+                            AND request_notice.reference_type = 'service_quotation'
+                            AND request_notice.reference_id = st.id
+                            AND request_notice.type IN ('quotation_request_received', 'general')
+                        )))
+               AND (pc.code IS DISTINCT FROM 'logistics'
+                    OR COALESCE(st.ticket_payload->>'vehicle_class_key', '') = ''
+                    OR EXISTS (SELECT 1 FROM vendor_logistics_vehicles vlv WHERE vlv.vendor_id = $1 AND vlv.vehicle_class_key = st.ticket_payload->>'vehicle_class_key' AND vlv.is_active = true))
+               AND (pc.code IS DISTINCT FROM 'freelancer_work'
+                    OR EXISTS (SELECT 1 FROM vendor_services freelancer_vs JOIN services freelancer_s ON freelancer_s.id = freelancer_vs.service_id WHERE freelancer_vs.vendor_id = $1 AND freelancer_vs.is_active = true AND freelancer_s.category_id = st.category_id))
              ORDER BY st.updated_at DESC`,
       [vendorId],
     );

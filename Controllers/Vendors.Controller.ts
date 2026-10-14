@@ -916,6 +916,27 @@ export const getVendorCategoriesController = async (req: Request, res: Response)
     }
 
     try {
+        const vendorTypeResult = await pool.query(
+            `SELECT vendor_type FROM vendors WHERE user_id = $1 LIMIT 1`,
+            [userId]
+        );
+        if (vendorTypeResult.rows[0]?.vendor_type === "service") {
+            const serviceCategoriesResult = await pool.query(
+                `SELECT sc.id, sc.code, sc.label, sc.sort_order
+                 FROM vendors v
+                 INNER JOIN vendor_service_category_selections coverage
+                   ON coverage.vendor_id = v.id AND coverage.service_subcategory_id IS NULL
+                 INNER JOIN service_categories sc ON sc.id = coverage.service_category_id
+                 WHERE v.user_id = $1 AND sc.is_active = TRUE
+                 ORDER BY sc.sort_order ASC, sc.label ASC`,
+                [userId]
+            );
+            return res.status(200).json({
+                message: "Vendor service categories fetched successfully",
+                data: serviceCategoriesResult.rows,
+            });
+        }
+
                 const query = `
                         SELECT pc.id, pc.code, pc.label, pc.sort_order
                         FROM vendors v

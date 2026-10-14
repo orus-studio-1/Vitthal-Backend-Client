@@ -37,13 +37,13 @@ export const getVendorDashboardController = async (
       ? `
             SELECT
                 COALESCE((SELECT SUM(sb.total_amount) FROM service_bookings sb WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'), 0)
-                + COALESCE((SELECT SUM(p.amount) FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') WHERE st.vendor_id = $1), 0) AS total_revenue,
+                + COALESCE((SELECT SUM(p.amount) FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') WHERE st.vendor_id = $1), 0) AS total_revenue,
                 (SELECT COUNT(*) FROM service_bookings sb WHERE sb.vendor_id = $1 AND sb.status != 'cancelled')
-                + (SELECT COUNT(*) FROM service_tickets st WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids))) AS total_orders,
+                + (SELECT COUNT(*) FROM service_tickets st WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))) AS total_orders,
                 (SELECT COUNT(*) FROM vendor_services vs WHERE vs.vendor_id = $1 AND vs.is_active = true) AS active_products,
                 (SELECT COUNT(DISTINCT service_clients.user_id) FROM (
                     SELECT sb.user_id FROM service_bookings sb WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'
-                    UNION SELECT st.client_user_id FROM service_tickets st WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids))
+                    UNION SELECT st.client_user_id FROM service_tickets st WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))
                 ) service_clients) AS total_customers
         `
       : `
@@ -74,7 +74,7 @@ export const getVendorDashboardController = async (
                 FROM (
                     SELECT sb.created_at, sb.total_amount AS revenue FROM service_bookings sb WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'
                     UNION ALL
-                    SELECT st.created_at, SUM(p.amount) AS revenue FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') WHERE st.vendor_id = $1 GROUP BY st.id
+                    SELECT st.created_at, SUM(p.amount) AS revenue FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') WHERE st.vendor_id = $1 GROUP BY st.id
                 ) service_revenue
                 WHERE service_revenue.created_at >= DATE_TRUNC('year', NOW())
                 GROUP BY TO_CHAR(service_revenue.created_at, 'Mon'), EXTRACT(MONTH FROM service_revenue.created_at)
@@ -131,7 +131,7 @@ export const getVendorDashboardController = async (
                 FROM (
                     SELECT sb.created_at, sb.total_amount AS revenue FROM service_bookings sb WHERE sb.vendor_id = $1 AND sb.status != 'cancelled'
                     UNION ALL
-                    SELECT st.created_at, SUM(p.amount) AS revenue FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') WHERE st.vendor_id = $1 GROUP BY st.id
+                    SELECT st.created_at, SUM(p.amount) AS revenue FROM service_tickets st JOIN payments p ON st.id = ANY(p.booking_ids) AND p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') WHERE st.vendor_id = $1 GROUP BY st.id
                 ) service_revenue
                 WHERE service_revenue.created_at >= NOW() - ($2 * INTERVAL '1 day')
                 GROUP BY DATE(service_revenue.created_at)
@@ -191,7 +191,7 @@ export const getVendorDashboardController = async (
                 UNION ALL
                 SELECT st.id, st.status, st.total_amount, st.created_at, u.name, COALESCE(st.ticket_payload->>'service_name', sc.label)
                 FROM service_tickets st JOIN users u ON u.id = st.client_user_id JOIN service_categories sc ON sc.id = st.category_id
-                WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids))
+                WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))
             ) service_activity
             ORDER BY service_activity.created_at DESC
             LIMIT 5
@@ -232,8 +232,8 @@ export const getVendorDashboardController = async (
                 UNION ALL
                 SELECT COALESCE(st.ticket_payload->>'service_name', sc.label), COUNT(st.id), SUM(paid.amount)
                 FROM service_tickets st JOIN service_categories sc ON sc.id = st.category_id
-                JOIN LATERAL (SELECT SUM(p.amount) AS amount FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids)) paid ON TRUE
-                WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids))
+                JOIN LATERAL (SELECT SUM(p.amount) AS amount FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids)) paid ON TRUE
+                WHERE st.vendor_id = $1 AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))
                 GROUP BY COALESCE(st.ticket_payload->>'service_name', sc.label)
             ) service_products
             GROUP BY service_products.product_name

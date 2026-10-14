@@ -1150,7 +1150,7 @@ export const getVendorPayoutsController = async (
                     CASE WHEN pr.status IN ('paid', 'partially_paid') THEN pr.status ELSE 'pending' END AS payout_status,
                     st.otp_verified_at AS delivered_at,
                     NULL AS due_date,
-                    'Machine maintenance service ticket' AS payout_notes,
+                    CASE WHEN st.ticket_payload->>'service_code' = 'goods_ticket_inquiry' THEN 'Goods ticket inquiry' WHEN st.ticket_payload->>'service_code' = 'logistics' THEN 'Logistics service ticket' WHEN st.ticket_payload->>'service_code' = 'job_inquiry' THEN 'Job inquiry service ticket' ELSE 'Machine maintenance service ticket' END AS payout_notes,
                     st.total_amount AS order_total_amount,
                     st.status AS order_status,
                     'paid' AS client_payment_status,
@@ -1163,8 +1163,8 @@ export const getVendorPayoutsController = async (
                     u.name AS customer_name,
                     v.company_name AS vendor_name,
                     v.credit_cycle AS vendor_credit_cycle,
-                    COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids)), 0) AS client_paid_amount,
-                    100 AS client_paid_percentage
+                    COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids)), 0) AS client_paid_amount,
+                    CASE WHEN st.total_amount > 0 THEN ROUND((COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids)), 0) / st.total_amount) * 100, 2) ELSE 0 END AS client_paid_percentage
                 FROM service_tickets st
                 JOIN users u ON u.id = st.client_user_id
                 JOIN vendors v ON v.id = st.vendor_id
@@ -1174,7 +1174,7 @@ export const getVendorPayoutsController = async (
                 ) pr ON TRUE
                 WHERE st.vendor_id = $1
                   AND st.status IN ('accepted', 'in_progress', 'completed')
-                  AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids))
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))
             `;
     const serviceResult = await pool.query(serviceQuery, [vendorId]);
     const servicePayouts = serviceResult.rows;
@@ -1393,7 +1393,7 @@ export const requestVendorPayoutController = async (
     } else {
       const ticketResult = await client.query(
         `SELECT st.id, st.total_amount, st.status,
-                    COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry') AND st.id = ANY(p.booking_ids)), 0) AS successful_amount
+                    COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids)), 0) AS successful_amount
                  FROM service_tickets st
                  WHERE st.id = $1 AND st.vendor_id = $2
                  FOR UPDATE OF st`,

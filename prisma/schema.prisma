@@ -557,6 +557,7 @@ model service_categories {
   service_tickets          service_tickets[]
   services                 services[]
   client_assets            client_assets[]
+  vendor_service_category_selections vendor_service_category_selections[]
 
   @@map("service_categories")
 }
@@ -958,6 +959,7 @@ model service_subcategories {
   client_assets    client_assets[]
   tickets_as_subcategory    service_tickets[] @relation("ticket_service_subcategory")
   tickets_as_sub_subcategory service_tickets[] @relation("ticket_service_sub_subcategory")
+  vendor_service_category_selections vendor_service_category_selections[]
 
   @@unique([id, category_id], map: "uq_service_subcategory_id_category")
   @@index([category_id], map: "idx_service_subcategories_category_id")
@@ -1181,6 +1183,20 @@ model vendor_categories {
   @@index([vendor_id], map: "idx_vendor_categories_vendor_id")
 }
 
+model vendor_service_category_selections {
+  id                    String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendor_id             String                @db.Uuid
+  service_category_id   String                @db.Uuid
+  service_subcategory_id String?              @db.Uuid
+  created_at            DateTime              @default(now()) @db.Timestamptz(6)
+  service_category      service_categories    @relation(fields: [service_category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  service_subcategory   service_subcategories? @relation(fields: [service_subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  vendors               vendors               @relation(fields: [vendor_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([vendor_id, service_category_id], map: "idx_vendor_service_category_selections_vendor_category")
+  @@index([service_subcategory_id], map: "idx_vendor_service_category_selections_subcategory")
+}
+
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model vendor_chat_messages {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
@@ -1376,16 +1392,36 @@ model vendors {
   service_ticket_quotations    service_ticket_quotations[]
   service_tickets              service_tickets[]
   vendor_categories            vendor_categories[]
+  vendor_service_category_selections vendor_service_category_selections[]
   vendor_chat_messages         vendor_chat_messages[]
   vendor_payouts               vendor_payouts[]
   vendor_products              vendor_products[]
   vendor_quotations            vendor_quotations[]
   vendor_reviews               vendor_reviews[]
   vendor_services              vendor_services[]
+  vendor_logistics_vehicles    vendor_logistics_vehicles[]
   users                        users                       @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vendors_user")
   wishlist_items               wishlist_items[]
 
   @@index([rating(sort: Desc)], map: "idx_vendors_rating", where: raw("(is_active = true)"))
+}
+
+model vendor_logistics_vehicles {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendor_id         String   @db.Uuid
+  vehicle_class_key String   @db.VarChar(80)
+  vehicle_class     String   @db.VarChar(120)
+  vehicle_name      String   @db.VarChar(160)
+  payload           String   @db.VarChar(120)
+  dimensions        String   @db.VarChar(160)
+  image_key         String
+  is_active         Boolean  @default(true)
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @db.Timestamptz(6)
+  vendors           vendors  @relation(fields: [vendor_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([vehicle_class_key, is_active], map: "idx_vendor_logistics_vehicles_class")
+  @@index([vendor_id, is_active], map: "idx_vendor_logistics_vehicles_vendor")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.

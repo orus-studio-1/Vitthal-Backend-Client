@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
-import { getPresignedUrlOrOriginal } from "../services/s3.service";
+import { BUCKET_NAME, getPresignedUrlOrOriginal, uploadBufferToS3 } from "../services/s3.service";
+import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.gst_certificate_link) {
@@ -38,6 +39,92 @@ function normalizeCategoryCodes(value: unknown) {
         .map((item) => item.trim().toLowerCase())
         .filter((item) => item.length > 0);
 }
+
+export const getVendorPayoutBankDetailsController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (authUser?.role !== "vendor") return res.status(403).json({ message: "Only vendors can access payout bank details" });
+
+    try {
+        const result = await pool.query(
+            `SELECT bank_name, account_holder_name, account_number_last4 AS account_last_four,
+                    ifsc_code, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
+             FROM vendors WHERE user_id = $1`,
+            [authUser.userId]
+        );
+        if (!result.rows.length) return res.status(404).json({ message: "Vendor profile not found" });
+        return res.status(200).json({ data: result.rows[0] });
+    } catch (error) {
+        console.error("Error retrieving vendor payout bank details:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const updateVendorPayoutBankDetailsController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    if (authUser?.role !== "vendor") return res.status(403).json({ message: "Only vendors can update payout bank details" });
+
+    const bankName = normalizeRequiredText(req.body?.bankName);
+    const accountHolderName = normalizeRequiredText(req.body?.accountHolderName);
+    const accountNumber = normalizeRequiredText(req.body?.accountNumber);
+    const ifscCode = normalizeRequiredText(req.body?.ifscCode).toUpperCase();
+    const chequeFile = req.file;
+    if (!bankName || !accountHolderName || !/^\d{9,18}$/.test(accountNumber)
+        || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode) || !chequeFile) {
+        return res.status(400).json({ message: "Valid bank details and cancelled-cheque image/PDF are required" });
+    }
+    if (!["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"].includes(chequeFile.mimetype)) {
+        return res.status(400).json({ message: "Cancelled cheque must be a PDF or image" });
+    }
+    if (!BUCKET_NAME) return res.status(500).json({ message: "Document storage is not configured" });
+
+    let encryptedAccountNumber: string;
+    try {
+        encryptedAccountNumber = encryptPayoutAccountNumber(accountNumber);
+    } catch {
+        return res.status(503).json({ message: "Payout account encryption is not configured" });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        const vendorResult = await client.query(
+            `SELECT id FROM vendors WHERE user_id = $1 FOR UPDATE`,
+            [authUser.userId]
+        );
+        if (!vendorResult.rows.length) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ message: "Vendor profile not found" });
+        }
+        const pendingRequest = await client.query(
+            `SELECT 1 FROM vendor_payout_requests WHERE vendor_id = $1 AND status IN ('requested', 'partially_paid') LIMIT 1`,
+            [vendorResult.rows[0].id]
+        );
+        if (pendingRequest.rows.length) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Bank details cannot change while a payout request is pending" });
+        }
+
+        const extension = chequeFile.originalname.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+        const key = `vendor-registration/payout-cheques/${vendorResult.rows[0].id}_${Date.now()}.${extension}`;
+        await uploadBufferToS3(chequeFile.buffer, key, chequeFile.mimetype);
+        await client.query(
+            `UPDATE vendors
+             SET bank_name = $1, account_holder_name = $2, account_number = $3,
+                 account_number_last4 = $4, ifsc_code = $5, cancelled_cheque_link = $6, updated_at = NOW()
+             WHERE id = $7`,
+            [bankName, accountHolderName, encryptedAccountNumber, accountNumber.slice(-4), ifscCode, key, vendorResult.rows[0].id]
+        );
+
+        await client.query("COMMIT");
+        return res.status(200).json({ message: "Payout bank details saved" });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Error updating vendor payout bank details:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
+    }
+};
 
 async function fetchPincodeLookup(
     normalizedPincode: string,

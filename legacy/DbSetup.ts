@@ -1,13 +1,15 @@
+// LEGACY — FROZEN. Do not add schema changes here; use Prisma migrations (see prisma/README.md).
+// This only runs once per pre-Prisma database, from DbMigrate.ts, to bring it level with the 0_init baseline.
 import fs from "fs";
 import path from "path";
-import pool from "./DbConnect";
+import pool from "../DbConnect";
 
 export async function ensureMarketplaceSchema() {
     try {
         const { rows } = await pool.query(`SELECT to_regclass('public.users') as has_users;`);
         if (!rows[0] || !rows[0].has_users) {
             console.log("Base schema missing. Running schema.sql initialization...");
-            const schemaPath = path.join(process.cwd(), "schema.sql");
+            const schemaPath = path.join(process.cwd(), "legacy", "schema.sql");
             if (fs.existsSync(schemaPath)) {
                 const schemaSql = fs.readFileSync(schemaPath, "utf8");
                 await pool.query(schemaSql);
@@ -87,7 +89,7 @@ export async function ensureMarketplaceSchema() {
             ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_reference_type;
             ALTER TABLE notifications
                 ADD CONSTRAINT chk_notification_reference_type
-                CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product', 'service', 'service_quotation', 'service_booking', 'service_ticket'));
+                CHECK (reference_type IS NULL OR reference_type IN ('quotation', 'order', 'product', 'service', 'service_quotation', 'service_booking', 'service_ticket', 'hire_request'));
 
             ALTER TABLE notifications DROP CONSTRAINT IF EXISTS chk_notification_type;
             ALTER TABLE notifications
@@ -108,6 +110,17 @@ export async function ensureMarketplaceSchema() {
                     'image_rejected',
                     'vendor_product_approved',
                     'vendor_product_rejected',
+                    'hire_request_received',
+                    'hire_request_accepted',
+                    'hire_request_rejected',
+                    'hire_request_cancelled',
+                    'hire_message',
+                    'hire_offer_received',
+                    'hire_offer_accepted',
+                    'hire_payment_successful',
+                    'hire_completion_confirmed',
+                    'hire_contract_completed',
+                    'hiring_access_unlocked',
                     'general'
                 ));
 
@@ -489,6 +502,12 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS reconsideration_notes TEXT,
             ADD COLUMN IF NOT EXISTS review_count INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS gst_certificate_link TEXT,
+            ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS account_holder_name VARCHAR(100),
+            ADD COLUMN IF NOT EXISTS account_number TEXT,
+            ADD COLUMN IF NOT EXISTS account_number_last4 CHAR(4),
+            ADD COLUMN IF NOT EXISTS ifsc_code VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS cancelled_cheque_link TEXT,
             ADD COLUMN IF NOT EXISTS vendor_signature_image_link TEXT,
             ADD COLUMN IF NOT EXISTS business_type TEXT,
             ADD COLUMN IF NOT EXISTS company_website TEXT,
@@ -498,6 +517,59 @@ export async function ensureMarketplaceSchema() {
             ADD COLUMN IF NOT EXISTS application_number TEXT UNIQUE,
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+        ALTER TABLE vendors ALTER COLUMN account_number TYPE TEXT;
+
+        CREATE TABLE IF NOT EXISTS vendor_payout_requests (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+            order_id UUID,
+            booking_id UUID,
+            status VARCHAR(20) NOT NULL DEFAULT 'requested'
+                CHECK (status IN ('requested', 'partially_paid', 'rejected', 'paid')),
+            eligible_amount NUMERIC(12, 2) NOT NULL CHECK (eligible_amount > 0),
+            paid_amount NUMERIC(12, 2) CHECK (paid_amount IS NULL OR (paid_amount > 0 AND paid_amount <= eligible_amount)),
+            transfer_reference TEXT,
+            rejection_reason TEXT,
+            admin_note TEXT,
+            requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            processed_at TIMESTAMPTZ,
+            processed_by UUID,
+            CHECK (num_nonnulls(order_id, booking_id) = 1)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_vendor_payout_requests_active_order
+            ON vendor_payout_requests(order_id)
+            WHERE order_id IS NOT NULL AND status IN ('requested', 'partially_paid', 'paid');
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_vendor_payout_requests_active_booking
+            ON vendor_payout_requests(booking_id)
+            WHERE booking_id IS NOT NULL AND status IN ('requested', 'partially_paid', 'paid');
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_vendor_payout_requests_transfer_reference
+            ON vendor_payout_requests(transfer_reference)
+            WHERE transfer_reference IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_vendor_payout_requests_vendor_status
+            ON vendor_payout_requests(vendor_id, status, requested_at DESC);
+
+        CREATE TABLE IF NOT EXISTS vendor_payout_bank_access_audit (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            vendor_payout_request_id UUID NOT NULL,
+            admin_user_id UUID NOT NULL,
+            accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_vendor_payout_bank_audit_request
+            ON vendor_payout_bank_access_audit(vendor_payout_request_id);
+        CREATE INDEX IF NOT EXISTS idx_vendor_payout_bank_audit_admin
+            ON vendor_payout_bank_access_audit(admin_user_id, accessed_at);
+
+        CREATE TABLE IF NOT EXISTS vendor_payout_transfers (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            request_id UUID NOT NULL REFERENCES vendor_payout_requests(id) ON DELETE CASCADE,
+            amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+            transfer_reference TEXT NOT NULL UNIQUE,
+            transferred_by UUID NOT NULL,
+            transferred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_vendor_payout_transfers_request
+            ON vendor_payout_transfers(request_id, transferred_at);
 
         ALTER TABLE orders
             ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'client',
@@ -575,6 +647,8 @@ export async function ensureMarketplaceSchema() {
         ALTER TABLE product_category
             ALTER COLUMN code SET NOT NULL,
             ALTER COLUMN label SET NOT NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_code ON product_category(code);
 
         CREATE SEQUENCE IF NOT EXISTS quotation_number_seq START WITH 1 INCREMENT BY 1;
 
@@ -1092,6 +1166,96 @@ export async function ensureMarketplaceSchema() {
                     );
 
         -- ═══════════════════════════════════════════════════════════════
+        -- Notifications: Hiring support
+        -- ═══════════════════════════════════════════════════════════════
+
+        CREATE TABLE IF NOT EXISTS notifications (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            reference_type TEXT,
+            reference_id UUID,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- Union of existing marketplace/service types and hiring types
+        ALTER TABLE notifications
+            DROP CONSTRAINT IF EXISTS chk_notification_type;
+
+        ALTER TABLE notifications
+            ADD CONSTRAINT chk_notification_type
+            CHECK (
+                type IN (
+                    -- Existing marketplace notifications
+                    'quotation_request_received',
+                    'quotation_offer_received',
+                    'quotation_counter_received',
+                    'quotation_accepted',
+                    'quotation_rejected',
+                    'service_completed',
+                    'admin_confirmation_sent',
+                    'admin_confirmation_accepted',
+                    'admin_confirmation_rejected',
+                    'product_approved',
+                    'product_rejected',
+                    'image_approved',
+                    'image_rejected',
+                    'vendor_product_approved',
+                    'vendor_product_rejected',
+
+                    -- Hiring notifications
+                    'hire_request_received',
+                    'hire_request_accepted',
+                    'hire_request_rejected',
+                    'hire_request_cancelled',
+                    'hire_message',
+                    'hire_offer_received',
+                    'hire_offer_accepted',
+                    'hire_payment_successful',
+                    'hire_completion_confirmed',
+                    'hire_contract_completed',
+                    'hiring_access_unlocked',
+
+                    'general'
+                )
+            );
+
+        ALTER TABLE notifications
+            DROP CONSTRAINT IF EXISTS chk_notification_reference_type;
+
+        ALTER TABLE notifications
+            ADD CONSTRAINT chk_notification_reference_type
+            CHECK (
+                reference_type IS NULL
+                OR reference_type IN (
+                    'quotation',
+                    'order',
+                    'product',
+                    'service',
+                    'service_quotation',
+                    'service_booking',
+                    'service_ticket',
+                    'hire_request'
+                )
+            );
+
+        CREATE INDEX IF NOT EXISTS idx_notifications_user_id
+            ON notifications(user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+            ON notifications(user_id, is_read)
+            WHERE is_read = FALSE;
+
+        CREATE INDEX IF NOT EXISTS idx_notifications_created_at
+            ON notifications(created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_notifications_reference
+            ON notifications(reference_type, reference_id);
+
+        -- ═══════════════════════════════════════════════════════════════
         -- Universal B2B Service Hub & Asset Registry (2026-08-29)
         -- ═══════════════════════════════════════════════════════════════
 
@@ -1200,7 +1364,7 @@ async function runMigrationEngine() {
         const executedFiles = new Set(rows.map((r: { filename: string }) => r.filename));
 
         // 3. Locate and sort all .sql files in migrations/
-        const migrationsDir = path.join(process.cwd(), "migrations");
+        const migrationsDir = path.join(process.cwd(), "legacy", "migrations");
         if (!fs.existsSync(migrationsDir)) {
             return;
         }
@@ -1246,4 +1410,3 @@ async function runMigrationEngine() {
         console.error("[DbSetup] Error during migration engine execution:", err);
     }
 }
-

@@ -859,23 +859,109 @@ export const confirmHireContractCompletionController = async (req: Request, res:
     }
 };
 
-export const getWorkerPaymentHistoryController = async (req: Request, res: Response): Promise<Response> => {
+// export const getWorkerPaymentHistoryController = async (req: Request, res: Response): Promise<Response> => {
+//     const authUser = getAuthUser(req);
+//     if (!authUser || authUser.role !== "worker") return res.status(403).json({ success: false, message: "Only workers can view worker payment history." });
+//     try {
+//         const result = await pool.query(
+//             `SELECT p.id, p.amount, p.currency, p.status, p.payment_method, p.razorpay_payment_id, p.created_at,
+//                     hr.id AS hire_request_id, u.name AS client_name
+//              FROM payments p JOIN hire_requests hr ON hr.id = p.hire_request_id
+//              JOIN employee_candidates ec ON ec.id = hr.candidate_id
+//              JOIN users u ON u.id = hr.requested_by_user_id
+//              WHERE ec.registered_by_user_id = $1 AND p.payment_type = 'worker_hiring'
+//              ORDER BY p.created_at DESC`, [authUser.userId]
+//         );
+//         return res.status(200).json({ success: true, data: result.rows });
+//     } catch (error) {
+//         console.error("Error fetching worker payment history:", error);
+//         return res.status(500).json({ success: false, message: "Failed to load payment history." });
+//     }
+// };
+
+export const getWorkerPaymentHistoryController = async (
+    req: Request,
+    res: Response
+): Promise<Response> => {
     const authUser = getAuthUser(req);
-    if (!authUser || authUser.role !== "worker") return res.status(403).json({ success: false, message: "Only workers can view worker payment history." });
+
+    if (!authUser || authUser.role !== "worker") {
+        return res.status(403).json({
+            success: false,
+            message:
+                "Only workers can view worker payment history.",
+        });
+    }
+
     try {
         const result = await pool.query(
-            `SELECT p.id, p.amount, p.currency, p.status, p.payment_method, p.razorpay_payment_id, p.created_at,
-                    hr.id AS hire_request_id, u.name AS client_name
-             FROM payments p JOIN hire_requests hr ON hr.id = p.hire_request_id
-             JOIN employee_candidates ec ON ec.id = hr.candidate_id
-             JOIN users u ON u.id = hr.requested_by_user_id
-             WHERE ec.registered_by_user_id = $1 AND p.payment_type = 'worker_hiring'
-             ORDER BY p.created_at DESC`, [authUser.userId]
+            `
+            SELECT
+                p.id,
+                p.amount,
+                p.currency,
+                p.status,
+                p.payment_method,
+                p.razorpay_order_id,
+                p.razorpay_payment_id,
+                p.created_at,
+                p.updated_at AS payment_updated_at,
+
+                hr.id AS hire_request_id,
+                hr.status AS hire_request_status,
+                hr.contract_status,
+                hr.negotiation_status,
+                hr.agreed_amount,
+                hr.proposed_amount,
+                hr.request_details,
+                hr.client_completed_at,
+                hr.worker_completed_at,
+                hr.completed_at,
+                hr.created_at AS contract_created_at,
+
+                u.id AS client_id,
+                u.name AS client_name,
+                u.email AS client_email,
+
+                ec.id AS candidate_id,
+                ec.full_name AS candidate_name,
+                ec.designation AS candidate_designation
+
+            FROM payments p
+
+            JOIN hire_requests hr
+                ON hr.id = p.hire_request_id
+
+            JOIN employee_candidates ec
+                ON ec.id = hr.candidate_id
+
+            JOIN users u
+                ON u.id = hr.requested_by_user_id
+
+            WHERE
+                ec.registered_by_user_id = $1
+                AND p.payment_type = 'worker_hiring'
+
+            ORDER BY p.created_at DESC
+            `,
+            [authUser.userId]
         );
-        return res.status(200).json({ success: true, data: result.rows });
+
+        return res.status(200).json({
+            success: true,
+            data: result.rows,
+        });
     } catch (error) {
-        console.error("Error fetching worker payment history:", error);
-        return res.status(500).json({ success: false, message: "Failed to load payment history." });
+        console.error(
+            "Error fetching worker payment history:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message:
+                "Failed to load payment history.",
+        });
     }
 };
 

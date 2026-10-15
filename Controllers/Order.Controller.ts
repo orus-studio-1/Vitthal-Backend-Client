@@ -635,6 +635,7 @@ export const saveOrderDispatchDetailsController = async (req: Request, res: Resp
     const challan = files.delivery_challan?.[0];
     const invoice = files.invoice?.[0];
     const lrDoc = files.lr_document?.[0];
+    
 
     const clean = (v: unknown) => (String(v ?? "").trim() || null);
     const lrNumber = clean(req.body.lr_number);
@@ -935,29 +936,28 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
             return res.status(404).json({ message: "Vendor not found" });
         }
         const vendorId = vendorQ.rows[0].id;
-        const isService = vendorQ.rows[0].vendor_type === 'service';
 
-        if (isService) {
-            // ─── SERVICE VENDOR: return service_bookings as payout records ───────
+        // Service payouts are bookings; keep them alongside product orders for mixed vendors.
             const serviceQuery = `
                 SELECT 
                     sb.id AS payout_id,
                     sb.id AS order_id,
+                    'service' AS transaction_type,
                     sb.vendor_id,
                     100 AS payout_percentage,
-                    sb.total_amount AS payout_amount,
-                    CASE
-                        WHEN sb.payment_status = 'paid' THEN 'paid'
-                        WHEN sb.status = 'completed' THEN 'pending'
-                        ELSE 'pending'
-                    END AS payout_status,
+                    COALESCE(pr.paid_amount, 0) AS payout_amount,
+                    CASE WHEN pr.status IN ('paid', 'partially_paid') THEN pr.status ELSE 'pending' END AS payout_status,
                     CASE WHEN sb.status = 'completed' THEN sb.updated_at ELSE NULL END AS delivered_at,
                     NULL AS due_date,
-                    CASE WHEN sb.payment_status = 'paid' THEN sb.updated_at ELSE NULL END AS last_paid_at,
                     sb.booking_notes AS payout_notes,
                     sb.total_amount AS order_total_amount,
                     sb.status AS order_status,
                     sb.payment_status AS client_payment_status,
+                    pr.id AS request_id,
+                    pr.status AS request_status,
+                    pr.eligible_amount,
+                    pr.rejection_reason AS request_rejection_reason,
+                    pr.requested_at,
                     u.name AS customer_name,
                     v.company_name AS vendor_name,
                     v.credit_cycle AS vendor_credit_cycle,
@@ -966,13 +966,19 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
                 FROM service_bookings sb
                 JOIN users u ON sb.user_id = u.id
                 JOIN vendors v ON v.id = sb.vendor_id
+                                LEFT JOIN LATERAL (
+                                        SELECT id, status, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
+                                        FROM vendor_payout_requests
+                                        WHERE booking_id = sb.id
+                                        ORDER BY requested_at DESC
+                                        LIMIT 1
+                                ) pr ON TRUE
                 WHERE sb.vendor_id = $1
                   AND sb.status NOT IN ('cancelled', 'pending')
                 ORDER BY sb.created_at DESC
             `;
             const serviceResult = await pool.query(serviceQuery, [vendorId]);
-            return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: serviceResult.rows });
-        }
+            const servicePayouts = serviceResult.rows;
 
         // ─── PRODUCT VENDOR: original vendor_payouts logic ───────────────────
         const query = `
@@ -980,13 +986,19 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
                 vp.id AS payout_id,
                 vp.order_id,
                 vp.vendor_id,
+                'order' AS transaction_type,
                 vp.payout_percentage,
-                vp.payout_amount,
-                vp.status AS payout_status,
+                    COALESCE(pr.paid_amount, 0) AS payout_amount,
+                    CASE WHEN pr.status IN ('paid', 'partially_paid') THEN pr.status ELSE vp.status END AS payout_status,
+                    CASE WHEN pr.status IN ('paid', 'partially_paid') THEN pr.processed_at ELSE vp.last_paid_at END AS last_paid_at,
                 vp.delivered_at,
                 vp.due_date,
-                vp.last_paid_at,
                 vp.notes AS payout_notes,
+                    pr.id AS request_id,
+                    pr.status AS request_status,
+                    pr.eligible_amount,
+                    pr.rejection_reason AS request_rejection_reason,
+                    pr.requested_at,
                 o.total_amount AS order_total_amount,
                 o.status AS order_status,
                 o.payment_status AS client_payment_status,
@@ -1017,16 +1029,153 @@ export const getVendorPayoutsController = async (req: Request, res: Response): P
             JOIN orders o ON o.id = vp.order_id
             JOIN vendors v ON v.id = vp.vendor_id
             LEFT JOIN users u ON u.id = o.user_id
+            LEFT JOIN LATERAL (
+                SELECT id, status, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
+                FROM vendor_payout_requests
+                WHERE order_id = vp.order_id
+                ORDER BY requested_at DESC
+                LIMIT 1
+            ) pr ON TRUE
             WHERE vp.vendor_id = $1
               AND o.status NOT IN ('pending', 'cancelled')
               AND (o.source = 'admin' OR o.payment_status = 'paid')
             ORDER BY vp.created_at DESC
         `;
         const result = await pool.query(query, [vendorId]);
-        return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: result.rows });
+        return res.status(200).json({ message: "Vendor payouts retrieved successfully", data: [...result.rows, ...servicePayouts] });
     } catch (error) {
         console.error("Error fetching vendor payouts:", error);
         return res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+export const requestVendorPayoutController = async (req: Request, res: Response): Promise<Response> => {
+    const authUser = (req as any).user;
+    const rawTransactionType = req.params.transactionType;
+    const rawTransactionId = req.params.transactionId;
+    const transactionType = Array.isArray(rawTransactionType) ? rawTransactionType[0] : rawTransactionType;
+    const transactionId = Array.isArray(rawTransactionId) ? rawTransactionId[0] : rawTransactionId;
+
+    if (authUser?.role !== "vendor" || !authUser?.userId) {
+        return res.status(403).json({ message: "Only vendors can request payouts" });
+    }
+    if (typeof transactionType !== "string" || typeof transactionId !== "string" || !["order", "service"].includes(transactionType)) {
+        return res.status(400).json({ message: "A valid order or service booking is required" });
+    }
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        const vendorResult = await client.query(
+            `SELECT id, bank_name, account_holder_name, account_number, ifsc_code, cancelled_cheque_link
+             FROM vendors WHERE user_id = $1 AND approval_status = 'approved' FOR UPDATE`,
+            [authUser.userId]
+        );
+        if (!vendorResult.rows.length) {
+            await client.query("ROLLBACK");
+            return res.status(403).json({ message: "An approved vendor profile is required" });
+        }
+
+        const vendor = vendorResult.rows[0];
+        if (![vendor.bank_name, vendor.account_holder_name, vendor.account_number, vendor.ifsc_code, vendor.cancelled_cheque_link]
+            .every((value) => typeof value === "string" && value.trim())) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Complete your bank details and cancelled cheque before requesting a payout" });
+        }
+
+        let eligibleAmount = 0;
+        if (transactionType === "order") {
+            const orderResult = await client.query(
+                `SELECT o.id, o.total_amount, o.status, o.payment_status, vp.due_date,
+                    vp.status AS legacy_payout_status,
+                    vp.payout_percentage AS legacy_payout_percentage,
+                    COALESCE((
+                        SELECT SUM(p.amount) FROM payments p
+                        WHERE p.status = 'successful'
+                          AND (o.id = ANY(p.order_ids) OR p.quotation_request_id = (
+                              SELECT qr.id FROM quotation_requests qr WHERE qr.order_id = o.id LIMIT 1
+                          ))
+                    ), 0) AS successful_amount,
+                    COALESCE((
+                        SELECT SUM(p.split_percentage) FROM payments p
+                        WHERE p.status = 'successful'
+                          AND (o.id = ANY(p.order_ids) OR p.quotation_request_id = (
+                              SELECT qr.id FROM quotation_requests qr WHERE qr.order_id = o.id LIMIT 1
+                          ))
+                    ), 0) AS successful_percentage
+                 FROM orders o
+                 JOIN vendor_payouts vp ON vp.order_id = o.id
+                 WHERE o.id = $1 AND o.vendor_id = $2
+                 FOR UPDATE OF o`,
+                [transactionId, vendor.id]
+            );
+            if (!orderResult.rows.length) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Order payout record not found" });
+            }
+
+            const order = orderResult.rows[0];
+            const totalAmount = Number(order.total_amount);
+            const paidAmount = Number(order.successful_amount);
+            const paidPercentage = Number(order.successful_percentage);
+            const dueDate = order.due_date ? new Date(order.due_date) : null;
+            if (order.legacy_payout_status !== "pending" || Number(order.legacy_payout_percentage) > 0) {
+                await client.query("ROLLBACK");
+                return res.status(409).json({ message: "This order already has a legacy payout settlement record" });
+            }
+            if (order.status !== "delivered" || order.payment_status !== "paid" || paidPercentage < 100 || paidAmount < totalAmount) {
+                await client.query("ROLLBACK");
+                return res.status(409).json({ message: "Order must be delivered and fully paid before payout can be requested" });
+            }
+            if (!dueDate || dueDate.getTime() > Date.now()) {
+                await client.query("ROLLBACK");
+                return res.status(409).json({ message: "Payout can be requested after the vendor credit cycle is due" });
+            }
+            eligibleAmount = Math.min(totalAmount, paidAmount);
+        } else {
+            const bookingResult = await client.query(
+                `SELECT sb.id, sb.total_amount, sb.status, sb.payment_status,
+                    EXISTS (
+                        SELECT 1 FROM payments p
+                        WHERE p.status = 'successful' AND sb.id = ANY(p.booking_ids)
+                    ) AS has_successful_payment
+                 FROM service_bookings sb
+                 WHERE sb.id = $1 AND sb.vendor_id = $2
+                 FOR UPDATE OF sb`,
+                [transactionId, vendor.id]
+            );
+            if (!bookingResult.rows.length) {
+                await client.query("ROLLBACK");
+                return res.status(404).json({ message: "Service booking not found" });
+            }
+
+            const booking = bookingResult.rows[0];
+            if (booking.status !== "completed" || booking.payment_status !== "paid" || !booking.has_successful_payment) {
+                await client.query("ROLLBACK");
+                return res.status(409).json({ message: "Service must be completed and fully paid before payout can be requested" });
+            }
+            eligibleAmount = Number(booking.total_amount);
+        }
+
+        const requestResult = await client.query(
+            `INSERT INTO vendor_payout_requests (vendor_id, order_id, booking_id, eligible_amount)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, status, eligible_amount, requested_at`,
+            [vendor.id, transactionType === "order" ? transactionId : null, transactionType === "service" ? transactionId : null, eligibleAmount]
+        );
+
+        await client.query("COMMIT");
+        return res.status(201).json({ message: "Payout request submitted", data: requestResult.rows[0] });
+    } catch (error: any) {
+        await client.query("ROLLBACK");
+        if (error?.code === "23505") {
+            return res.status(409).json({ message: "A payout request already exists for this transaction" });
+        }
+        console.error("Error creating vendor payout request:", error);
+        return res.status(500).json({ message: "Internal server error" });
+    } finally {
+        client.release();
     }
 };
 

@@ -25,6 +25,7 @@ authRouter.post("/otp/verify", OTPVerificationController);
 // Registration verification route
 authRouter.post("/verify-registration", upload.fields([
     { name: "gstCertificate", maxCount: 1 },
+    { name: "cancelledCheque", maxCount: 1 },
 ]), verifyRegisteredUser);
 
 // Protected route - get current user

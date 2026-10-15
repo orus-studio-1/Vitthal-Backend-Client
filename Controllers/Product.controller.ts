@@ -1516,12 +1516,15 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                 p.approval_status,
                 p.approval_notes,
                 MIN(vp.created_at) AS created_date,
+                BOOL_OR(vp.pending_modifications IS NOT NULL OR vp.pending_price IS NOT NULL OR vp.modification_status = 'pending') AS has_pending_modification,
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'vendor_product_id', vp.id,
                         'product_variant_id', vp.product_variant_id,
                         'price', vp.price,
                         'pending_price', vp.pending_price,
+                        'pending_modifications', vp.pending_modifications,
+                        'modification_status', vp.modification_status,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
                         'is_active', vp.is_active,
@@ -1830,6 +1833,8 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                         'price', vp.price,
                         'discounted_price', vp.discounted_price,
                         'pending_price', vp.pending_price,
+                        'pending_modifications', vp.pending_modifications,
+                        'modification_status', vp.modification_status,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
                         'is_active', vp.is_active,
@@ -1870,6 +1875,16 @@ export const getVendorProductByIdController = async (req: Request, res: Response
         }
 
         const product = result.rows[0];
+        if (product) {
+            if (Array.isArray(product.variants) && product.variants.length > 0) {
+                const pendingVar = product.variants.find((v: any) => v.pending_modifications || v.pending_price || v.modification_status === 'pending');
+                if (pendingVar) {
+                    product.pending_modifications = pendingVar.pending_modifications;
+                    product.pending_price = pendingVar.pending_price;
+                    product.modification_status = pendingVar.modification_status || 'pending';
+                }
+            }
+        }
         if (product && Array.isArray(product.images)) {
             for (const img of product.images) {
                 img.image_url = await getPresignedUrlOrOriginal(img.image_url);
@@ -1948,12 +1963,14 @@ export const updateVendorProductController = async (req: Request, res: Response)
         let existingProductResult;
         if (productVariantId) {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2`,
+                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, pending_price, pending_modifications, modification_status 
+                 FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2`,
                 [vendorId, productVariantId]
             );
         } else {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
+                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, pending_price, pending_modifications, modification_status 
+                 FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
                 [vendorId, productId]
             );
         }
@@ -1982,6 +1999,18 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 );
             }
         }
+
+        // Fetch existing product specifications and catalog attributes
+        const existingProdRes = await pool.query(
+            `SELECT id, name, size, brand, grade, colour, warranty, manufacturer, unit, attributes, specifications 
+             FROM products WHERE id = $1`,
+            [resolvedProductId]
+        );
+        const existingProd = existingProdRes.rows[0] || {};
+
+        const incomingAttrs = (req.body.attributes || req.body.catalogFields || {}) as Record<string, any>;
+        const incomingSpecs = req.body.specifications;
+
         const requestedIsActive = Boolean(isActive);
 
         // Supreme control: vendor cannot set is_active = true if the catalog mapping status is not active (i.e. not approved by admin)
@@ -1991,43 +2020,125 @@ export const updateVendorProductController = async (req: Request, res: Response)
             });
         }
 
+        const currentPrice = Number(existingVP.price);
+        const requestedPrice = Number(price);
+        const isPriceChanged = requestedPrice !== currentPrice;
+
+        const currentMoq = Number(existingVP.moq);
+        const requestedMoq = Number(moq);
+        const isMoqChanged = requestedMoq !== currentMoq;
+
+        const currentStock = Number(existingVP.stock_quantity);
+        const requestedStock = Number(stockQuantity);
+        const isStockChanged = requestedStock !== currentStock;
+
+        const currentGst = existingVP.gst_percentage !== null && existingVP.gst_percentage !== undefined ? Number(existingVP.gst_percentage) : 18;
+        const requestedGst = gstPercentage !== undefined ? Number(gstPercentage) : currentGst;
+        const isGstChanged = requestedGst !== currentGst;
+
+        // Compare attributes
+        let hasAttrChanges = false;
+        const proposedAttributes: Record<string, string> = {};
+        const currentAttributes: Record<string, string> = {};
+
+        for (const key of ["size", "brand", "grade", "colour", "warranty", "manufacturer", "unit"]) {
+            const currentVal = String(existingProd[key] || existingProd.attributes?.[key] || '').trim();
+            const incomingVal = incomingAttrs[key] !== undefined && incomingAttrs[key] !== null 
+                ? String(incomingAttrs[key]).trim() 
+                : currentVal;
+            currentAttributes[key] = currentVal;
+            proposedAttributes[key] = incomingVal;
+            if (incomingVal !== currentVal) {
+                hasAttrChanges = true;
+            }
+        }
+
+        // Also check any extra custom attributes provided
+        if (incomingAttrs && typeof incomingAttrs === 'object') {
+            for (const [k, v] of Object.entries(incomingAttrs)) {
+                if (proposedAttributes[k] === undefined && v !== undefined && v !== null) {
+                    const currentVal = String(existingProd.attributes?.[k] || '').trim();
+                    const incomingVal = String(v).trim();
+                    currentAttributes[k] = currentVal;
+                    proposedAttributes[k] = incomingVal;
+                    if (incomingVal !== currentVal) {
+                        hasAttrChanges = true;
+                    }
+                }
+            }
+        }
+
+        let hasSpecChanges = false;
+        if (incomingSpecs && typeof incomingSpecs === 'object') {
+            const currentSpecsStr = JSON.stringify(existingProd.specifications || {});
+            const incomingSpecsStr = JSON.stringify(incomingSpecs);
+            if (currentSpecsStr !== incomingSpecsStr) {
+                hasSpecChanges = true;
+            }
+        }
+
+        // Determine if any modification occurred on an active listing
+        const isAnyModification = isPriceChanged || hasAttrChanges || hasSpecChanges || isMoqChanged || isStockChanged || isGstChanged;
+        const requiresApproval = existingVP.status === 'active' && isAnyModification;
+
         let updateQuery;
         let queryParams;
-        const isPriceChanged = Number(price) !== Number(existingVP.price);
-        const requiresApproval = existingVP.status === 'active' && isPriceChanged;
 
         if (requiresApproval) {
+            const pendingModificationsData = {
+                price: requestedPrice,
+                current_price: currentPrice,
+                is_price_changed: isPriceChanged,
+                moq: requestedMoq,
+                current_moq: currentMoq,
+                is_moq_changed: isMoqChanged,
+                stock_quantity: requestedStock,
+                current_stock_quantity: currentStock,
+                is_stock_changed: isStockChanged,
+                gst_percentage: requestedGst,
+                current_gst_percentage: currentGst,
+                is_gst_changed: isGstChanged,
+                attributes: proposedAttributes,
+                current_attributes: currentAttributes,
+                has_attribute_changes: hasAttrChanges,
+                specifications: incomingSpecs || existingProd.specifications || {},
+                current_specifications: existingProd.specifications || {},
+                has_specification_changes: hasSpecChanges,
+                requested_at: new Date().toISOString()
+            };
+
+            // LIVE specs and price remain UNTOUCHED in products & vendor_products.
+            // Pending changes are staged in pending_modifications and pending_price.
             updateQuery = `
                 UPDATE vendor_products 
                 SET pending_price = $1,
-                    moq = $2,
-                    stock_quantity = $3,
-                    is_active = $4,
-                    quotation_enabled = $5,
-                    quotation_min_qty = $6,
-                    gst_percentage = COALESCE($7, gst_percentage),
-                    discounted_price = $8,
+                    pending_modifications = $2,
+                    modification_status = 'pending',
+                    is_active = $3,
+                    quotation_enabled = $4,
+                    quotation_min_qty = $5,
+                    discounted_price = $6,
                     updated_at = NOW()
-                WHERE vendor_id = $9 AND ${productVariantId ? "product_variant_id" : "product_id"} = $10
+                WHERE id = $7
                 RETURNING *
             `;
             queryParams = [
-                Number(price),
-                Number(moq),
-                Number(stockQuantity),
+                isPriceChanged ? requestedPrice : (existingVP.pending_price || null),
+                JSON.stringify(pendingModificationsData),
                 requestedIsActive,
                 Boolean(quotationEnabled),
                 quotationMinQty ?? null,
-                gstPercentage !== undefined ? Number(gstPercentage) : null,
                 discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
-                vendorId,
-                productVariantId || productId
+                existingVP.id
             ];
         } else {
+            // No modifications or product not yet active: apply directly
             updateQuery = `
                 UPDATE vendor_products 
                 SET price = $1,
                     pending_price = NULL,
+                    pending_modifications = NULL,
+                    modification_status = NULL,
                     moq = $2,
                     stock_quantity = $3,
                     is_active = $4,
@@ -2036,20 +2147,19 @@ export const updateVendorProductController = async (req: Request, res: Response)
                     gst_percentage = COALESCE($7, gst_percentage),
                     discounted_price = $8,
                     updated_at = NOW()
-                WHERE vendor_id = $9 AND ${productVariantId ? "product_variant_id" : "product_id"} = $10
+                WHERE id = $9
                 RETURNING *
             `;
             queryParams = [
-                Number(price),
-                Number(moq),
-                Number(stockQuantity),
+                requestedPrice,
+                requestedMoq,
+                requestedStock,
                 requestedIsActive,
                 Boolean(quotationEnabled),
                 quotationMinQty ?? null,
                 gstPercentage !== undefined ? Number(gstPercentage) : null,
                 discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
-                vendorId,
-                productVariantId || productId
+                existingVP.id
             ];
         }
 
@@ -2057,9 +2167,10 @@ export const updateVendorProductController = async (req: Request, res: Response)
 
         return res.status(200).json({
             message: requiresApproval
-                ? "Product details updated. The price change request has been submitted to admin for approval."
+                ? "Product modification request submitted successfully and is now pending admin approval."
                 : "Vendor product updated successfully",
-            data: result.rows[0]
+            data: result.rows[0],
+            pending_approval: requiresApproval
         });
     } catch (error) {
         console.error("Error while updating vendor product:", error);

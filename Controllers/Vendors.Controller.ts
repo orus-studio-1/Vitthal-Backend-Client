@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { BUCKET_NAME, getPresignedUrlOrOriginal, uploadBufferToS3 } from "../services/s3.service";
-import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
+import { decryptPayoutAccountNumber, encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.gst_certificate_link) {
@@ -46,13 +46,15 @@ export const getVendorPayoutBankDetailsController = async (req: Request, res: Re
 
     try {
         const result = await pool.query(
-            `SELECT bank_name, account_holder_name, account_number_last4 AS account_last_four,
-                    ifsc_code, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
+            `SELECT bank_name, account_holder_name, account_number, account_number_last4 AS account_last_four,
+                    ifsc_code, upi_id, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
              FROM vendors WHERE user_id = $1`,
             [authUser.userId]
         );
         if (!result.rows.length) return res.status(404).json({ message: "Vendor profile not found" });
-        return res.status(200).json({ data: result.rows[0] });
+        const details = result.rows[0];
+        if (details.account_number) details.account_number = decryptPayoutAccountNumber(details.account_number);
+        return res.status(200).json({ data: details });
     } catch (error) {
         console.error("Error retrieving vendor payout bank details:", error);
         return res.status(500).json({ message: "Internal server error" });
@@ -67,15 +69,16 @@ export const updateVendorPayoutBankDetailsController = async (req: Request, res:
     const accountHolderName = normalizeRequiredText(req.body?.accountHolderName);
     const accountNumber = normalizeRequiredText(req.body?.accountNumber);
     const ifscCode = normalizeRequiredText(req.body?.ifscCode).toUpperCase();
+    const upiId = normalizeRequiredText(req.body?.upiId) || null;
     const chequeFile = req.file;
     if (!bankName || !accountHolderName || !/^\d{9,18}$/.test(accountNumber)
-        || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode) || !chequeFile) {
-        return res.status(400).json({ message: "Valid bank details and cancelled-cheque image/PDF are required" });
+        || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode)) {
+        return res.status(400).json({ message: "Valid bank name, account holder, account number and IFSC code are required" });
     }
-    if (!["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"].includes(chequeFile.mimetype)) {
+    if (chequeFile && !["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"].includes(chequeFile.mimetype)) {
         return res.status(400).json({ message: "Cancelled cheque must be a PDF or image" });
     }
-    if (!BUCKET_NAME) return res.status(500).json({ message: "Document storage is not configured" });
+    if (chequeFile && !BUCKET_NAME) return res.status(500).json({ message: "Document storage is not configured" });
 
     let encryptedAccountNumber: string;
     try {
@@ -88,7 +91,7 @@ export const updateVendorPayoutBankDetailsController = async (req: Request, res:
     try {
         await client.query("BEGIN");
         const vendorResult = await client.query(
-            `SELECT id FROM vendors WHERE user_id = $1 FOR UPDATE`,
+            `SELECT id, cancelled_cheque_link FROM vendors WHERE user_id = $1 FOR UPDATE`,
             [authUser.userId]
         );
         if (!vendorResult.rows.length) {
@@ -104,15 +107,22 @@ export const updateVendorPayoutBankDetailsController = async (req: Request, res:
             return res.status(409).json({ message: "Bank details cannot change while a payout request is pending" });
         }
 
-        const extension = chequeFile.originalname.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
-        const key = `vendor-registration/payout-cheques/${vendorResult.rows[0].id}_${Date.now()}.${extension}`;
-        await uploadBufferToS3(chequeFile.buffer, key, chequeFile.mimetype);
+        let chequeLink = vendorResult.rows[0].cancelled_cheque_link as string | null;
+        if (chequeFile) {
+            const extension = chequeFile.originalname.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+            chequeLink = `vendor-registration/payout-cheques/${vendorResult.rows[0].id}_${Date.now()}.${extension}`;
+            await uploadBufferToS3(chequeFile.buffer, chequeLink, chequeFile.mimetype);
+        }
+        if (!chequeLink) {
+            await client.query("ROLLBACK");
+            return res.status(400).json({ message: "Upload a cancelled-cheque image/PDF to add a payout account" });
+        }
         await client.query(
             `UPDATE vendors
              SET bank_name = $1, account_holder_name = $2, account_number = $3,
-                 account_number_last4 = $4, ifsc_code = $5, cancelled_cheque_link = $6, updated_at = NOW()
-             WHERE id = $7`,
-            [bankName, accountHolderName, encryptedAccountNumber, accountNumber.slice(-4), ifscCode, key, vendorResult.rows[0].id]
+                 account_number_last4 = $4, ifsc_code = $5, upi_id = $6, cancelled_cheque_link = $7, updated_at = NOW()
+             WHERE id = $8`,
+            [bankName, accountHolderName, encryptedAccountNumber, accountNumber.slice(-4), ifscCode, upiId, chequeLink, vendorResult.rows[0].id]
         );
 
         await client.query("COMMIT");

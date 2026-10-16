@@ -1,0 +1,5 @@
+ALTER TABLE vendors
+  ADD COLUMN IF NOT EXISTS upi_id VARCHAR(255);
+
+ALTER TABLE worker_payout_bank_details
+  ADD COLUMN IF NOT EXISTS upi_id VARCHAR(255);

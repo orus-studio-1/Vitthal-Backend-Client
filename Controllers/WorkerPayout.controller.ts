@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { BUCKET_NAME, uploadBufferToS3 } from "../services/s3.service";
-import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
+import { decryptPayoutAccountNumber, encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 const money = (value: unknown) => Number(value || 0);
 
@@ -17,9 +17,10 @@ export const getWorkerPayoutBankDetailsController = async (req: Request, res: Re
   if (!user) return res as Response;
   try {
     const result = await pool.query(
-      `SELECT bank_name, account_holder_name, account_number_last4 AS account_last_four,
-              ifsc_code, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
+      `SELECT bank_name, account_holder_name, account_number, account_number_last4 AS account_last_four,
+              ifsc_code, upi_id, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
        FROM worker_payout_bank_details WHERE worker_user_id = $1`, [user.userId]);
+    if (result.rows[0]?.account_number) result.rows[0].account_number = decryptPayoutAccountNumber(result.rows[0].account_number);
     return res.json({ success: true, data: result.rows[0] || null });
   } catch (error) {
     console.error("Error retrieving worker payout bank details:", error);
@@ -34,15 +35,16 @@ export const updateWorkerPayoutBankDetailsController = async (req: Request, res:
   const accountHolderName = String(req.body?.accountHolderName || "").trim();
   const accountNumber = String(req.body?.accountNumber || "").trim();
   const ifscCode = String(req.body?.ifscCode || "").trim().toUpperCase();
+  const upiId = String(req.body?.upiId || "").trim() || null;
   const cheque = req.file;
   if (!bankName || !accountHolderName || !/^\d{9,18}$/.test(accountNumber)
-    || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode) || !cheque) {
-    return res.status(400).json({ success: false, message: "Valid bank details and cancelled-cheque image/PDF are required." });
+    || !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscCode)) {
+    return res.status(400).json({ success: false, message: "Valid bank name, account holder, account number and IFSC code are required." });
   }
-  if (!["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"].includes(cheque.mimetype)) {
+  if (cheque && !["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"].includes(cheque.mimetype)) {
     return res.status(400).json({ success: false, message: "Cancelled cheque must be a PDF or image." });
   }
-  if (!BUCKET_NAME) return res.status(503).json({ success: false, message: "Document storage is not configured." });
+  if (cheque && !BUCKET_NAME) return res.status(503).json({ success: false, message: "Document storage is not configured." });
 
   let encryptedAccount: string;
   try { encryptedAccount = encryptPayoutAccountNumber(accountNumber); }
@@ -56,16 +58,21 @@ export const updateWorkerPayoutBankDetailsController = async (req: Request, res:
     const pending = await db.query(`SELECT 1 FROM worker_payout_requests WHERE worker_user_id = $1 AND status IN ('requested', 'partially_paid') LIMIT 1`, [user.userId]);
     if (pending.rows.length) { await db.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Bank details cannot change while a payout request is pending." }); }
 
-    const extension = cheque.originalname.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
-    const key = `worker-payout-cheques/${user.userId}_${Date.now()}.${extension}`;
-    await uploadBufferToS3(cheque.buffer, key, cheque.mimetype);
+    const existing = await db.query(`SELECT cancelled_cheque_link FROM worker_payout_bank_details WHERE worker_user_id = $1 FOR UPDATE`, [user.userId]);
+    let chequeLink = existing.rows[0]?.cancelled_cheque_link as string | undefined;
+    if (cheque) {
+      const extension = cheque.originalname.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+      chequeLink = `worker-payout-cheques/${user.userId}_${Date.now()}.${extension}`;
+      await uploadBufferToS3(cheque.buffer, chequeLink, cheque.mimetype);
+    }
+    if (!chequeLink) { await db.query("ROLLBACK"); return res.status(400).json({ success: false, message: "Upload a cancelled-cheque image/PDF to add a payout account." }); }
     await db.query(
-      `INSERT INTO worker_payout_bank_details (worker_user_id, bank_name, account_holder_name, account_number, account_number_last4, ifsc_code, cancelled_cheque_link, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      `INSERT INTO worker_payout_bank_details (worker_user_id, bank_name, account_holder_name, account_number, account_number_last4, ifsc_code, upi_id, cancelled_cheque_link, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
        ON CONFLICT (worker_user_id) DO UPDATE SET bank_name = EXCLUDED.bank_name, account_holder_name = EXCLUDED.account_holder_name,
        account_number = EXCLUDED.account_number, account_number_last4 = EXCLUDED.account_number_last4,
-       ifsc_code = EXCLUDED.ifsc_code, cancelled_cheque_link = EXCLUDED.cancelled_cheque_link, updated_at = NOW()`,
-      [user.userId, bankName, accountHolderName, encryptedAccount, accountNumber.slice(-4), ifscCode, key]);
+       ifsc_code = EXCLUDED.ifsc_code, upi_id = EXCLUDED.upi_id, cancelled_cheque_link = EXCLUDED.cancelled_cheque_link, updated_at = NOW()`,
+      [user.userId, bankName, accountHolderName, encryptedAccount, accountNumber.slice(-4), ifscCode, upiId, chequeLink]);
     await db.query("COMMIT");
     return res.json({ success: true, message: "Payout bank details saved." });
   } catch (error) {

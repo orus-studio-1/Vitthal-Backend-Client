@@ -54,7 +54,14 @@
 
 
 import { Router } from "express";
+import multer from "multer";
 import { authMiddleware } from "../Middleware/AuthMiddleware";
+import {
+    getWorkerPayoutBankDetailsController,
+    updateWorkerPayoutBankDetailsController,
+    getWorkerPayoutEligibilityController,
+    requestWorkerPayoutController,
+} from "../Controllers/WorkerPayout.controller";
 
 import {
     browseCandidatesController,
@@ -86,6 +93,7 @@ import {
 } from "../Controllers/HiringLifecycle.controller";
 
 const hiringRouter = Router();
+const payoutChequeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 // Public
 hiringRouter.get("/candidates", browseCandidatesController);
@@ -173,6 +181,11 @@ hiringRouter.get(
     "/worker-payments",
     getWorkerPaymentHistoryController
 );
+
+hiringRouter.get("/worker/payout-eligibility", getWorkerPayoutEligibilityController);
+hiringRouter.get("/worker/payout-bank-details", getWorkerPayoutBankDetailsController);
+hiringRouter.put("/worker/payout-bank-details", payoutChequeUpload.single("cancelledCheque"), updateWorkerPayoutBankDetailsController);
+hiringRouter.post("/worker/payout-requests/:hireRequestId", requestWorkerPayoutController);
 
 hiringRouter.post(
     "/requests/:id/complete",

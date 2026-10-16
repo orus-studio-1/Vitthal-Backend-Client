@@ -51,7 +51,7 @@ BEGIN
        max_commision_percentage, sort_order, is_active, created_at, updated_at)
     VALUES
       (r.id, safe_code, r.label, r.description, r.image, r.min_comm,
-       r.max_comm, r.sort_ord, r.is_act, r.cr_at, r.up_at)
+       r.max_comm, r.sort_ord, false, r.cr_at, r.up_at)
     ON CONFLICT (id) DO UPDATE SET
       code = EXCLUDED.code,
       label = EXCLUDED.label,
@@ -60,21 +60,21 @@ BEGIN
       min_commision_percentage = EXCLUDED.min_commision_percentage,
       max_commision_percentage = EXCLUDED.max_commision_percentage,
       sort_order = EXCLUDED.sort_order,
-      is_active = EXCLUDED.is_active,
+      is_active = false,
       updated_at = now();
   END LOOP;
 END $$;
 
 -- Step 2: Handle any orphaned category_id values that do not exist in product_category
 -- but are referenced in service_subcategories, service_tickets, or services.
--- This guarantees foreign key creation cannot fail with foreign key violation 23503.
+-- Inserted as inactive so they preserve foreign keys without polluting the active service list.
 INSERT INTO public.service_categories (id, code, label, description, is_active)
 SELECT DISTINCT
   sub.category_id,
   'legacy_subcat_' || replace(sub.category_id::text, '-', '_'),
   'Legacy Service Category',
   'Auto-created to preserve orphaned subcategories during migration',
-  true
+  false
 FROM public.service_subcategories sub
 WHERE sub.category_id IS NOT NULL
   AND NOT EXISTS (
@@ -88,7 +88,7 @@ SELECT DISTINCT
   'legacy_ticket_' || replace(st.category_id::text, '-', '_'),
   'Legacy Service Category',
   'Auto-created to preserve orphaned service tickets during migration',
-  true
+  false
 FROM public.service_tickets st
 WHERE st.category_id IS NOT NULL
   AND NOT EXISTS (
@@ -102,7 +102,7 @@ SELECT DISTINCT
   'legacy_service_' || replace(s.category_id::text, '-', '_'),
   'Legacy Service Category',
   'Auto-created to preserve orphaned services during migration',
-  true
+  false
 FROM public.services s
 WHERE s.category_id IS NOT NULL
   AND NOT EXISTS (
@@ -199,9 +199,20 @@ CREATE INDEX IF NOT EXISTS idx_client_assets_service_category
 CREATE INDEX IF NOT EXISTS idx_service_categories_active_sort
   ON public.service_categories (is_active, sort_order, label);
 
--- The historical seed created these service-only rows in product_category.
--- Keep them for legacy foreign keys, but hide them from product category lists.
+-- The historical seed created service rows in product_category.
+-- Keep them for legacy foreign keys, but hide them completely from product category lists.
 UPDATE public.product_category
 SET is_active = false, updated_at = now()
-WHERE code IN ('machine_maintenance', 'job_inquiry')
-  AND category_type = 'service';
+WHERE category_type = 'service'
+   OR code IN (
+     'machine_maintenance',
+     'job_inquiry',
+     'logistics',
+     'goods_ticket_inquiry',
+     'freelancer_work',
+     'precision_cnc_machining',
+     'industrial_maintenance',
+     'plant_automation',
+     'structural_fabrication',
+     'quality_inspection'
+   );

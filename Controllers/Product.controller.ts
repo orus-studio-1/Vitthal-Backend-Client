@@ -1173,20 +1173,38 @@ export const getProductById = async (req: Request, res: Response): Promise<Respo
 export const getCategories = async (req: Request, res: Response): Promise<Response> => {
     const { type } = req.query;
     try {
-        let query = `
+        if (type === 'service') {
+            const result = await pool.query(`
+                SELECT id, code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, 'service'::text AS category_type
+                FROM service_categories
+                WHERE is_active = TRUE
+                ORDER BY sort_order ASC, label ASC
+            `);
+            for (const row of result.rows) {
+                const originalImage = typeof row.image === "string" ? row.image.trim() : "";
+                if (
+                    !originalImage
+                    || /^[a-z]:[\\/]/i.test(originalImage)
+                    || originalImage.startsWith("file:")
+                ) {
+                    row.image = null;
+                    continue;
+                }
+                const resolvedImage = await getPresignedUrlOrOriginal(row.image);
+                row.image = typeof resolvedImage === "string" && /^https?:\/\//i.test(resolvedImage)
+                    ? resolvedImage
+                    : null;
+            }
+            return res.status(200).json({ message: "Service categories fetched successfully", data: result.rows });
+        }
+
+        const query = `
              SELECT id, code, label, description, image, min_commision_percentage, max_commision_percentage, sort_order, category_type
              FROM product_category
-             WHERE is_active = TRUE
+             WHERE is_active = TRUE AND (category_type = 'product' OR category_type IS NULL)
+             ORDER BY sort_order ASC, label ASC
         `;
-        const params: any[] = [];
-        if (type === 'service') {
-            query += ` AND category_type IN ('service', 'both')`;
-        } else if (type === 'product') {
-            query += ` AND category_type IN ('product', 'both')`;
-        }
-        query += ` ORDER BY sort_order ASC, label ASC`;
-
-        const result = await pool.query(query, params);
+        const result = await pool.query(query);
         for (const row of result.rows) {
             const originalImage = typeof row.image === "string" ? row.image.trim() : "";
             if (

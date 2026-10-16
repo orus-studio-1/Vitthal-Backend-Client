@@ -650,6 +650,16 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
             return res.status(400).json({ message: "You can select up to 3 vendor categories." });
         }
 
+        if (shouldPersistVendorSetup && normalizedVendorType === "service") {
+            const serviceCategoriesResult = await pool.query(
+                `SELECT code FROM service_categories WHERE code = ANY($1::text[]) AND is_active = TRUE`,
+                [selectedCategoryCodes]
+            );
+            if (serviceCategoriesResult.rows.length !== selectedCategoryCodes.length) {
+                return res.status(400).json({ message: "One or more selected service categories are unavailable." });
+            }
+        }
+
         const client = await pool.connect();
         let userRole = user.role;
         let refreshToken = "";
@@ -810,8 +820,22 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         [vendorId]
                     );
 
-                    // Insert selected categories
-                    if (selectedCategoryCodes.length > 0) {
+                    if (vendorType === "service") {
+                        await client.query(
+                            `DELETE FROM vendor_service_category_selections WHERE vendor_id = $1`,
+                            [vendorId]
+                        );
+                        if (selectedCategoryCodes.length > 0) {
+                            await client.query(
+                                `INSERT INTO vendor_service_category_selections (vendor_id, service_category_id, service_subcategory_id)
+                                 SELECT $1, id, NULL
+                                 FROM service_categories
+                                 WHERE code = ANY($2::text[]) AND is_active = TRUE`,
+                                [vendorId, selectedCategoryCodes]
+                            );
+                        }
+                    } else if (selectedCategoryCodes.length > 0) {
+                        // Insert selected product categories without changing the existing product-vendor flow.
                         for (const categoryCode of selectedCategoryCodes) {
                             const categoryResult = await client.query(
                                 `SELECT id FROM product_category WHERE code = $1 AND is_active = TRUE`,

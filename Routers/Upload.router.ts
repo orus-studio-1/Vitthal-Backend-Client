@@ -38,7 +38,7 @@ uploadRouter.post("/upload", (req: Request, res: Response): void => {
       if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
         res.status(413).json({
           success: false,
-          message: "GST certificate must be 5MB or smaller.",
+          message: "Uploaded files must be 5 MB or smaller.",
         });
         return;
       }

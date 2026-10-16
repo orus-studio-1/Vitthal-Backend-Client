@@ -44,7 +44,7 @@ export const getServiceCartController = async (req: Request, res: Response): Pro
             FROM carts c
             JOIN service_cart_items sci ON c.id = sci.cart_id
             JOIN services s    ON s.id = sci.service_id
-            LEFT JOIN product_category pc ON pc.id = s.category_id
+            LEFT JOIN service_categories pc ON pc.id = s.category_id
             JOIN vendor_services vs ON vs.id = sci.vendor_service_id
             JOIN vendors v     ON v.id = sci.vendor_id
             WHERE c.user_id = $1 AND c.status = 'active' AND c.cart_type = $2

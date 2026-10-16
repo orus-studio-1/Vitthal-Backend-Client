@@ -550,6 +550,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         const accountHolderName = normalizeRequiredText(req.body.accountHolderName);
         const accountNumber = normalizeRequiredText(req.body.accountNumber);
         const ifscCode = normalizeRequiredText(req.body.ifscCode).toUpperCase();
+        const upiId = normalizeRequiredText(req.body.upiId) || null;
         const cancelledChequeFile = getUploadedFile(req, "cancelledCheque");
         const normalizedPhone = normalizeRequiredText(req.body.phone);
         const normalizedAlternativeNumber = normalizeRequiredText(req.body.alternativeNumber);
@@ -715,6 +716,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 account_number,
                                 account_number_last4,
                                 ifsc_code,
+                                upi_id,
                                 cancelled_cheque_link,
                                 business_type,
                                 company_website,
@@ -731,7 +733,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 vendor_type,
                                 updated_at
                             )
-                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, NULLIF($14, ''), $15, $16, $17, $18, $19, 'pending', 'Awaiting admin approval', $20, $21, NOW())
+                            VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, ''), $14, NULLIF($15, ''), $16, $17, $18, $19, $20, 'pending', 'Awaiting admin approval', $21, $22, NOW())
                             ON CONFLICT (user_id)
                             DO UPDATE SET
                                 company_name = EXCLUDED.company_name,
@@ -742,6 +744,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                                 account_number = EXCLUDED.account_number,
                                 account_number_last4 = EXCLUDED.account_number_last4,
                                 ifsc_code = EXCLUDED.ifsc_code,
+                                upi_id = EXCLUDED.upi_id,
                                 cancelled_cheque_link = EXCLUDED.cancelled_cheque_link,
                                 business_type = EXCLUDED.business_type,
                                 company_website = EXCLUDED.company_website,
@@ -768,6 +771,7 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
                         encryptedAccountNumber,
                         accountNumber.slice(-4),
                         ifscCode,
+                        upiId,
                         uploadedCancelledChequeLink,
                         normalizedBusinessType,
                         normalizedCompanyWebsite,

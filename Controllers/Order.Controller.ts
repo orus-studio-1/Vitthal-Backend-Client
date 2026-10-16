@@ -1119,6 +1119,9 @@ export const getVendorPayoutsController = async (
                     pr.id AS request_id,
                     pr.status AS request_status,
                     pr.eligible_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.gross_amount ELSE sb.total_amount END AS payout_gross_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.commission_percentage ELSE commission.vendor_rate END AS commission_percentage,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.eligible_amount ELSE ROUND(sb.total_amount * (100 - commission.vendor_rate) / 100, 2) END AS vendor_net_amount,
                     pr.rejection_reason AS request_rejection_reason,
                     pr.requested_at,
                     'service_booking' AS service_kind,
@@ -1131,12 +1134,13 @@ export const getVendorPayoutsController = async (
                 JOIN users u ON sb.user_id = u.id
                 JOIN vendors v ON v.id = sb.vendor_id
                                 LEFT JOIN LATERAL (
-                                        SELECT id, status, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
+                                        SELECT id, status, gross_amount, commission_percentage, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
                                         FROM vendor_payout_requests
                                         WHERE booking_id = sb.id
                                         ORDER BY requested_at DESC
                                         LIMIT 1
                                 ) pr ON TRUE
+                CROSS JOIN LATERAL (SELECT COALESCE((SELECT vendor_commission_percentage FROM payout_commission_settings WHERE id = 1), 0)::numeric AS vendor_rate) commission
                 WHERE sb.vendor_id = $1
                   AND sb.status NOT IN ('cancelled', 'pending')
                 UNION ALL
@@ -1196,6 +1200,9 @@ export const getVendorPayoutsController = async (
                     pr.id AS request_id,
                     pr.status AS request_status,
                     pr.eligible_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.gross_amount ELSE o.total_amount END AS payout_gross_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.commission_percentage ELSE commission.vendor_rate END AS commission_percentage,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.eligible_amount ELSE ROUND(o.total_amount * (100 - commission.vendor_rate) / 100, 2) END AS vendor_net_amount,
                     pr.rejection_reason AS request_rejection_reason,
                     pr.requested_at,
                 o.total_amount AS order_total_amount,
@@ -1229,12 +1236,13 @@ export const getVendorPayoutsController = async (
             JOIN vendors v ON v.id = vp.vendor_id
             LEFT JOIN users u ON u.id = o.user_id
             LEFT JOIN LATERAL (
-                SELECT id, status, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
+                SELECT id, status, gross_amount, commission_percentage, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
                 FROM vendor_payout_requests
                 WHERE order_id = vp.order_id
                 ORDER BY requested_at DESC
                 LIMIT 1
             ) pr ON TRUE
+            CROSS JOIN LATERAL (SELECT COALESCE((SELECT vendor_commission_percentage FROM payout_commission_settings WHERE id = 1), 0)::numeric AS vendor_rate) commission
             WHERE vp.vendor_id = $1
               AND o.status NOT IN ('pending', 'cancelled')
               AND (o.source = 'admin' OR o.payment_status = 'paid')
@@ -1317,7 +1325,7 @@ export const requestVendorPayoutController = async (
         });
     }
 
-    let eligibleAmount = 0;
+    let grossAmount = 0;
     if (transactionType === "order") {
       const orderResult = await client.query(
         `SELECT o.id, o.total_amount, o.status, o.payment_status, vp.due_date,
@@ -1389,7 +1397,7 @@ export const requestVendorPayoutController = async (
               "Payout can be requested after the vendor credit cycle is due",
           });
       }
-      eligibleAmount = Math.min(totalAmount, paidAmount);
+      grossAmount = Math.min(totalAmount, paidAmount);
     } else {
       const ticketResult = await client.query(
         `SELECT st.id, st.total_amount, st.status,
@@ -1413,7 +1421,7 @@ export const requestVendorPayoutController = async (
                 "Machine maintenance service must be completed and fully paid before payout can be requested",
             });
         }
-        eligibleAmount = Number(ticket.total_amount);
+        grossAmount = Number(ticket.total_amount);
       } else {
         const bookingResult = await client.query(
           `SELECT sb.id, sb.total_amount, sb.status, sb.payment_status,
@@ -1445,18 +1453,46 @@ export const requestVendorPayoutController = async (
                 "Service must be completed and fully paid before payout can be requested",
             });
         }
-        eligibleAmount = Number(booking.total_amount);
+        grossAmount = Number(booking.total_amount);
       }
     }
 
+    const rateResult = await client.query(
+      `SELECT vendor_commission_percentage FROM payout_commission_settings WHERE id = 1`,
+    );
+    const commissionPercentage = Number(
+      rateResult.rows[0]?.vendor_commission_percentage || 0,
+    );
+    const eligibleAmount =
+      Math.round(
+        (grossAmount * (100 - commissionPercentage) / 100 + Number.EPSILON) *
+          100,
+      ) / 100;
+    if (
+      !Number.isFinite(grossAmount) ||
+      grossAmount <= 0 ||
+      !Number.isFinite(commissionPercentage) ||
+      commissionPercentage < 0 ||
+      commissionPercentage > 100 ||
+      eligibleAmount <= 0
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message:
+          "This transaction has no positive eligible payout after platform commission.",
+      });
+    }
+
     const requestResult = await client.query(
-      `INSERT INTO vendor_payout_requests (vendor_id, order_id, booking_id, eligible_amount)
-             VALUES ($1, $2, $3, $4)
+      `INSERT INTO vendor_payout_requests (vendor_id, order_id, booking_id, gross_amount, commission_percentage, eligible_amount)
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING id, status, eligible_amount, requested_at`,
       [
         vendor.id,
         transactionType === "order" ? transactionId : null,
         transactionType === "service" ? transactionId : null,
+        grossAmount,
+        commissionPercentage,
         eligibleAmount,
       ],
     );
@@ -1512,7 +1548,6 @@ export const getOrderInvoiceController = async (
     if (orderQ.rows.length === 0) {
       return res.status(404).json({ message: "Order not found" });
     }
-
     const order = orderQ.rows[0];
 
     // Access check: only admins, or the vendor who owns the order can access the invoice

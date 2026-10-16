@@ -1263,7 +1263,7 @@ export const getRiderDashboardStatsController = async (req: Request, res: Respon
     try {
         // Fetch Rider Profile & User info
         const riderRes = await pool.query(
-            `SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, da.is_online, da.status, da.kyc_status, u.is_verified
+            `SELECT da.id, da.special_rider_id, da.contact_phone, da.vehicle_type, da.vehicle_number, da.is_online, da.status, da.kyc_status, u.name, u.is_verified
              FROM delivery_agents da
              JOIN users u ON da.user_id = u.id
              WHERE da.user_id = $1`,
@@ -1304,6 +1304,7 @@ export const getRiderDashboardStatsController = async (req: Request, res: Respon
                 is_verified: rider.is_verified,
                 riderInfo: {
                     id: rider.id,
+                    name: rider.name,
                     specialRiderId: rider.special_rider_id,
                     contactPhone: rider.contact_phone,
                     vehicleType: rider.vehicle_type,

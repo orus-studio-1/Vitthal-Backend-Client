@@ -12,26 +12,105 @@ CREATE TABLE IF NOT EXISTS public.service_categories (
   updated_at timestamptz(6) NOT NULL DEFAULT now()
 );
 
--- Preserve existing service category IDs so existing service tickets,
--- catalogue services, and subcategory rows keep their references.
-INSERT INTO public.service_categories
-  (id, code, label, description, image, min_commision_percentage,
-   max_commision_percentage, sort_order, is_active, created_at, updated_at)
-SELECT id, code, label, description, image, min_commision_percentage,
-       max_commision_percentage, sort_order, is_active, created_at, updated_at
-FROM public.product_category
-WHERE category_type IN ('service', 'both')
-ON CONFLICT (id) DO UPDATE SET
-  code = EXCLUDED.code,
-  label = EXCLUDED.label,
-  description = EXCLUDED.description,
-  image = EXCLUDED.image,
-  min_commision_percentage = EXCLUDED.min_commision_percentage,
-  max_commision_percentage = EXCLUDED.max_commision_percentage,
-  sort_order = EXCLUDED.sort_order,
-  is_active = EXCLUDED.is_active,
-  updated_at = now();
+-- Step 1: Migrate all existing service-relevant categories from product_category.
+-- This includes categories marked as 'service' or 'both', plus any product_category
+-- rows that are currently referenced by service_subcategories, service_tickets,
+-- services, or client_assets.
+DO $$
+DECLARE
+  r RECORD;
+  safe_code TEXT;
+BEGIN
+  FOR r IN (
+    SELECT DISTINCT ON (pc.id)
+      pc.id,
+      COALESCE(NULLIF(pc.code, ''), 'cat_' || replace(pc.id::text, '-', '_')) AS code,
+      COALESCE(NULLIF(pc.label, ''), 'Service Category') AS label,
+      pc.description,
+      COALESCE(pc.image, '') AS image,
+      COALESCE(pc.min_commision_percentage, 0) AS min_comm,
+      COALESCE(pc.max_commision_percentage, 10) AS max_comm,
+      COALESCE(pc.sort_order, 0) AS sort_ord,
+      COALESCE(pc.is_active, true) AS is_act,
+      COALESCE(pc.created_at, now()) AS cr_at,
+      COALESCE(pc.updated_at, now()) AS up_at
+    FROM public.product_category pc
+    WHERE pc.category_type IN ('service', 'both')
+       OR pc.id IN (SELECT category_id FROM public.service_subcategories WHERE category_id IS NOT NULL)
+       OR pc.id IN (SELECT category_id FROM public.service_tickets WHERE category_id IS NOT NULL)
+       OR pc.id IN (SELECT category_id FROM public.services WHERE category_id IS NOT NULL)
+       OR pc.id IN (SELECT category_id FROM public.client_assets WHERE category_id IS NOT NULL)
+  ) LOOP
+    safe_code := r.code;
+    IF EXISTS (SELECT 1 FROM public.service_categories sc WHERE sc.code = safe_code AND sc.id <> r.id) THEN
+      safe_code := safe_code || '_' || substr(replace(r.id::text, '-', ''), 1, 8);
+    END IF;
 
+    INSERT INTO public.service_categories
+      (id, code, label, description, image, min_commision_percentage,
+       max_commision_percentage, sort_order, is_active, created_at, updated_at)
+    VALUES
+      (r.id, safe_code, r.label, r.description, r.image, r.min_comm,
+       r.max_comm, r.sort_ord, r.is_act, r.cr_at, r.up_at)
+    ON CONFLICT (id) DO UPDATE SET
+      code = EXCLUDED.code,
+      label = EXCLUDED.label,
+      description = EXCLUDED.description,
+      image = EXCLUDED.image,
+      min_commision_percentage = EXCLUDED.min_commision_percentage,
+      max_commision_percentage = EXCLUDED.max_commision_percentage,
+      sort_order = EXCLUDED.sort_order,
+      is_active = EXCLUDED.is_active,
+      updated_at = now();
+  END LOOP;
+END $$;
+
+-- Step 2: Handle any orphaned category_id values that do not exist in product_category
+-- but are referenced in service_subcategories, service_tickets, or services.
+-- This guarantees foreign key creation cannot fail with foreign key violation 23503.
+INSERT INTO public.service_categories (id, code, label, description, is_active)
+SELECT DISTINCT
+  sub.category_id,
+  'legacy_subcat_' || replace(sub.category_id::text, '-', '_'),
+  'Legacy Service Category',
+  'Auto-created to preserve orphaned subcategories during migration',
+  true
+FROM public.service_subcategories sub
+WHERE sub.category_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM public.service_categories sc WHERE sc.id = sub.category_id
+  )
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.service_categories (id, code, label, description, is_active)
+SELECT DISTINCT
+  st.category_id,
+  'legacy_ticket_' || replace(st.category_id::text, '-', '_'),
+  'Legacy Service Category',
+  'Auto-created to preserve orphaned service tickets during migration',
+  true
+FROM public.service_tickets st
+WHERE st.category_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM public.service_categories sc WHERE sc.id = st.category_id
+  )
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.service_categories (id, code, label, description, is_active)
+SELECT DISTINCT
+  s.category_id,
+  'legacy_service_' || replace(s.category_id::text, '-', '_'),
+  'Legacy Service Category',
+  'Auto-created to preserve orphaned services during migration',
+  true
+FROM public.services s
+WHERE s.category_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM public.service_categories sc WHERE sc.id = s.category_id
+  )
+ON CONFLICT (id) DO NOTHING;
+
+-- Step 3: Seed standard service categories
 INSERT INTO public.service_categories
   (code, label, description, image, min_commision_percentage,
    max_commision_percentage, sort_order, is_active)

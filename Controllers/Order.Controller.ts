@@ -1161,6 +1161,9 @@ export const getVendorPayoutsController = async (
                     pr.id AS request_id,
                     pr.status AS request_status,
                     pr.eligible_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.gross_amount ELSE st.total_amount END AS payout_gross_amount,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.commission_percentage ELSE commission.vendor_rate END AS commission_percentage,
+                    CASE WHEN pr.id IS NOT NULL AND pr.status <> 'rejected' THEN pr.eligible_amount ELSE ROUND(st.total_amount * (100 - commission.vendor_rate) / 100, 2) END AS vendor_net_amount,
                     pr.rejection_reason AS request_rejection_reason,
                     pr.requested_at,
                     'service_ticket' AS service_kind,
@@ -1173,9 +1176,10 @@ export const getVendorPayoutsController = async (
                 JOIN users u ON u.id = st.client_user_id
                 JOIN vendors v ON v.id = st.vendor_id
                 LEFT JOIN LATERAL (
-                    SELECT id, status, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
+                    SELECT id, status, gross_amount, commission_percentage, eligible_amount, paid_amount, rejection_reason, requested_at, processed_at
                     FROM vendor_payout_requests WHERE booking_id = st.id ORDER BY requested_at DESC LIMIT 1
                 ) pr ON TRUE
+                CROSS JOIN LATERAL (SELECT COALESCE((SELECT vendor_commission_percentage FROM payout_commission_settings WHERE id = 1), 0)::numeric AS vendor_rate) commission
                 WHERE st.vendor_id = $1
                   AND st.status IN ('accepted', 'in_progress', 'completed')
                   AND EXISTS (SELECT 1 FROM payments p WHERE p.status = 'successful' AND p.payment_type IN ('service_maintenance', 'service_job_inquiry', 'service_logistics', 'service_goods_ticket') AND st.id = ANY(p.booking_ids))

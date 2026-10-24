@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { BUCKET_NAME, getPresignedUrlOrOriginal, uploadBufferToS3 } from "../services/s3.service";
-import { decryptPayoutAccountNumber, encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
+import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 async function resolveVendorGstLink(vendor: any) {
     if (vendor && vendor.gst_certificate_link) {
@@ -46,15 +46,13 @@ export const getVendorPayoutBankDetailsController = async (req: Request, res: Re
 
     try {
         const result = await pool.query(
-            `SELECT bank_name, account_holder_name, account_number, account_number_last4 AS account_last_four,
+            `SELECT bank_name, account_holder_name, account_number_last4 AS account_last_four,
                     ifsc_code, upi_id, (cancelled_cheque_link IS NOT NULL) AS cheque_uploaded
              FROM vendors WHERE user_id = $1`,
             [authUser.userId]
         );
         if (!result.rows.length) return res.status(404).json({ message: "Vendor profile not found" });
-        const details = result.rows[0];
-        if (details.account_number) details.account_number = decryptPayoutAccountNumber(details.account_number);
-        return res.status(200).json({ data: details });
+        return res.status(200).json({ data: result.rows[0] });
     } catch (error) {
         console.error("Error retrieving vendor payout bank details:", error);
         return res.status(500).json({ message: "Internal server error" });

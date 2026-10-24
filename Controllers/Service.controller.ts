@@ -2497,14 +2497,15 @@ export const createServiceAndOfferingController = async (
 
     // Create Master Service with status 'pending'
     const sRes = await client.query(
-      `INSERT INTO services (name, description, category_id, subcategory_id, status, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, 'pending', NOW(), NOW())
+      `INSERT INTO services (name, description, category_id, subcategory_id, status, created_by_user_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'pending', $5, NOW(), NOW())
              RETURNING *`,
       [
         name.trim(),
         description || null,
         resolvedCategoryId,
         resolvedSubcategoryId || null,
+        authUser.userId,
       ],
     );
     const newService = sRes.rows[0];

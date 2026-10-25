@@ -864,6 +864,7 @@ export const getAllProducts = async (req: Request, res: Response): Promise<Respo
         const query = `
             SELECT 
                 p.id AS product_id,
+                p.name AS name,
                 p.name AS product_name,
                 p.description,
                 pc.code AS category,
@@ -1830,8 +1831,15 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.id AS product_id,
                 p.name AS product_name,
                 p.description,
-                p.category,
+                p.category AS category_id,
+                COALESCE(pc.label, p.category::text) AS category,
                 p.product_type,
+                p.item_code,
+                COALESCE(p.created_by_user_id = $3, FALSE) AS can_edit_catalog_details,
+                MIN(vp.price) AS price,
+                MIN(vp.moq) AS moq,
+                SUM(vp.stock_quantity) AS stock_quantity,
+                BOOL_OR(vp.is_active) AS is_active,
                 p.attributes,
                 p.size, COALESCE(p.brand, p.attributes->>'brand') AS brand,
                 COALESCE(p.grade, p.attributes->>'grade') AS grade,
@@ -1842,7 +1850,7 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 p.attributes->>'standard' AS standard,
                 p.quotation_limit,
                 p.vendor_can_set_quotation_limit,
-                ${approvedSpecificationsSelect},
+                COALESCE(specAgg.specifications, '{}'::jsonb) AS specifications,
                 COALESCE(imgAgg.images, '[]'::jsonb) AS images,
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
@@ -1865,8 +1873,17 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 ) AS variants
             FROM vendor_products vp
             JOIN products p ON vp.product_id = p.id
+            LEFT JOIN product_category pc ON pc.id = p.category
             JOIN product_variants pv ON vp.product_variant_id = pv.id
-            ${approvedSpecificationsJoin}
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                    jsonb_object_agg(ps.spec_key, ps.spec_value ORDER BY ps.created_at),
+                    '{}'::jsonb
+                ) AS specifications
+                FROM product_specification ps
+                WHERE ps.product_id = p.id
+                  AND (ps.approval_status = 'approved' OR ps.created_by_user_id = $3)
+            ) specAgg ON true
             LEFT JOIN LATERAL (
                 SELECT COALESCE(
                     JSONB_AGG(
@@ -1883,10 +1900,10 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                 WHERE pi.product_id = p.id
             ) imgAgg ON true
             WHERE vp.vendor_id = $1 AND vp.product_id = $2
-            GROUP BY p.id, specAgg.specifications, p.attributes, imgAgg.images
+            GROUP BY p.id, pc.label, specAgg.specifications, p.attributes, imgAgg.images
         `;
 
-        const result = await pool.query(query, [vendorId, productId]);
+        const result = await pool.query(query, [vendorId, productId, userId]);
 
         if (result.rows.length === 0) {
             return res.status(404).json({ message: "Product not found or you don't have access to this product." });
@@ -1930,6 +1947,10 @@ export const updateVendorProductController = async (req: Request, res: Response)
 
     if (price === undefined || moq === undefined || stockQuantity === undefined || isActive === undefined || quotationEnabled === undefined) {
         return res.status(400).json({ message: "Price, MOQ, stock quantity, active status, and quotation enabled are required" });
+    }
+    const numericUpdates = [Number(price), Number(moq), Number(stockQuantity), gstPercentage === undefined ? 0 : Number(gstPercentage)];
+    if (numericUpdates.some((value) => !Number.isFinite(value)) || Number(price) < 0 || Number(moq) < 1 || Number(stockQuantity) < 0 || Number(gstPercentage ?? 0) < 0 || Number(gstPercentage ?? 0) > 100) {
+        return res.status(400).json({ message: "Price, MOQ, stock, and GST must contain valid numeric values." });
     }
 
     if (role !== "vendor") {
@@ -1981,13 +2002,13 @@ export const updateVendorProductController = async (req: Request, res: Response)
         let existingProductResult;
         if (productVariantId) {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, pending_price, pending_modifications, modification_status 
+                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
                  FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2`,
                 [vendorId, productVariantId]
             );
         } else {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, pending_price, pending_modifications, modification_status 
+                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
                  FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
                 [vendorId, productId]
             );
@@ -1998,35 +2019,52 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         const existingVP = existingProductResult.rows[0];
-        if (req.body.attributes && typeof req.body.attributes === "object") {
-            const attrs: Record<string, string> = {};
-            for (const key of ["size", "brand", "grade", "colour", "warranty", "manufacturer", "unit"]) {
-                const value = req.body.attributes[key];
-                if (value !== undefined && value !== null && String(value).trim()) attrs[key] = String(value).trim();
-            }
-            if (Object.keys(attrs).length) {
-                await pool.query(
-                    `UPDATE products SET attributes = COALESCE(attributes, '{}'::jsonb) || $1::jsonb,
-                        size = COALESCE($2, size), brand = COALESCE($3, brand), grade = COALESCE($4, grade),
-                        colour = COALESCE($5, colour), warranty = COALESCE($6, warranty),
-                        manufacturer = COALESCE($7, manufacturer), unit = COALESCE($8, unit)
-                     WHERE id = $9 AND created_by_user_id = $10`,
-                    [JSON.stringify(attrs), attrs.size ?? null, attrs.brand ?? null, attrs.grade ?? null,
-                        attrs.colour ?? null, attrs.warranty ?? null, attrs.manufacturer ?? null, attrs.unit ?? null,
-                        resolvedProductId, userId]
-                );
-            }
-        }
-
         // Fetch existing product specifications and catalog attributes
         const existingProdRes = await pool.query(
-            `SELECT id, name, size, brand, grade, colour, warranty, manufacturer, unit, attributes, specifications 
-             FROM products WHERE id = $1`,
+            `SELECT p.id, p.name, p.description, p.category, p.product_type, p.item_code, p.created_by_user_id,
+                    p.size, p.brand, p.grade, p.colour, p.warranty, p.manufacturer, p.unit, p.attributes,
+                    COALESCE((
+                        SELECT jsonb_object_agg(ps.spec_key, ps.spec_value ORDER BY ps.created_at)
+                        FROM product_specification ps
+                        WHERE ps.product_id = p.id AND ps.approval_status = 'approved'
+                    ), '{}'::jsonb) AS specifications,
+                    p.approval_status AS product_approval_status
+             FROM products p WHERE p.id = $1`,
             [resolvedProductId]
         );
         const existingProd = existingProdRes.rows[0] || {};
-
         const incomingAttrs = (req.body.attributes || req.body.catalogFields || {}) as Record<string, any>;
+        const proposedCategory = req.body.category !== undefined && String(req.body.category).trim()
+            ? await resolveCategoryId(String(req.body.category))
+            : existingProd.category;
+        if (String(proposedCategory) !== String(existingProd.category)) {
+            const allowedCategories = await getVendorAllowedCategories(userId);
+            const categoryAllowed = await pool.query(
+                `SELECT 1 FROM product_category WHERE id = $1 AND code = ANY($2::text[])`,
+                [proposedCategory, allowedCategories.map((category) => category.code)]
+            );
+            if (!categoryAllowed.rows.length) {
+                return res.status(403).json({ message: "You can only move this product to one of your assigned categories." });
+            }
+        }
+        const proposedProductFields = {
+            name: req.body.name ?? req.body.product_name ?? existingProd.name,
+            description: req.body.description ?? existingProd.description,
+            category: proposedCategory,
+            product_type: req.body.product_type ?? existingProd.product_type,
+            item_code: req.body.item_code ?? existingProd.item_code,
+        };
+        const currentProductFields = {
+            name: existingProd.name,
+            description: existingProd.description,
+            category: existingProd.category,
+            product_type: existingProd.product_type,
+            item_code: existingProd.item_code,
+        };
+        const hasProductFieldChanges = Object.keys(proposedProductFields).some((key) =>
+            String(proposedProductFields[key as keyof typeof proposedProductFields] ?? "") !== String(currentProductFields[key as keyof typeof currentProductFields] ?? "")
+        );
+
         const incomingSpecs = req.body.specifications;
 
         const requestedIsActive = Boolean(isActive);
@@ -2053,6 +2091,10 @@ export const updateVendorProductController = async (req: Request, res: Response)
         const currentGst = existingVP.gst_percentage !== null && existingVP.gst_percentage !== undefined ? Number(existingVP.gst_percentage) : 18;
         const requestedGst = gstPercentage !== undefined ? Number(gstPercentage) : currentGst;
         const isGstChanged = requestedGst !== currentGst;
+        const isActiveChanged = Boolean(existingVP.is_active) !== requestedIsActive;
+        const isQuotationChanged = Boolean(existingVP.quotation_enabled) !== Boolean(quotationEnabled) ||
+            Number(existingVP.quotation_min_qty ?? 0) !== Number(quotationMinQty ?? 0) ||
+            Number(existingVP.discounted_price ?? 0) !== Number(discountedPrice ?? 0);
 
         // Compare attributes
         let hasAttrChanges = false;
@@ -2096,8 +2138,8 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         // Determine if any modification occurred on an active listing
-        const isAnyModification = isPriceChanged || hasAttrChanges || hasSpecChanges || isMoqChanged || isStockChanged || isGstChanged;
-        const requiresApproval = existingVP.status === 'active' && isAnyModification;
+        const isAnyModification = isPriceChanged || hasAttrChanges || hasSpecChanges || hasProductFieldChanges || isMoqChanged || isStockChanged || isGstChanged || isActiveChanged || isQuotationChanged;
+        const requiresApproval = (existingVP.status === 'active' || existingProd.product_approval_status === 'approved') && isAnyModification;
 
         let updateQuery;
         let queryParams;
@@ -2122,6 +2164,19 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 specifications: incomingSpecs || existingProd.specifications || {},
                 current_specifications: existingProd.specifications || {},
                 has_specification_changes: hasSpecChanges,
+                ...proposedProductFields,
+                current_product_fields: currentProductFields,
+                has_product_field_changes: hasProductFieldChanges,
+                is_active: requestedIsActive,
+                current_is_active: Boolean(existingVP.is_active),
+                is_active_changed: isActiveChanged,
+                quotation_enabled: Boolean(quotationEnabled),
+                current_quotation_enabled: Boolean(existingVP.quotation_enabled),
+                is_quotation_changed: isQuotationChanged,
+                quotation_min_qty: quotationMinQty ?? null,
+                current_quotation_min_qty: existingVP.quotation_min_qty ?? null,
+                discounted_price: discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
+                current_discounted_price: existingVP.discounted_price ?? null,
                 requested_at: new Date().toISOString()
             };
 
@@ -2132,25 +2187,44 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 SET pending_price = $1,
                     pending_modifications = $2,
                     modification_status = 'pending',
-                    is_active = $3,
-                    quotation_enabled = $4,
-                    quotation_min_qty = $5,
-                    discounted_price = $6,
                     updated_at = NOW()
-                WHERE id = $7
+                WHERE id = $3
                 RETURNING *
             `;
             queryParams = [
                 isPriceChanged ? requestedPrice : (existingVP.pending_price || null),
                 JSON.stringify(pendingModificationsData),
-                requestedIsActive,
-                Boolean(quotationEnabled),
-                quotationMinQty ?? null,
-                discountedPrice !== undefined && discountedPrice !== null ? Number(discountedPrice) : null,
                 existingVP.id
             ];
         } else {
             // No modifications or product not yet active: apply directly
+            const attrsToApply = { ...(existingProd.attributes || {}), ...(incomingAttrs || {}) };
+            for (const field of ["material", "application", "standard"]) {
+                if (req.body[field] !== undefined) attrsToApply[field] = String(req.body[field]);
+            }
+            await pool.query(
+                `UPDATE products SET name = $1, description = $2, category = $3, product_type = $4,
+                    item_code = $5, attributes = $6::jsonb, size = $7, brand = $8, grade = $9,
+                    colour = $10, warranty = $11, manufacturer = $12, unit = $13, updated_at = NOW()
+                 WHERE id = $14`,
+                [proposedProductFields.name, proposedProductFields.description, proposedProductFields.category,
+                    proposedProductFields.product_type, proposedProductFields.item_code, JSON.stringify(attrsToApply),
+                    incomingAttrs.size ?? existingProd.size, incomingAttrs.brand ?? existingProd.brand,
+                    incomingAttrs.grade ?? existingProd.grade, incomingAttrs.colour ?? existingProd.colour,
+                    incomingAttrs.warranty ?? existingProd.warranty, incomingAttrs.manufacturer ?? existingProd.manufacturer,
+                    incomingAttrs.unit ?? existingProd.unit, resolvedProductId]
+            );
+            if (incomingSpecs !== undefined) {
+                const entries = normalizeSpecificationEntries(incomingSpecs, "approved");
+                await pool.query(`DELETE FROM product_specification WHERE product_id = $1 AND approval_status = 'approved'`, [resolvedProductId]);
+                for (const entry of entries) {
+                    await pool.query(
+                        `INSERT INTO product_specification (product_id, spec_key, spec_value, approval_status, created_by_user_id)
+                         VALUES ($1, $2, $3, 'approved', $4)`,
+                        [resolvedProductId, entry.spec_key, entry.spec_value, userId]
+                    );
+                }
+            }
             updateQuery = `
                 UPDATE vendor_products 
                 SET price = $1,

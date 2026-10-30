@@ -34,6 +34,7 @@ import { startAccountDeletionJob } from './jobs/accountDeletion.job';
 import { createServer } from 'http';
 import { initSocket } from './socket';
 import contactRouter from './Routers/Contact.router';
+import { isAllowedOrigin } from './shared/CorsOrigins.shared';
 
 dotenv.config();
 
@@ -45,37 +46,9 @@ const PORT = process.env.PORT || 9000;
 
 
 //cors configuration
-const allowedOrigins = new Set([
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:8081',
-    'http://localhost:4000',
-    'http://localhost:4001',
-    'http://192.168.29.150:4000',
-    'http://192.168.1.11:3000',
-    'http://192.168.1.11:3001',
-    'https://mtwo.in',
-    'https://www.mtwo.in',
-    'https://vendor.mtwo.in',
-    'https://admin.mtwo.in',
-    'https://client.mtwo.in',
-    'https://api.mtwo.in',
-    'https://api-admin.mtwo.in',
-]);
-
 const corsOptions: CorsOptions = {
     origin(origin, callback) {
-        if (!origin) {
-            callback(null, true);
-            return;
-        }
-
-        const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
-        const isLanIp = /^http:\/\/192\.168\.\d+\.\d+:\d+$/.test(origin);
-        const isVercelPreview = /^https:\/\/.*\.vercel\.app$/.test(origin);
-        const isMtwoDomain = /^https:\/\/(.*\.)?mtwo\.in$/.test(origin);
-
-        if (allowedOrigins.has(origin) || isLocalhost || isLanIp || isVercelPreview || isMtwoDomain) {
+        if (isAllowedOrigin(origin)) {
             callback(null, true);
             return;
         }
@@ -133,10 +106,16 @@ async function startServer() {
                 console.log('Connected to the database successfully!');
             });
 
-        try {
-            await runDatabaseMigrations();
-        } catch (schemaError) {
-            console.error("Database migration failed; the server will start but the schema may be out of date:", schemaError);
+        // Set RUN_MIGRATIONS_ON_START=false once the deploy pipeline runs `npm run db:deploy`,
+        // so multiple instances don't race each other applying migrations at boot.
+        if (process.env.RUN_MIGRATIONS_ON_START !== 'false') {
+            try {
+                await runDatabaseMigrations();
+            } catch (schemaError) {
+                console.error("Database migration failed; the server will start but the schema may be out of date:", schemaError);
+            }
+        } else {
+            console.log("Skipping database migrations on start (RUN_MIGRATIONS_ON_START=false).");
         }
         startAbandonedReminderJob();
         startAccountDeletionJob();

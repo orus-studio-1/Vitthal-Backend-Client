@@ -81,6 +81,8 @@ const handleRoleTokens = async (
     }
 }
 
+const validMiddlewareRoles = new Set(["client", "worker", "vendor", "fulfillment_center", "delivery_agent", "admin", "super_admin"]);
+
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const requestFrom = req.headers["x-request-from"];
@@ -92,8 +94,6 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         const bearerToken = authorization?.startsWith("Bearer ")
             ? authorization.slice(7).trim()
             : undefined;
-
-        const validMiddlewareRoles = new Set(["client", "worker", "vendor", "fulfillment_center", "delivery_agent", "admin", "super_admin"]);
 
         if (typeof requestFrom === "string" && validMiddlewareRoles.has(requestFrom)) {
             const role = requestFrom;
@@ -108,4 +108,55 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         console.error("Error verifying tokens:", error);
         return res.status(401).json({ message: "Unauthorized! Failed to verify Tokens." });
     }
+}
+
+const tokenVerifies = (token: string | undefined, type: "access" | "refresh", role: string) => {
+    if (!token) return false;
+    try {
+        return verifyToken(token, type, { logErrors: false }).role === role;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Like authMiddleware, but for shared endpoints (e.g. file uploads) whose callers don't send
+ * 'x-request-from'. Falls back to whichever role's session cookie (or Bearer token) is valid.
+ */
+export const authenticateAnyRole = async (req: Request, res: Response, next: NextFunction) => {
+    const requestFrom = req.headers["x-request-from"];
+    if (typeof requestFrom === "string" && validMiddlewareRoles.has(requestFrom)) {
+        return authMiddleware(req, res, next);
+    }
+
+    const authorization = req.headers.authorization;
+    if (authorization?.startsWith("Bearer ")) {
+        const bearerToken = authorization.slice(7).trim();
+        try {
+            const { role } = verifyToken(bearerToken, "access", { logErrors: false });
+            if (validMiddlewareRoles.has(role)) {
+                return handleRoleTokens(role, bearerToken, undefined, req, res, next);
+            }
+        } catch {
+            // Fall through to cookie auth.
+        }
+    }
+
+    for (const role of validMiddlewareRoles) {
+        const accessToken = req.cookies?.[`${role}AccessToken`];
+        const refreshToken = req.cookies?.[`${role}RefreshToken`];
+        if (tokenVerifies(accessToken, "access", role) || tokenVerifies(refreshToken, "refresh", role)) {
+            return handleRoleTokens(role, accessToken, refreshToken, req, res, next);
+        }
+    }
+
+    return res.status(401).json({ message: "Unauthorized! Please sign in to continue." });
+}
+
+export const requireRole = (...roles: string[]) => (req: Request, res: Response, next: NextFunction) => {
+    const role = (req as any).user?.role;
+    if (!role || !roles.includes(role)) {
+        return res.status(403).json({ message: "Forbidden! You do not have access to this resource." });
+    }
+    return next();
 }

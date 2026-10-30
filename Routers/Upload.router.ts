@@ -3,6 +3,9 @@ import multer from "multer";
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dotenv from "dotenv";
+import crypto from "crypto";
+import { authenticateAnyRole } from "../Middleware/AuthMiddleware";
+import { extractS3Key } from "../services/s3.service";
 
 dotenv.config();
 
@@ -29,10 +32,14 @@ const upload = multer({
 
 const uploadSingle = upload.single("file");
 
+// Only user uploads made through this router may be presigned here. Server-generated files
+// (vendor registration docs, payout cheques, quotation PDFs) are served by their own endpoints.
+const PRESIGNABLE_PREFIX = "uploads/";
+
 /**
  * Upload a file to S3
  */
-uploadRouter.post("/upload", (req: Request, res: Response): void => {
+uploadRouter.post("/upload", authenticateAnyRole, (req: Request, res: Response): void => {
   uploadSingle(req, res, async (error) => {
     if (error) {
       if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
@@ -59,7 +66,8 @@ uploadRouter.post("/upload", (req: Request, res: Response): void => {
 
       const file = req.file;
       const originalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, "_");
-      const fileName = `uploads/${Date.now()}_${originalName}`;
+      const userId = (req as any).user.userId as string;
+      const fileName = `${PRESIGNABLE_PREFIX}${userId}/${Date.now()}_${crypto.randomUUID()}_${originalName}`;
 
       const command = new PutObjectCommand({
         Bucket: BUCKET_NAME,
@@ -88,12 +96,19 @@ uploadRouter.post("/upload", (req: Request, res: Response): void => {
 /**
  * Get a presigned URL for downloading/viewing a file
  */
-uploadRouter.get("/upload/file", async (req: Request, res: Response): Promise<void> => {
+uploadRouter.get("/upload/file", authenticateAnyRole, async (req: Request, res: Response): Promise<void> => {
   try {
-    const fileName = req.query.fileName as string;
+    // Some records store a full S3 URL (e.g. an old signed URL) instead of the key; sign the key it points at.
+    const rawFileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
+    const fileName = rawFileName.includes("amazonaws.com/") ? decodeURIComponent(extractS3Key(rawFileName)) : rawFileName;
     
     if (!fileName) {
       res.status(400).json({ success: false, message: "Filename is required" });
+      return;
+    }
+
+    if (!fileName.startsWith(PRESIGNABLE_PREFIX) || fileName.includes("..")) {
+      res.status(403).json({ success: false, message: "You do not have access to this file." });
       return;
     }
 

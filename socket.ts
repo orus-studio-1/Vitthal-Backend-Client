@@ -1,19 +1,87 @@
 import { Server as HttpServer } from "http";
-import { Server, Namespace } from "socket.io";
+import crypto from "crypto";
+import { Server, Namespace, Socket } from "socket.io";
 import pool from "./DbConnect";
 import { verifyToken } from "./helpers/jwt.helper";
+import { isAllowedOrigin } from "./shared/CorsOrigins.shared";
 
 let io: Server | null = null;
 let notificationNamespace: Namespace | null = null;
 let hireChatNamespace: Namespace | null = null;
 
+type SocketUser = { userId: string; role: string };
+
+const ALL_ROLES = ["client", "worker", "vendor", "fulfillment_center", "delivery_agent", "admin", "super_admin"];
+const HIRE_CHAT_ROLES = ["client", "worker"];
+
+const parseCookies = (header: string | undefined): Record<string, string> => {
+    if (!header) return {};
+    return Object.fromEntries(header.split(";").map((part) => {
+        const [key, ...value] = part.trim().split("=");
+        return [key, decodeURIComponent(value.join("="))];
+    }).filter(([key]) => Boolean(key)));
+};
+
+/**
+ * Resolves the signed-in users for a socket from the role session cookies (web) or
+ * `auth.token` / `auth.refreshToken` in the handshake (mobile apps), and confirms each session is still active.
+ */
+async function resolveSocketUsers(socket: Socket, roles: string[]): Promise<SocketUser[]> {
+    const cookies = parseCookies(socket.handshake.headers.cookie);
+    const candidates: Array<{ token: string; type: "access" | "refresh"; role?: string }> = [];
+
+    const authToken = socket.handshake.auth?.token;
+    if (typeof authToken === "string" && authToken) {
+        candidates.push({ token: authToken.replace(/^Bearer\s+/i, ""), type: "access" });
+    }
+    // Lets long-lived mobile sockets reconnect after the 30-minute access token expires.
+    const authRefreshToken = socket.handshake.auth?.refreshToken;
+    if (typeof authRefreshToken === "string" && authRefreshToken) {
+        candidates.push({ token: authRefreshToken, type: "refresh" });
+    }
+    for (const role of roles) {
+        const accessToken = cookies[`${role}AccessToken`];
+        const refreshToken = cookies[`${role}RefreshToken`];
+        if (accessToken) candidates.push({ token: accessToken, type: "access", role });
+        if (refreshToken) candidates.push({ token: refreshToken, type: "refresh", role });
+    }
+
+    const users = new Map<string, SocketUser>();
+    for (const candidate of candidates) {
+        try {
+            const decoded = verifyToken(candidate.token, candidate.type, { logErrors: false });
+            if (!roles.includes(decoded.role) || (candidate.role && candidate.role !== decoded.role)) continue;
+            if (!users.has(decoded.userId)) users.set(decoded.userId, { userId: decoded.userId, role: decoded.role });
+        } catch {
+            // Expired or invalid token; try the next one.
+        }
+    }
+    if (users.size === 0) return [];
+
+    const { rows } = await pool.query(
+        `SELECT id::text AS id FROM users
+         WHERE id::text = ANY($1::text[])
+           AND refresh_token IS NOT NULL
+           AND (is_active OR deletion_requested_at IS NOT NULL)`,
+        [[...users.keys()]]
+    );
+    const activeIds = new Set(rows.map((row) => row.id as string));
+    return [...users.values()].filter((user) => activeIds.has(user.userId));
+}
+
+const isAdminEmitter = (socket: Socket): boolean => {
+    const expected = process.env.SOCKET_ADMIN_EMITTER_KEY;
+    const provided = socket.handshake.auth?.emitterKey;
+    if (!expected || typeof provided !== "string") return false;
+    const expectedBuffer = Buffer.from(expected);
+    const providedBuffer = Buffer.from(provided);
+    return expectedBuffer.length === providedBuffer.length && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+};
+
 export function initSocket(server: HttpServer) {
     io = new Server(server, {
         cors: {
-            origin: (origin, callback) => {
-                // Allow all for simplicity, or we can restrict as needed
-                callback(null, true);
-            },
+            origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
             credentials: true
         }
     });
@@ -22,16 +90,11 @@ export function initSocket(server: HttpServer) {
     notificationNamespace = io.of("/notifications");
     hireChatNamespace = io.of("/hire-chat");
 
-    hireChatNamespace.use((socket, next) => {
+    hireChatNamespace.use(async (socket, next) => {
         try {
-            const cookies = socket.handshake.headers.cookie || "";
-            const cookieMap = Object.fromEntries(cookies.split(";").map((part) => {
-                const [key, ...value] = part.trim().split("=");
-                return [key, decodeURIComponent(value.join("="))];
-            }).filter(([key]) => Boolean(key)));
-            const token = cookieMap.workerAccessToken || cookieMap.clientAccessToken;
-            if (!token) return next(new Error("Unauthorized"));
-            (socket.data as any).user = verifyToken(token, "access", { logErrors: false });
+            const users = await resolveSocketUsers(socket, HIRE_CHAT_ROLES);
+            if (users.length === 0) return next(new Error("Unauthorized"));
+            (socket.data as any).users = users;
             return next();
         } catch {
             return next(new Error("Unauthorized"));
@@ -40,43 +103,60 @@ export function initSocket(server: HttpServer) {
 
     hireChatNamespace.on("connection", (socket) => {
         socket.on("join_request", async (requestId: string) => {
-            const user = (socket.data as any).user as { userId: string; role: string };
-            if (!requestId || !user) return;
-            const result = await pool.query(
-                `SELECT hr.id FROM hire_requests hr
-                 JOIN employee_candidates ec ON ec.id = hr.candidate_id
-                 WHERE hr.id = $1 AND hr.status = 'accepted' AND (
-                   ($2 = 'client' AND hr.requested_by_user_id = $3)
-                   OR ($2 = 'worker' AND ec.registered_by_user_id = $3)
-                 )`,
-                [requestId, user.role, user.userId]
-            );
-            if (result.rows.length > 0) socket.join(`hire-request:${requestId}`);
+            const users = (socket.data as any).users as SocketUser[];
+            if (!requestId || !users?.length) return;
+            for (const user of users) {
+                const result = await pool.query(
+                    `SELECT hr.id FROM hire_requests hr
+                     JOIN employee_candidates ec ON ec.id = hr.candidate_id
+                     WHERE hr.id = $1 AND hr.status = 'accepted' AND (
+                       ($2 = 'client' AND hr.requested_by_user_id = $3)
+                       OR ($2 = 'worker' AND ec.registered_by_user_id = $3)
+                     )`,
+                    [requestId, user.role, user.userId]
+                );
+                if (result.rows.length > 0) {
+                    socket.join(`hire-request:${requestId}`);
+                    return;
+                }
+            }
         });
     });
 
+    notificationNamespace.use(async (socket, next) => {
+        try {
+            // The Admin Backend connects with a shared secret to forward notifications.
+            if (isAdminEmitter(socket)) {
+                (socket.data as any).isAdminEmitter = true;
+                return next();
+            }
+            const users = await resolveSocketUsers(socket, ALL_ROLES);
+            if (users.length === 0) return next(new Error("Unauthorized"));
+            (socket.data as any).users = users;
+            return next();
+        } catch {
+            return next(new Error("Unauthorized"));
+        }
+    });
+
     notificationNamespace.on("connection", (socket) => {
-
-        socket.on("join", (userId: string) => {
-            if (userId) {
-                socket.join(userId);
-            }
-        });
-
-        // Admin Backend connects as an emitter to forward notifications to vendors
-        socket.on("join_as_admin_emitter", () => {
+        if ((socket.data as any).isAdminEmitter) {
             socket.join("__admin_emitters__");
-        });
 
-        // Handle forwarded notifications from the Admin Backend
-        socket.on("forward_notification", (payload: { targetUserId: string; notification: any }) => {
-            if (payload?.targetUserId && payload?.notification) {
-                notificationNamespace!.to(payload.targetUserId).emit("notification", payload.notification);
-            }
-        });
+            // Handle forwarded notifications from the Admin Backend
+            socket.on("forward_notification", (payload: { targetUserId: string; notification: any }) => {
+                if (payload?.targetUserId && payload?.notification) {
+                    notificationNamespace!.to(payload.targetUserId).emit("notification", payload.notification);
+                }
+            });
+            return;
+        }
 
-        socket.on("disconnect", () => {
-        });
+        // Rooms come from the authenticated session, never from the client. Clients still emit
+        // "join" with their userId; that event is now ignored.
+        for (const user of (socket.data as any).users as SocketUser[]) {
+            socket.join(user.userId);
+        }
     });
 
     return io;

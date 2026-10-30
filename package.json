@@ -8,6 +8,7 @@
     "dev": "nodemon --exec tsx index.ts",
     "build": "prisma generate && tsc && echo Build completed successfully! Check the dist folder.",
     "db:migrate": "tsx DbMigrate.ts",
+    "db:deploy": "node dist/DbMigrate.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "postinstall": "prisma generate",

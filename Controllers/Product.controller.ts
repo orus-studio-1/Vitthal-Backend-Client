@@ -2297,7 +2297,7 @@ export const deleteVendorProductController = async (req: Request, res: Response)
             return res.status(403).json({ message: "Your vendor account must be approved and active to delete products." });
         }
 
-        const productVariantId = req.query.productVariantId || req.body.productVariantId;
+        const productVariantId = req.query.productVariantId || req.body?.productVariantId;
         let deleteResult;
         if (productVariantId) {
             deleteResult = await pool.query(

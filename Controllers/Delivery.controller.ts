@@ -1,9 +1,24 @@
 import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import pool from "../DbConnect";
+import { sendDeliveredOrderInvoiceEmail } from "../helpers/emailService.helper";
 import { sendExpoPushNotification } from "../services/pushNotification.service";
 import { razorpay } from "../services/razorpay.service";
 import QRCode from "qrcode";
+
+// Not awaited: the rider app gives up after 10 seconds, and a delivery that is already saved must
+// not look failed because the PDF or email is slow. Failures are logged only.
+const sendInvoiceEmailInBackground = (payload: Parameters<typeof sendDeliveredOrderInvoiceEmail>[0]) => {
+    sendDeliveredOrderInvoiceEmail(payload)
+        .then((emailResult) => {
+            if (!emailResult.success) {
+                console.error("Failed to email delivered order invoice:", emailResult.error);
+            }
+        })
+        .catch((emailError) => {
+            console.error("Failed to generate or email delivered order invoice:", emailError);
+        });
+};
 
 // Helper to resolve the hub details using the authenticated user's ID
 async function resolveHubDetails(userId: string) {
@@ -1131,21 +1146,40 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
 
         // Check current payment status before updating, so we know whether this was COD
         const orderRes = await client.query(
-            `SELECT payment_status FROM orders WHERE id = $1`,
+            `SELECT payment_status, status, customer_email, customer_name, order_reference FROM orders WHERE id = $1`,
             [orderId]
         );
+        if (orderRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ message: "Order not found." });
+        }
+        if (orderRes.rows[0].status === "delivered") {
+            await client.query("ROLLBACK");
+            return res.status(200).json({
+                message: "Order was already delivered.",
+                data: { orderId },
+            });
+        }
         const wasCod = orderRes.rows[0]?.payment_status === 'cod_pending';
         const collectionMethod = wasCod && codPaymentMethod === 'upi' ? 'upi' : 'cash';
 
         // Update order status to delivered — mark COD payment collected in the same statement
-        await client.query(
+        const deliveredOrder = await client.query(
             `UPDATE orders 
              SET status = 'delivered', 
                  updated_at = NOW(),
                  payment_status = CASE WHEN payment_status = 'cod_pending' THEN 'paid' ELSE payment_status END
-             WHERE id = $1`,
+             WHERE id = $1 AND status <> 'delivered'
+             RETURNING id`,
             [orderId]
         );
+        if (deliveredOrder.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(200).json({
+                message: "Order was already delivered.",
+                data: { orderId },
+            });
+        }
 
         // Insert delivered tracking log — note COD collection method if applicable
         const trackingNote = wasCod
@@ -1158,6 +1192,12 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         );
 
         await client.query("COMMIT");
+        sendInvoiceEmailInBackground({
+                customerName: orderRes.rows[0].customer_name,
+                customerEmail: orderRes.rows[0].customer_email,
+                orderId,
+                orderReference: orderRes.rows[0].order_reference || orderId,
+        });
         return res.status(200).json({
             message: wasCod
                 ? `Order marked as delivered. COD payment (${collectionMethod}) collected.`
@@ -1899,6 +1939,8 @@ export const verifyDeliveryController = async (
             SELECT
                 o.id,
                 o.order_reference,
+                o.customer_name,
+                o.customer_email,
                 o.payment_status,
                 o.order_type,
                 da.id AS delivery_agent_id
@@ -2103,7 +2145,7 @@ export const verifyDeliveryController = async (
         // UPI already paid       -> remains paid
         // prepaid orders         -> remains paid
         // ---------------------------------------------------------
-        await client.query(
+        const deliveredOrder = await client.query(
             `
             UPDATE orders
             SET
@@ -2115,9 +2157,15 @@ export const verifyDeliveryController = async (
                 END,
                 updated_at = NOW()
             WHERE id = $1
+              AND status <> 'delivered'
+            RETURNING id
             `,
             [orderId]
         );
+        if (deliveredOrder.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Order has already been delivered." });
+        }
 
         // ---------------------------------------------------------
         // 7. Delivery history
@@ -2252,6 +2300,13 @@ export const verifyDeliveryController = async (
         }
 
         await client.query("COMMIT");
+
+        sendInvoiceEmailInBackground({
+                customerName: order.customer_name,
+                customerEmail: order.customer_email,
+                orderId,
+                orderReference: order.order_reference || orderId,
+        });
 
         return res.status(200).json({
             message: paymentCollectionRequired

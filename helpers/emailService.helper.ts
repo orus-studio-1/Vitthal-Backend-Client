@@ -1,4 +1,5 @@
 import { sendEmail } from './mailer.helper';
+import { generateInvoicePDFBuffer } from '../services/invoiceDocument.service';
 import { buildOTPEmailHtml, buildOTPEmailText } from '../MailTemplates/OTPMailTemplate';
 import { buildAbandonedReminderEmailHtml, buildAbandonedReminderEmailText } from '../MailTemplates/AbadonFeatTemplate';
 import { buildVendorApprovalEmailHtml, buildVendorApprovalEmailText } from '../MailTemplates/VendorApprovalMailTemplate';
@@ -6,6 +7,42 @@ import { buildOrderConfirmationEmailHtml, buildOrderConfirmationEmailText } from
 import { buildVendorOrderAlertEmailHtml, buildVendorOrderAlertEmailText } from '../MailTemplates/VendorOrderAlertMailTemplate';
 import { buildQuotationRequestEmailHtml, buildQuotationRequestEmailText } from '../MailTemplates/QuotationRequestMailTemplate';
 import { buildQuotationUpdateEmailHtml, buildQuotationUpdateEmailText } from '../MailTemplates/QuotationUpdateMailTemplate';
+
+/** Send the customer their tax invoice once delivery is completed. */
+export async function sendDeliveredOrderInvoiceEmail(payload: {
+    customerName?: string | null;
+    customerEmail?: string | null;
+    orderId: string;
+    orderReference: string;
+}) {
+    const customerEmail = payload.customerEmail?.trim();
+    if (!customerEmail) {
+        return { success: false, error: 'Order has no customer email address' };
+    }
+
+    const invoice = await generateInvoicePDFBuffer(payload.orderId, 'tax-invoice');
+    const customerName = payload.customerName?.trim() || 'Customer';
+    const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    })[character] || character);
+    const safeCustomerName = escapeHtml(customerName);
+    const safeOrderReference = escapeHtml(payload.orderReference);
+    return sendEmail({
+        to: customerEmail,
+        subject: `Tax invoice for order ${payload.orderReference}`,
+        htmlContent: `<p>Hi ${safeCustomerName},</p><p>Your order <strong>${safeOrderReference}</strong> has been delivered successfully. The tax invoice is attached for your records.</p><p>Thank you for shopping with MTWO.</p>`,
+        textContent: `Hi ${customerName},\n\nYour order ${payload.orderReference} has been delivered successfully. The tax invoice is attached for your records.\n\nThank you for shopping with MTWO.`,
+        attachments: [{
+            filename: `Tax-Invoice-${payload.orderReference}.pdf`,
+            content: invoice,
+            contentType: 'application/pdf',
+        }],
+    });
+}
 
 /**
  * Send OTP verification email

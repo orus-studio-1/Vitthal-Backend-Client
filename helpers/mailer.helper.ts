@@ -7,6 +7,11 @@ interface EmailPayload {
     subject: string;
     htmlContent: string;
     textContent?: string;
+    attachments?: Array<{
+        filename: string;
+        content: Buffer;
+        contentType: string;
+    }>;
 }
 
 interface EmailResult {
@@ -40,6 +45,11 @@ export async function sendEmail(payload: EmailPayload): Promise<EmailResult> {
             html: payload.htmlContent,
             text: payload.textContent || stripHtml(payload.htmlContent),
             replyTo: process.env.EMAIL_REPLY_TO,
+            attachments: payload.attachments?.map((attachment) => ({
+                filename: attachment.filename,
+                content: attachment.content,
+                contentType: attachment.contentType,
+            })),
         });
 
         if (error) {

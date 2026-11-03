@@ -6,6 +6,20 @@ import { sendExpoPushNotification } from "../services/pushNotification.service";
 import { razorpay } from "../services/razorpay.service";
 import QRCode from "qrcode";
 
+// Not awaited: the rider app gives up after 10 seconds, and a delivery that is already saved must
+// not look failed because the PDF or email is slow. Failures are logged only.
+const sendInvoiceEmailInBackground = (payload: Parameters<typeof sendDeliveredOrderInvoiceEmail>[0]) => {
+    sendDeliveredOrderInvoiceEmail(payload)
+        .then((emailResult) => {
+            if (!emailResult.success) {
+                console.error("Failed to email delivered order invoice:", emailResult.error);
+            }
+        })
+        .catch((emailError) => {
+            console.error("Failed to generate or email delivered order invoice:", emailError);
+        });
+};
+
 // Helper to resolve the hub details using the authenticated user's ID
 async function resolveHubDetails(userId: string) {
     const res = await pool.query(
@@ -1143,7 +1157,7 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
             await client.query("ROLLBACK");
             return res.status(200).json({
                 message: "Order was already delivered.",
-                data: { orderId, invoiceEmailSent: false },
+                data: { orderId },
             });
         }
         const wasCod = orderRes.rows[0]?.payment_status === 'cod_pending';
@@ -1163,7 +1177,7 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
             await client.query("ROLLBACK");
             return res.status(200).json({
                 message: "Order was already delivered.",
-                data: { orderId, invoiceEmailSent: false },
+                data: { orderId },
             });
         }
 
@@ -1178,26 +1192,17 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         );
 
         await client.query("COMMIT");
-        let invoiceEmailSent = false;
-        try {
-            const emailResult = await sendDeliveredOrderInvoiceEmail({
+        sendInvoiceEmailInBackground({
                 customerName: orderRes.rows[0].customer_name,
                 customerEmail: orderRes.rows[0].customer_email,
                 orderId,
                 orderReference: orderRes.rows[0].order_reference || orderId,
-            });
-            invoiceEmailSent = emailResult.success;
-            if (!emailResult.success) {
-                console.error("Failed to email delivered order invoice:", emailResult.error);
-            }
-        } catch (emailError) {
-            console.error("Failed to generate or email delivered order invoice:", emailError);
-        }
+        });
         return res.status(200).json({
             message: wasCod
                 ? `Order marked as delivered. COD payment (${collectionMethod}) collected.`
                 : "Order successfully marked as delivered.",
-            data: { orderId, codPaymentCollected: wasCod, collectionMethod: wasCod ? collectionMethod : null, invoiceEmailSent }
+            data: { orderId, codPaymentCollected: wasCod, collectionMethod: wasCod ? collectionMethod : null }
         });
     } catch (error) {
         await client.query("ROLLBACK");
@@ -2296,21 +2301,12 @@ export const verifyDeliveryController = async (
 
         await client.query("COMMIT");
 
-        let invoiceEmailSent = false;
-        try {
-            const emailResult = await sendDeliveredOrderInvoiceEmail({
+        sendInvoiceEmailInBackground({
                 customerName: order.customer_name,
                 customerEmail: order.customer_email,
                 orderId,
                 orderReference: order.order_reference || orderId,
-            });
-            invoiceEmailSent = emailResult.success;
-            if (!emailResult.success) {
-                console.error("Failed to email delivered order invoice:", emailResult.error);
-            }
-        } catch (emailError) {
-            console.error("Failed to generate or email delivered order invoice:", emailError);
-        }
+        });
 
         return res.status(200).json({
             message: paymentCollectionRequired
@@ -2327,7 +2323,6 @@ export const verifyDeliveryController = async (
                 collectionMethod: paymentCollectionRequired
                     ? collectionMethod
                     : null,
-                invoiceEmailSent,
             },
         });
     } catch (error) {

@@ -48,7 +48,7 @@ export async function sendEmail(payload: EmailPayload): Promise<EmailResult> {
             attachments: payload.attachments?.map((attachment) => ({
                 filename: attachment.filename,
                 content: attachment.content,
-                content_type: attachment.contentType,
+                contentType: attachment.contentType,
             })),
         });
 

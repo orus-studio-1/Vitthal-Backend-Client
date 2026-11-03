@@ -111,6 +111,8 @@ export function buildInvoicePageSvg(
     pageNumber: number,
     pageCount: number,
     isCopyFinalPage = true,
+    allItems: InvoiceDocumentItem[] = items,
+    rowOffset = 0,
 ): string {
     const w = 794;
     const h = 1123;
@@ -205,8 +207,8 @@ export function buildInvoicePageSvg(
         const gstRate = item.gst_percentage === null ? null : Number(item.gst_percentage);
         const tax = gstRate === null ? null : Math.round(taxable * gstRate) / 100;
         const values = isTax
-            ? [String(index + 1), item.item_code || "-", `${item.product_name}${item.variant_name ? ` (${item.variant_name})` : ""}`, "-", String(qty), item.unit || "nos", money(rate), money(taxable), gstRate === null ? "-" : `${gstRate}%`, tax === null ? "-" : money(tax), money(tax === null ? taxable : taxable + tax)]
-            : [String(index + 1), item.item_code || "-", `${item.product_name}${item.variant_name ? ` (${item.variant_name})` : ""}`, "-", String(qty), item.unit || "nos", money(rate), money(taxable)];
+            ? [String(rowOffset + index + 1), item.item_code || "-", `${item.product_name}${item.variant_name ? ` (${item.variant_name})` : ""}`, "-", String(qty), item.unit || "nos", money(rate), money(taxable), gstRate === null ? "-" : `${gstRate}%`, tax === null ? "-" : money(tax), money(tax === null ? taxable : taxable + tax)]
+            : [String(rowOffset + index + 1), item.item_code || "-", `${item.product_name}${item.variant_name ? ` (${item.variant_name})` : ""}`, "-", String(qty), item.unit || "nos", money(rate), money(taxable)];
         values.forEach((value, column) => {
             const isLongText = column === (isTax ? 2 : 2) || column === 1;
             const maxChars = Math.max(6, Math.floor((columns[column] - 10) / (isLongText ? 5.2 : 4.4)));
@@ -217,9 +219,10 @@ export function buildInvoicePageSvg(
         });
     });
 
-    const subtotal = items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0);
-    const taxKnown = items.length > 0 && items.every((item) => item.gst_percentage !== null);
-    const taxTotal = taxKnown ? items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0) * Number(item.gst_percentage || 0) / 100, 0) : null;
+    // Totals cover the whole order; `items` holds only the rows on this page.
+    const subtotal = allItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0);
+    const taxKnown = allItems.length > 0 && allItems.every((item) => item.gst_percentage !== null);
+    const taxTotal = taxKnown ? allItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.price || 0) * Number(item.gst_percentage || 0) / 100, 0) : null;
     const invoiceTotal = taxTotal === null ? subtotal : subtotal + taxTotal;
     const summaryTop = rowsTop + Math.max(1, visibleItems.length) * rowHeight + 18;
     const summaryX = 420;
@@ -288,8 +291,8 @@ export async function buildInvoicePDFBufferFromData(
     const content: any[] = [];
     let pageNumber = 1;
     for (const copy of copies) {
-        for (const pageItems of chunks) {
-            const svg = buildInvoicePageSvg(order, pageItems, documentType, logoDataUri, copy, pageNumber, totalPages, pageItems === chunks[chunks.length - 1]);
+        for (const [chunkIndex, pageItems] of chunks.entries()) {
+            const svg = buildInvoicePageSvg(order, pageItems, documentType, logoDataUri, copy, pageNumber, totalPages, pageItems === chunks[chunks.length - 1], items, chunkIndex * pageSize);
             content.push({ svg, width: 527, height: 745, alignment: "center", margin: [0, 0, 0, 0], ...(pageNumber > 1 ? { pageBreak: "before" } : {}) });
             pageNumber += 1;
         }

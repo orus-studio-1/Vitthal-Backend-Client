@@ -51,7 +51,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         // 3. Fetch cart items with stock check
         const cartItemsQuery = await pool.query(
             `SELECT ci.product_id, ci.product_variant_id, ci.vendor_id, ci.quantity,
-                    vp.price as latest_price, vp.discounted_price, vp.stock_quantity, p.name as product_name
+                    vp.price as latest_price, vp.discounted_price, vp.stock_quantity, p.name as product_name, vp.gst_percentage
              FROM cart_items ci
              JOIN vendor_products vp ON vp.product_variant_id = ci.product_variant_id AND vp.vendor_id = ci.vendor_id
              JOIN products p ON p.id = ci.product_id
@@ -143,9 +143,9 @@ export const placeOrderController = async (req: Request, res: Response): Promise
                 const originalPrice = (discountedPrice !== null && discountedPrice < latestPrice) ? latestPrice : null;
 
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price) 
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price, gst_percentage)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice, item.gst_percentage]
                 );
             }
         }
@@ -317,9 +317,9 @@ export const createPaymentOrderController = async (req: Request, res: Response):
                 const originalPrice = (discountedPrice !== null && discountedPrice < latestPrice) ? latestPrice : null;
 
                 await pool.query(
-                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price) 
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice]
+                    `INSERT INTO order_items (order_id, product_id, product_variant_id, vendor_id, quantity, price, original_price, gst_percentage)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                    [orderId, item.product_id, item.product_variant_id, item.vendor_id, item.quantity, effectivePrice, originalPrice, item.gst_percentage]
                 );
             }
         }
@@ -348,7 +348,7 @@ export const createPaymentOrderController = async (req: Request, res: Response):
             const discountedPrice = item.discounted_price !== null && item.discounted_price !== undefined ? Number(item.discounted_price) : null;
             const effectivePrice = (discountedPrice !== null && discountedPrice < latestPrice) ? discountedPrice : latestPrice;
 
-            const itemGstPercent = item.gst_percentage !== null && item.gst_percentage !== undefined ? Number(item.gst_percentage) : 0;
+            const itemGstPercent = item.gst_percentage !== null && item.gst_percentage !== undefined ? Number(item.gst_percentage): 0;
             taxes += (effectivePrice * Number(item.quantity)) * (itemGstPercent / 100);
         }
         const subtotal = totalCheckoutAmount + totalServiceAmount;

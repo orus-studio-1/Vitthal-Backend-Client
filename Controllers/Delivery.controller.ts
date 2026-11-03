@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import pool from "../DbConnect";
+import { sendDeliveredOrderInvoiceEmail } from "../helpers/emailService.helper";
 import { sendExpoPushNotification } from "../services/pushNotification.service";
 import { razorpay } from "../services/razorpay.service";
 import QRCode from "qrcode";
@@ -1131,21 +1132,40 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
 
         // Check current payment status before updating, so we know whether this was COD
         const orderRes = await client.query(
-            `SELECT payment_status FROM orders WHERE id = $1`,
+            `SELECT payment_status, status, customer_email, customer_name, order_reference FROM orders WHERE id = $1`,
             [orderId]
         );
+        if (orderRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ message: "Order not found." });
+        }
+        if (orderRes.rows[0].status === "delivered") {
+            await client.query("ROLLBACK");
+            return res.status(200).json({
+                message: "Order was already delivered.",
+                data: { orderId, invoiceEmailSent: false },
+            });
+        }
         const wasCod = orderRes.rows[0]?.payment_status === 'cod_pending';
         const collectionMethod = wasCod && codPaymentMethod === 'upi' ? 'upi' : 'cash';
 
         // Update order status to delivered — mark COD payment collected in the same statement
-        await client.query(
+        const deliveredOrder = await client.query(
             `UPDATE orders 
              SET status = 'delivered', 
                  updated_at = NOW(),
                  payment_status = CASE WHEN payment_status = 'cod_pending' THEN 'paid' ELSE payment_status END
-             WHERE id = $1`,
+             WHERE id = $1 AND status <> 'delivered'
+             RETURNING id`,
             [orderId]
         );
+        if (deliveredOrder.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(200).json({
+                message: "Order was already delivered.",
+                data: { orderId, invoiceEmailSent: false },
+            });
+        }
 
         // Insert delivered tracking log — note COD collection method if applicable
         const trackingNote = wasCod
@@ -1158,11 +1178,26 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         );
 
         await client.query("COMMIT");
+        let invoiceEmailSent = false;
+        try {
+            const emailResult = await sendDeliveredOrderInvoiceEmail({
+                customerName: orderRes.rows[0].customer_name,
+                customerEmail: orderRes.rows[0].customer_email,
+                orderId,
+                orderReference: orderRes.rows[0].order_reference || orderId,
+            });
+            invoiceEmailSent = emailResult.success;
+            if (!emailResult.success) {
+                console.error("Failed to email delivered order invoice:", emailResult.error);
+            }
+        } catch (emailError) {
+            console.error("Failed to generate or email delivered order invoice:", emailError);
+        }
         return res.status(200).json({
             message: wasCod
                 ? `Order marked as delivered. COD payment (${collectionMethod}) collected.`
                 : "Order successfully marked as delivered.",
-            data: { orderId, codPaymentCollected: wasCod, collectionMethod: wasCod ? collectionMethod : null }
+            data: { orderId, codPaymentCollected: wasCod, collectionMethod: wasCod ? collectionMethod : null, invoiceEmailSent }
         });
     } catch (error) {
         await client.query("ROLLBACK");
@@ -1899,6 +1934,8 @@ export const verifyDeliveryController = async (
             SELECT
                 o.id,
                 o.order_reference,
+                o.customer_name,
+                o.customer_email,
                 o.payment_status,
                 o.order_type,
                 da.id AS delivery_agent_id
@@ -2103,7 +2140,7 @@ export const verifyDeliveryController = async (
         // UPI already paid       -> remains paid
         // prepaid orders         -> remains paid
         // ---------------------------------------------------------
-        await client.query(
+        const deliveredOrder = await client.query(
             `
             UPDATE orders
             SET
@@ -2115,9 +2152,15 @@ export const verifyDeliveryController = async (
                 END,
                 updated_at = NOW()
             WHERE id = $1
+              AND status <> 'delivered'
+            RETURNING id
             `,
             [orderId]
         );
+        if (deliveredOrder.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "Order has already been delivered." });
+        }
 
         // ---------------------------------------------------------
         // 7. Delivery history
@@ -2253,6 +2296,22 @@ export const verifyDeliveryController = async (
 
         await client.query("COMMIT");
 
+        let invoiceEmailSent = false;
+        try {
+            const emailResult = await sendDeliveredOrderInvoiceEmail({
+                customerName: order.customer_name,
+                customerEmail: order.customer_email,
+                orderId,
+                orderReference: order.order_reference || orderId,
+            });
+            invoiceEmailSent = emailResult.success;
+            if (!emailResult.success) {
+                console.error("Failed to email delivered order invoice:", emailResult.error);
+            }
+        } catch (emailError) {
+            console.error("Failed to generate or email delivered order invoice:", emailError);
+        }
+
         return res.status(200).json({
             message: paymentCollectionRequired
                 ? `Delivery verified! ${
@@ -2268,6 +2327,7 @@ export const verifyDeliveryController = async (
                 collectionMethod: paymentCollectionRequired
                     ? collectionMethod
                     : null,
+                invoiceEmailSent,
             },
         });
     } catch (error) {

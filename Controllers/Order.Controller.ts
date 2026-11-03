@@ -302,6 +302,16 @@ export const getOrdersController = async (
                 o.payment_status,
                 o.total_amount,
                 o.created_at,
+                COALESCE(
+                    (SELECT MAX(oft.created_at) FROM order_fulfillment_tracking oft WHERE oft.order_id = o.id AND oft.status = 'delivered'),
+                    (SELECT MAX(osh.created_at) FROM order_status_history osh WHERE osh.order_id = o.id AND osh.status = 'delivered'),
+                    CASE WHEN o.status = 'delivered' THEN o.updated_at ELSE NULL END
+                ) AS delivery_date,
+                o.address_line,
+                o.city,
+                o.state,
+                o.country,
+                o.pincode,
                 v.company_name AS vendor_name,
                 (
                     SELECT json_agg(
@@ -311,6 +321,8 @@ export const getOrdersController = async (
                             'variant_properties', pv.properties,
                             'variant_name', pv.name,
                             'product_name', p.name,
+                            'material_code', p.item_code,
+                            'unit', p.unit,
                             'image_url', (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1),
                             'quantity', oi.quantity,
                             'price', oi.price,
@@ -867,6 +879,11 @@ async function fetchOrderTrackingData(orderId: string) {
             o.payment_status,
             o.total_amount,
             o.created_at,
+            COALESCE(
+                (SELECT MAX(oft.created_at) FROM order_fulfillment_tracking oft WHERE oft.order_id = o.id AND oft.status = 'delivered'),
+                (SELECT MAX(osh.created_at) FROM order_status_history osh WHERE osh.order_id = o.id AND osh.status = 'delivered'),
+                CASE WHEN o.status = 'delivered' THEN o.updated_at ELSE NULL END
+            ) AS delivery_date,
             o.updated_at,
             o.address_line,
             o.city,
@@ -901,6 +918,8 @@ async function fetchOrderTrackingData(orderId: string) {
             pv.properties AS variant_properties,
             pv.name AS variant_name,
             p.name AS product_name,
+            p.item_code AS material_code,
+            p.unit,
             p.description AS product_description,
             (SELECT image_url FROM products_images pi WHERE pi.product_id = p.id AND pi.is_primary = true LIMIT 1) AS image_url,
             oi.quantity,
@@ -1569,12 +1588,16 @@ export const getOrderInvoiceController = async (
         });
     }
 
-    const pdfBuffer = await generateInvoicePDFBuffer(orderId);
+    const requestedDocument = String(req.query.document || "tax-invoice");
+    if (requestedDocument !== "challan" && requestedDocument !== "tax-invoice") {
+      return res.status(400).json({ message: "document must be 'challan' or 'tax-invoice'" });
+    }
+    const pdfBuffer = await generateInvoicePDFBuffer(orderId, requestedDocument);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=invoice-${orderId}.pdf`,
+      `attachment; filename=${requestedDocument}-${orderId}.pdf`,
     );
     res.send(pdfBuffer);
   } catch (error) {

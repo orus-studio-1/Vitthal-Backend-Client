@@ -1,6 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
-import { authMiddleware } from "../Middleware/AuthMiddleware";
+import { authMiddleware, requireRole } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
 import {
     browseServicesController,
@@ -30,6 +30,7 @@ import {
 } from "../Controllers/Service.controller";
 
 const serviceRouter = Router();
+const requireAdmin = requireRole("admin", "super_admin");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -40,7 +41,7 @@ const upload = multer({
 
 serviceRouter.get("/subcategories", getSubcategoriesController);
 serviceRouter.get("/", browseServicesController);
-serviceRouter.get("/admin/list", adminListPendingServicesController);
+serviceRouter.get("/admin/list", authMiddleware, requireAdmin, adminListPendingServicesController);
 serviceRouter.get("/:id", getServiceDetailController);
 
 serviceRouter.use(authMiddleware);
@@ -48,8 +49,8 @@ serviceRouter.use(authMiddleware);
 serviceRouter.post("/", createServiceAndOfferingController);
 serviceRouter.post("/:id/media", upload.single("file"), uploadServiceMediaController);
 serviceRouter.post("/broadcast-request", broadcastServiceCategoryRequestController);
-serviceRouter.post("/admin/approve/:id", adminApproveServiceController);
-serviceRouter.post("/admin/reject/:id", adminRejectServiceController);
+serviceRouter.post("/admin/approve/:id", requireAdmin, adminApproveServiceController);
+serviceRouter.post("/admin/reject/:id", requireAdmin, adminRejectServiceController);
 serviceRouter.put("/:id/review", reviewServiceController);
 
 serviceRouter.post("/bookings", createServiceBookingController);

@@ -2446,7 +2446,7 @@ export const getVendorServiceOfferingsController = async (
     const result = await pool.query(
       `SELECT 
                 vs.id, vs.price, vs.pricing_type, vs.moq, 
-                CASE WHEN s.status = 'approved' THEN true ELSE vs.is_active END AS is_active, 
+                vs.is_active, 
                 vs.created_at, vs.service_id, vs.delivery_days, vs.token_percentage,
                 vs.modification_status, vs.pending_modifications,
                 s.name AS service_name, s.description AS service_description, s.status AS service_status,

@@ -46,12 +46,12 @@ export const getServiceCategoriesWithSchema = async (
                                             'children', '[]'::json
                                         ) ORDER BY child.name)
                                         FROM service_subcategories child
-                                        WHERE child.parent_id = root.id
+                                        WHERE child.parent_id = root.id AND child.approval_status = 'approved'
                                     ), '[]'::json)
                                 ) ORDER BY root.name
                             )
                             FROM service_subcategories root
-                            WHERE root.category_id = sc.id AND root.parent_id IS NULL
+                            WHERE root.category_id = sc.id AND root.parent_id IS NULL AND root.approval_status = 'approved'
                         ), '[]'::json
                     ) AS subcategories
              FROM service_categories sc

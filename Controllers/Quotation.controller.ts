@@ -658,8 +658,8 @@ export const getClientQuotationByIdController = async (req: Request, res: Respon
 
                 const serviceImageResult = await pool.query(
                     `SELECT COALESCE(
-                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
-                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true AND sm.approval_status = 'approved' LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.approval_status = 'approved' LIMIT 1),
                         (SELECT pc.image FROM service_categories pc WHERE pc.id = s.category_id LIMIT 1)
                      ) AS media_url
                      FROM services s WHERE s.id = $1`,

@@ -15,6 +15,7 @@ import {
   getVendorPayoutBankDetailsController,
   updateVendorPayoutBankDetailsController,
 } from "../Controllers/Vendors.Controller";
+import { getAdminSessionTokenController } from "../Controllers/Vendors.Controller";
 import {
   getVendorDashboardController,
   getVendorAnalyticsController,
@@ -40,6 +41,7 @@ const payoutChequeUpload = multer({
 });
 vendorsRouter.get("/pincode/:pincode", lookupPincodeController);
 vendorsRouter.use(authMiddleware);
+vendorsRouter.get("/admin-session", getAdminSessionTokenController);
 
 vendorsRouter.post("/createVendor", addVendorController);
 vendorsRouter.post("/completeSetup", completeVendorSetupController);

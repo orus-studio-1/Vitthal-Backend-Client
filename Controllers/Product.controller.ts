@@ -1536,6 +1536,7 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                 p.approval_notes,
                 MIN(vp.created_at) AS created_date,
                 BOOL_OR(vp.pending_modifications IS NOT NULL OR vp.pending_price IS NOT NULL OR vp.modification_status = 'pending') AS has_pending_modification,
+                BOOL_OR(vp.deletion_status = 'pending') AS has_pending_deletion,
                 JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'vendor_product_id', vp.id,
@@ -1544,6 +1545,8 @@ export const getVendorProductsController = async (req: Request, res: Response): 
                         'pending_price', vp.pending_price,
                         'pending_modifications', vp.pending_modifications,
                         'modification_status', vp.modification_status,
+                        'deletion_status', vp.deletion_status,
+                        'deletion_reason', vp.deletion_reason,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
                         'is_active', vp.is_active,
@@ -1861,6 +1864,8 @@ export const getVendorProductByIdController = async (req: Request, res: Response
                         'pending_price', vp.pending_price,
                         'pending_modifications', vp.pending_modifications,
                         'modification_status', vp.modification_status,
+                        'deletion_status', vp.deletion_status,
+                        'deletion_reason', vp.deletion_reason,
                         'moq', vp.moq,
                         'stock_quantity', vp.stock_quantity,
                         'is_active', vp.is_active,
@@ -2002,13 +2007,13 @@ export const updateVendorProductController = async (req: Request, res: Response)
         let existingProductResult;
         if (productVariantId) {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
+                `SELECT id, deletion_status, product_variant_id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
                  FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2`,
                 [vendorId, productVariantId]
             );
         } else {
             existingProductResult = await pool.query(
-                `SELECT id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
+                `SELECT id, deletion_status, product_variant_id, status, is_active, price, moq, stock_quantity, gst_percentage, quotation_enabled, quotation_min_qty, discounted_price, pending_price, pending_modifications, modification_status
                  FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
                 [vendorId, productId]
             );
@@ -2019,6 +2024,48 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         const existingVP = existingProductResult.rows[0];
+        if (existingVP.deletion_status === "pending") {
+            return res.status(409).json({ message: "This listing has a deletion request waiting for admin approval, so it can't be edited." });
+        }
+
+        // Variant properties are shared, so a vendor can only change them while no other vendor sells that variant.
+        let proposedVariantProperties: Record<string, string> | null = null;
+        let currentVariantProperties: Record<string, unknown> = {};
+        const incomingVariantProperties = req.body.variantProperties;
+        if (incomingVariantProperties && typeof incomingVariantProperties === "object" && !Array.isArray(incomingVariantProperties)) {
+            const cleaned: Record<string, string> = {};
+            for (const [key, value] of Object.entries(incomingVariantProperties)) {
+                if (key.trim()) cleaned[key.trim()] = String(value ?? "").trim();
+            }
+            const variantResult = await pool.query(
+                `SELECT pv.product_id, pv.properties,
+                        EXISTS (SELECT 1 FROM vendor_products other WHERE other.product_variant_id = pv.id AND other.vendor_id <> $2) AS shared
+                 FROM product_variants pv WHERE pv.id = $1`,
+                [existingVP.product_variant_id, vendorId]
+            );
+            const variant = variantResult.rows[0];
+            currentVariantProperties = variant?.properties || {};
+            const sortedJson = (value: Record<string, unknown>) =>
+                JSON.stringify(Object.keys(value).sort().map((key) => [key, value[key]]));
+            if (variant && sortedJson(cleaned) !== sortedJson(currentVariantProperties)) {
+                if (!Object.keys(cleaned).length) {
+                    return res.status(400).json({ message: "A variant needs at least one property." });
+                }
+                if (variant.shared) {
+                    return res.status(409).json({ message: "Other vendors also sell this variant, so its properties can't be changed. Add a new variant instead." });
+                }
+                const duplicate = await pool.query(
+                    `SELECT 1 FROM product_variants WHERE product_id = $1 AND properties = $2::jsonb AND id <> $3 LIMIT 1`,
+                    [variant.product_id, JSON.stringify(cleaned), existingVP.product_variant_id]
+                );
+                if (duplicate.rows.length) {
+                    return res.status(409).json({ message: "A variant with these properties already exists." });
+                }
+                proposedVariantProperties = cleaned;
+            }
+        }
+        const hasVariantChanges = proposedVariantProperties !== null;
+
         // Fetch existing product specifications and catalog attributes
         const existingProdRes = await pool.query(
             `SELECT p.id, p.name, p.description, p.category, p.product_type, p.item_code, p.created_by_user_id,
@@ -2138,7 +2185,7 @@ export const updateVendorProductController = async (req: Request, res: Response)
         }
 
         // Determine if any modification occurred on an active listing
-        const isAnyModification = isPriceChanged || hasAttrChanges || hasSpecChanges || hasProductFieldChanges || isMoqChanged || isStockChanged || isGstChanged || isActiveChanged || isQuotationChanged;
+        const isAnyModification = hasVariantChanges || isPriceChanged || hasAttrChanges || hasSpecChanges || hasProductFieldChanges || isMoqChanged || isStockChanged || isGstChanged || isActiveChanged || isQuotationChanged;
         const requiresApproval = (existingVP.status === 'active' || existingProd.product_approval_status === 'approved') && isAnyModification;
 
         let updateQuery;
@@ -2164,6 +2211,9 @@ export const updateVendorProductController = async (req: Request, res: Response)
                 specifications: incomingSpecs || existingProd.specifications || {},
                 current_specifications: existingProd.specifications || {},
                 has_specification_changes: hasSpecChanges,
+                variant_properties: proposedVariantProperties,
+                current_variant_properties: currentVariantProperties,
+                has_variant_changes: hasVariantChanges,
                 ...proposedProductFields,
                 current_product_fields: currentProductFields,
                 has_product_field_changes: hasProductFieldChanges,
@@ -2198,6 +2248,12 @@ export const updateVendorProductController = async (req: Request, res: Response)
             ];
         } else {
             // No modifications or product not yet active: apply directly
+            if (proposedVariantProperties) {
+                await pool.query(
+                    `UPDATE product_variants SET properties = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+                    [JSON.stringify(proposedVariantProperties), existingVP.product_variant_id]
+                );
+            }
             const attrsToApply = { ...(existingProd.attributes || {}), ...(incomingAttrs || {}) };
             for (const field of ["material", "application", "standard"]) {
                 if (req.body[field] !== undefined) attrsToApply[field] = String(req.body[field]);
@@ -2297,25 +2353,48 @@ export const deleteVendorProductController = async (req: Request, res: Response)
             return res.status(403).json({ message: "Your vendor account must be approved and active to delete products." });
         }
 
+        const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+        if (!reason) {
+            return res.status(400).json({ message: "Please give a reason for deleting this product." });
+        }
+
         const productVariantId = req.query.productVariantId || req.body?.productVariantId;
-        let deleteResult;
-        if (productVariantId) {
-            deleteResult = await pool.query(
-                `DELETE FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2 RETURNING *`,
+        const listings = productVariantId
+            ? await pool.query(
+                `SELECT id, status, is_active FROM vendor_products WHERE vendor_id = $1 AND product_variant_id = $2`,
                 [vendor.id, productVariantId]
-            );
-        } else {
-            deleteResult = await pool.query(
-                `DELETE FROM vendor_products WHERE vendor_id = $1 AND product_id = $2 RETURNING *`,
+            )
+            : await pool.query(
+                `SELECT id, status, is_active FROM vendor_products WHERE vendor_id = $1 AND product_id = $2`,
                 [vendor.id, productId]
             );
+
+        if (listings.rows.length === 0) {
+            return res.status(404).json({ message: "Product or variation not found or you don't have permission to delete it." });
         }
 
-        if (deleteResult.rows.length === 0) {
-            return res.status(404).json({ message: "Product or variation not found or you don't have permission to delete it!" });
+        // A listing clients have never seen has nothing to protect; a live one stays up until an admin decides.
+        const liveIds = listings.rows.filter((row) => row.status === "active" || row.is_active).map((row) => row.id);
+        const unlistedIds = listings.rows.filter((row) => !liveIds.includes(row.id)).map((row) => row.id);
+
+        if (unlistedIds.length) {
+            await pool.query(`DELETE FROM vendor_products WHERE id = ANY($1::uuid[])`, [unlistedIds]);
+        }
+        if (liveIds.length) {
+            await pool.query(
+                `UPDATE vendor_products
+                 SET deletion_status = 'pending', deletion_reason = $1, deletion_requested_at = NOW(), updated_at = NOW()
+                 WHERE id = ANY($2::uuid[])`,
+                [reason, liveIds]
+            );
         }
 
-        return res.status(200).json({ message: "Product removed from your catalog successfully" });
+        return res.status(200).json({
+            message: liveIds.length
+                ? "Deletion request sent. The product stays live until an admin approves it."
+                : "Product removed from your catalog successfully",
+            deletion_pending: liveIds.length > 0,
+        });
     } catch (error) {
         console.error("Error deleting vendor product:", error);
         return res.status(500).json({ message: "Internal Server Error" });
@@ -2821,7 +2900,14 @@ export const uploadProductImagesController = async (req: Request, res: Response)
         try {
             await client.query("BEGIN");
 
-            const targetPrimaryIndex = req.body.primaryImageIndex !== undefined ? Number(req.body.primaryImageIndex) : -1;
+            // Clients only see an approved main image, so a vendor upload can't replace one before it is reviewed.
+            const approvedPrimary = await client.query(
+                `SELECT 1 FROM products_images WHERE product_id = $1 AND is_primary = true AND approval_status = 'approved' LIMIT 1`,
+                [productId]
+            );
+            const targetPrimaryIndex = req.body.primaryImageIndex !== undefined && !(isVendor && approvedPrimary.rows.length > 0)
+                ? Number(req.body.primaryImageIndex)
+                : -1;
 
             if (targetPrimaryIndex >= 0 && targetPrimaryIndex < images.length) {
                 await client.query(`UPDATE products_images SET is_primary = false WHERE product_id = $1`, [productId]);
@@ -2912,13 +2998,21 @@ export const uploadProductImagesController = async (req: Request, res: Response)
     }
 };
 
-export const getProductTypes = async (_req: Request, res: Response): Promise<Response> => {
+export const getProductTypes = async (req: Request, res: Response): Promise<Response> => {
+    // Optional ?category= (category id or code) limits the list to types used in that category.
+    const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
     try {
         const result = await pool.query(
             `SELECT DISTINCT product_type 
-             FROM products 
+             FROM products p
              WHERE product_type IS NOT NULL AND product_type != '' AND is_active = TRUE AND approval_status = 'approved'
-             ORDER BY product_type ASC`
+               ${category ? `AND EXISTS (
+                   SELECT 1 FROM product_category pc
+                   WHERE (pc.id::text = $1 OR pc.code = $1)
+                     AND (p.category::text = pc.id::text OR p.category::text = pc.code)
+               )` : ""}
+             ORDER BY product_type ASC`,
+            category ? [category] : []
         );
         const types = result.rows.map(row => row.product_type);
         return res.status(200).json({ message: "Product types fetched successfully", data: types });

@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { generateAccessToken } from "../helpers/jwt.helper";
 import pool from "../DbConnect";
 import { BUCKET_NAME, getPresignedUrlOrOriginal, uploadBufferToS3 } from "../services/s3.service";
 import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
@@ -913,6 +914,15 @@ export const getVendorDetailsController = async (req: Request, res: Response): P
     }
 }
 
+/** The browser has no session cookies for the Admin Backend, so it asks here for a fresh token to call it with. */
+export const getAdminSessionTokenController = async (req: Request, res: Response): Promise<Response> => {
+    const { userId, username, email, role, vendorType } = (req as any).user;
+    if (role !== "vendor") {
+        return res.status(403).json({ message: "Forbidden" });
+    }
+    return res.status(200).json({ accessToken: generateAccessToken(userId, username, email, role, vendorType) });
+};
+
 export const getVendorCategoriesController = async (req: Request, res: Response): Promise<Response> => {
     const { userId, role } = (req as any).user;
     if (!userId) {
@@ -928,12 +938,13 @@ export const getVendorCategoriesController = async (req: Request, res: Response)
             `SELECT vendor_type FROM vendors WHERE user_id = $1 LIMIT 1`,
             [userId]
         );
-        if (vendorTypeResult.rows[0]?.vendor_type === "service") {
+        // Vendors selling both products and services pass ?type=service from the service screens.
+        if (vendorTypeResult.rows[0]?.vendor_type === "service" || req.query.type === "service") {
             const serviceCategoriesResult = await pool.query(
-                `SELECT sc.id, sc.code, sc.label, sc.sort_order
+                `SELECT DISTINCT sc.id, sc.code, sc.label, sc.sort_order
                  FROM vendors v
                  INNER JOIN vendor_service_category_selections coverage
-                   ON coverage.vendor_id = v.id AND coverage.service_subcategory_id IS NULL
+                   ON coverage.vendor_id = v.id
                  INNER JOIN service_categories sc ON sc.id = coverage.service_category_id
                  WHERE v.user_id = $1 AND sc.is_active = TRUE
                  ORDER BY sc.sort_order ASC, sc.label ASC`,

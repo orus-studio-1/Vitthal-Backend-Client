@@ -27,6 +27,8 @@ import {
     createServiceAndOfferingController,
     createVendorServiceOfferingController,
     uploadServiceMediaController,
+    getVendorServiceMediaController,
+    removeVendorServiceMediaController,
 } from "../Controllers/Service.controller";
 
 const serviceRouter = Router();
@@ -66,6 +68,8 @@ serviceRouter.post("/reviews", submitServiceReviewController);
 
 serviceRouter.get("/vendor/offerings", requireApprovedVendor, getVendorServiceOfferingsController);
 serviceRouter.post("/vendor/offerings", requireApprovedVendor, createVendorServiceOfferingController);
+serviceRouter.get("/vendor/offerings/:id/media", requireApprovedVendor, getVendorServiceMediaController);
+serviceRouter.delete("/vendor/offerings/:id/media/:mediaId", requireApprovedVendor, removeVendorServiceMediaController);
 serviceRouter.get("/vendor/bookings", requireApprovedVendor, getVendorServiceBookingsController);
 serviceRouter.get("/vendor/bookings/:id", requireApprovedVendor, getVendorServiceBookingByIdController);
 serviceRouter.post("/vendor/bookings/:id/complete", requireApprovedVendor, vendorCompleteBookingController);

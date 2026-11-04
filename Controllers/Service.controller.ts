@@ -7,6 +7,7 @@ import {
   uploadBufferToS3,
   getPresignedUrlOrOriginal,
   getPresignedUrl,
+  deleteFromS3,
 } from "../services/s3.service";
 import { createNotification } from "./Notification.controller";
 import {
@@ -84,6 +85,79 @@ async function updateVendorAggregate(
   );
 }
 
+async function getVendorOfferingServiceId(req: Request): Promise<string | null> {
+  const authUser = getAuthUser(req);
+  if (!authUser) return null;
+  const vendorId = await getVendorIdByUserId(authUser.userId);
+  if (!vendorId) return null;
+  const offering = await pool.query(
+    `SELECT service_id FROM vendor_services WHERE id = $1 AND vendor_id = $2`,
+    [req.params.id, vendorId],
+  );
+  return offering.rows[0]?.service_id ?? null;
+}
+
+export const getVendorServiceMediaController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  try {
+    const serviceId = await getVendorOfferingServiceId(req);
+    if (!serviceId) {
+      return res.status(404).json({ message: "Service offering not found" });
+    }
+    const media = await pool.query(
+      `SELECT id, media_url, media_type, is_primary, approval_status, removal_requested_at
+       FROM services_media
+       WHERE service_id = $1
+       ORDER BY is_primary DESC, display_order ASC, created_at ASC`,
+      [serviceId],
+    );
+    const rows = await Promise.all(
+      media.rows.map(async (row) => ({
+        ...row,
+        media_url: await getPresignedUrlOrOriginal(row.media_url),
+      })),
+    );
+    return res.status(200).json({ data: rows });
+  } catch (error) {
+    console.error("Error fetching vendor service media:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+export const removeVendorServiceMediaController = async (
+  req: Request,
+  res: Response,
+): Promise<Response> => {
+  try {
+    const serviceId = await getVendorOfferingServiceId(req);
+    if (!serviceId) {
+      return res.status(404).json({ message: "Service offering not found" });
+    }
+    const media = await pool.query(
+      `SELECT id, approval_status, s3_key FROM services_media WHERE id = $1 AND service_id = $2`,
+      [req.params.mediaId, serviceId],
+    );
+    if (media.rows.length === 0) {
+      return res.status(404).json({ message: "Media not found" });
+    }
+    // Approved media stays live until an admin agrees to remove it; anything else was never live.
+    if (media.rows[0].approval_status === "approved") {
+      await pool.query(`UPDATE services_media SET removal_requested_at = NOW() WHERE id = $1`, [req.params.mediaId]);
+      return res.status(202).json({ message: "Removal request sent. This file stays live until an admin approves it." });
+    }
+    await pool.query(`DELETE FROM services_media WHERE id = $1`, [req.params.mediaId]);
+    if (media.rows[0].s3_key) {
+      await deleteFromS3(media.rows[0].s3_key).catch((error) => console.warn("Could not delete service media from S3:", error));
+    }
+    return res.status(200).json({ message: "Media removed" });
+  } catch (error) {
+    console.error("Error removing vendor service media:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 export const browseServicesController = async (
   req: Request,
   res: Response,
@@ -106,7 +180,9 @@ export const browseServicesController = async (
   }
 
   if (subcategory && typeof subcategory === "string") {
-    conditions.push(`s.subcategory_id = $${idx++}`);
+    // A service filed under a sub-sub-category also belongs to its parent.
+    conditions.push(`(s.subcategory_id = $${idx} OR s.subcategory_id IN (SELECT id FROM service_subcategories WHERE parent_id = $${idx}))`);
+    idx++;
     values.push(subcategory);
   }
 
@@ -129,8 +205,8 @@ export const browseServicesController = async (
                     COUNT(DISTINCT vs.id) AS vendor_count,
                     MIN(vs.price) AS starting_price,
                     COALESCE(
-                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
-                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true AND sm.approval_status = 'approved' LIMIT 1),
+                        (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.approval_status = 'approved' LIMIT 1),
                         pc.image
                     ) AS image_url
                  FROM services s
@@ -768,8 +844,8 @@ export const getMyServiceQuotationsController = async (
                 s.name AS service_name,
                 v.company_name AS vendor_name,
                 COALESCE(
-                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1),
-                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id LIMIT 1),
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true AND sm.approval_status = 'approved' LIMIT 1),
+                    (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.approval_status = 'approved' LIMIT 1),
                     (SELECT pc.image FROM service_categories pc WHERE pc.id = s.category_id LIMIT 1)
                 ) AS service_image
              FROM service_quotations sq
@@ -2155,10 +2231,10 @@ export const getSubcategoriesController = async (
   const categoryId = req.params.categoryId || req.query.categoryId;
   try {
     let query = `
-            SELECT s.id, s.category_id, s.name, s.description
+            SELECT s.id, s.category_id, s.parent_id, s.name, s.description
             FROM service_subcategories s
             JOIN service_categories pc ON pc.id = s.category_id
-            WHERE pc.is_active = TRUE
+            WHERE pc.is_active = TRUE AND s.approval_status = 'approved'
         `;
     const params: any[] = [];
     if (categoryId && typeof categoryId === "string") {
@@ -2371,8 +2447,15 @@ export const getVendorServiceOfferingsController = async (
       `SELECT 
                 vs.id, vs.price, vs.pricing_type, vs.moq, 
                 CASE WHEN s.status = 'approved' THEN true ELSE vs.is_active END AS is_active, 
-                vs.created_at, vs.service_id,
-                s.name AS service_name, s.status AS service_status,
+                vs.created_at, vs.service_id, vs.delivery_days, vs.token_percentage,
+                vs.modification_status, vs.pending_modifications,
+                s.name AS service_name, s.description AS service_description, s.status AS service_status,
+                (s.created_by_user_id = $2 OR (
+                    s.created_by_user_id IS NULL AND NOT EXISTS (
+                        SELECT 1 FROM vendor_services other
+                        WHERE other.service_id = s.id AND other.vendor_id <> $1
+                    )
+                )) AS can_edit_service_details,
                 pc.label AS category_name,
                 (SELECT sm.media_url FROM services_media sm WHERE sm.service_id = s.id AND sm.is_primary = true LIMIT 1) AS service_image,
                 (SELECT COUNT(*) FROM service_bookings sb WHERE sb.vendor_service_id = vs.id) AS booking_count
@@ -2381,7 +2464,7 @@ export const getVendorServiceOfferingsController = async (
              LEFT JOIN service_categories pc ON pc.id = s.category_id
              WHERE vs.vendor_id = $1
              ORDER BY vs.created_at DESC`,
-      [vendorId],
+      [vendorId, authUser.userId],
     );
 
     const rows = await Promise.all(
@@ -2397,6 +2480,38 @@ export const getVendorServiceOfferingsController = async (
     return res.status(500).json({ message: "Internal server error" });
   }
 };
+
+async function findOrProposeSubcategory(
+  client: PoolClient,
+  categoryId: string,
+  parentId: string | null,
+  name: string,
+  userId: string,
+): Promise<string> {
+  const cleanName = name.trim();
+  const existing = await client.query(
+    `SELECT id, approval_status FROM service_subcategories
+     WHERE category_id = $1 AND parent_id IS NOT DISTINCT FROM $2::uuid AND LOWER(name) = LOWER($3)
+     LIMIT 1`,
+    [categoryId, parentId, cleanName],
+  );
+  if (existing.rows.length > 0) {
+    if (existing.rows[0].approval_status === "rejected") {
+      await client.query(
+        `UPDATE service_subcategories SET approval_status = 'pending', created_by_user_id = $2, updated_at = NOW() WHERE id = $1`,
+        [existing.rows[0].id, userId],
+      );
+    }
+    return existing.rows[0].id;
+  }
+  const created = await client.query(
+    `INSERT INTO service_subcategories (category_id, parent_id, name, approval_status, created_by_user_id)
+     VALUES ($1, $2::uuid, $3, 'pending', $4)
+     RETURNING id`,
+    [categoryId, parentId, cleanName, userId],
+  );
+  return created.rows[0].id;
+}
 
 export const createServiceAndOfferingController = async (
   req: Request,
@@ -2419,6 +2534,9 @@ export const createServiceAndOfferingController = async (
     description,
     categoryId,
     subcategoryId,
+    subSubcategoryId,
+    newSubcategoryName,
+    newSubSubcategoryName,
     price,
     pricingType,
     moq,
@@ -2470,28 +2588,39 @@ export const createServiceAndOfferingController = async (
         .json({ message: `Invalid category reference: "${categoryId}"` });
     }
 
-    // Resolve Subcategory ID if present
+    // Resolve the sub-category and sub-sub-category. New names become proposals approved along with this service.
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let resolvedSubcategoryId: string | null = null;
-    if (subcategoryId) {
-      const isSubUuid =
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-          String(subcategoryId).trim(),
-        );
-      if (isSubUuid) {
-        const subCheck = await client.query(
-          `SELECT id FROM service_subcategories WHERE id = $1`,
-          [subcategoryId],
-        );
-        if (subCheck.rows.length > 0)
-          resolvedSubcategoryId = subCheck.rows[0].id;
+    if (typeof newSubcategoryName === "string" && newSubcategoryName.trim()) {
+      resolvedSubcategoryId = await findOrProposeSubcategory(client, resolvedCategoryId, null, newSubcategoryName, authUser.userId);
+    } else if (subcategoryId) {
+      const reference = String(subcategoryId).trim();
+      const subCheck = await client.query(
+        uuidPattern.test(reference)
+          ? `SELECT id FROM service_subcategories WHERE id = $1 AND category_id = $2 AND parent_id IS NULL`
+          : `SELECT id FROM service_subcategories WHERE LOWER(name) = LOWER($1) AND category_id = $2 AND parent_id IS NULL LIMIT 1`,
+        [reference, resolvedCategoryId],
+      );
+      if (subCheck.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "That sub-category does not belong to the selected service." });
       }
-      if (!resolvedSubcategoryId) {
-        const subCheck = await client.query(
-          `SELECT id FROM service_subcategories WHERE LOWER(name) = LOWER($1) LIMIT 1`,
-          [String(subcategoryId).trim()],
+      resolvedSubcategoryId = subCheck.rows[0].id;
+    }
+
+    if (resolvedSubcategoryId) {
+      if (typeof newSubSubcategoryName === "string" && newSubSubcategoryName.trim()) {
+        resolvedSubcategoryId = await findOrProposeSubcategory(client, resolvedCategoryId, resolvedSubcategoryId, newSubSubcategoryName, authUser.userId);
+      } else if (subSubcategoryId) {
+        const childCheck = await client.query(
+          `SELECT id FROM service_subcategories WHERE id = $1::uuid AND parent_id = $2`,
+          [String(subSubcategoryId).trim(), resolvedSubcategoryId],
         );
-        if (subCheck.rows.length > 0)
-          resolvedSubcategoryId = subCheck.rows[0].id;
+        if (childCheck.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: "That sub-sub-category does not belong to the selected sub-category." });
+        }
+        resolvedSubcategoryId = childCheck.rows[0].id;
       }
     }
 
@@ -2605,10 +2734,50 @@ export const uploadServiceMediaController = async (
     return res.status(400).json({ message: "No file uploaded" });
   }
 
+  const authUser = getAuthUser(req);
+  if (!authUser || authUser.role !== "vendor") {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
   try {
     const isVideo = file.mimetype.startsWith("video/");
     const isImage = file.mimetype.startsWith("image/");
+    if (!isVideo && !isImage) {
+      return res.status(400).json({ message: "Only image and video files can be uploaded." });
+    }
     const mediaType = isVideo ? "video" : "image";
+
+    const vendorId = await getVendorIdByUserId(authUser.userId);
+    const access = await pool.query(
+      `SELECT 1 FROM services s
+       WHERE s.id = $1 AND (
+         s.created_by_user_id = $2
+         OR s.status = 'approved'
+         OR EXISTS (SELECT 1 FROM vendor_services vs WHERE vs.service_id = s.id AND vs.vendor_id = $3)
+       )`,
+      [serviceId, authUser.userId, vendorId],
+    );
+    if (access.rows.length === 0) {
+      return res.status(403).json({ message: "You can't add media to this service." });
+    }
+
+    const existing = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE media_type = 'image' AND approval_status <> 'rejected')::int AS images,
+         COUNT(*) FILTER (WHERE media_type = 'video' AND approval_status <> 'rejected')::int AS videos
+       FROM services_media WHERE service_id = $1`,
+      [serviceId],
+    );
+    if (isImage && existing.rows[0].images >= 3) {
+      return res.status(409).json({ message: "A service can have at most 3 images. Remove one first." });
+    }
+    if (isVideo && existing.rows[0].videos >= 1) {
+      return res.status(409).json({ message: "A service can have only 1 video. Remove it first." });
+    }
+    if (isVideo) {
+      // Only one video row is allowed per service, so a rejected one must make way.
+      await pool.query(`DELETE FROM services_media WHERE service_id = $1 AND media_type = 'video' AND approval_status = 'rejected'`, [serviceId]);
+    }
 
     const uploadResult = await uploadBufferToS3(
       file.buffer,
@@ -2623,10 +2792,10 @@ export const uploadServiceMediaController = async (
     const isPrimary = parseInt(countRes.rows[0].count, 10) === 0 && isImage;
 
     const mediaRes = await pool.query(
-      `INSERT INTO services_media (service_id, media_url, s3_key, media_type, is_primary, approval_status, created_at)
-             VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+      `INSERT INTO services_media (service_id, media_url, s3_key, media_type, is_primary, approval_status, created_by_user_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending', $6, NOW())
              RETURNING *`,
-      [serviceId, uploadResult.url, uploadResult.s3Key, mediaType, isPrimary],
+      [serviceId, uploadResult.url, uploadResult.s3Key, mediaType, isPrimary, authUser.userId],
     );
 
     return res.status(201).json({

@@ -12,6 +12,7 @@ try {
 
 import pool from './DbConnect';
 import { runDatabaseMigrations } from './DbMigrate';
+import { ensureNotificationRules } from './services/notificationRules.service';
 import productRouter from './Routers/Product.router';
 import clientRouter from './Routers/ClientRouter';
 import checkoutRouter from './Routers/Checkout.Router';
@@ -116,6 +117,11 @@ async function startServer() {
             }
         } else {
             console.log("Skipping database migrations on start (RUN_MIGRATIONS_ON_START=false).");
+        }
+        try {
+            await ensureNotificationRules();
+        } catch (rulesError) {
+            console.error("[NotificationRules] Could not update the notification rules:", rulesError);
         }
         startAbandonedReminderJob();
         startAccountDeletionJob();

@@ -131,24 +131,31 @@ export async function createNotification(params: {
     referenceId?: string;
 }): Promise<void> {
     try {
+        // A check constraint must never lose a notification, so a rejected value falls back to a plain one.
+        let type = params.type;
+        let referenceType = params.referenceType || null;
+        let referenceId = params.referenceId || null;
         let result;
-        try {
-            result = await pool.query(
-                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
-                [params.userId, params.type, params.title, params.body, params.referenceType || null, params.referenceId || null]
-            );
-        } catch (dbErr: any) {
-            console.warn(`[createNotification] Initial insert failed (${dbErr.message}), retrying with general fallback...`);
-            result = await pool.query(
-                `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
-                 VALUES ($1, 'general', $2, $3, $4, $5)
-                 RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
-                [params.userId, params.title, params.body, params.referenceType || null, params.referenceId || null]
-            );
+        for (let attempt = 0; attempt < 3 && !result; attempt++) {
+            try {
+                result = await pool.query(
+                    `INSERT INTO notifications (user_id, type, title, body, reference_type, reference_id)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     RETURNING id, type, title, body, reference_type, reference_id, is_read, created_at`,
+                    [params.userId, type, params.title, params.body, referenceType, referenceId]
+                );
+            } catch (dbErr: any) {
+                if (attempt === 2 || dbErr?.code !== "23514") throw dbErr;
+                console.error(`[createNotification] ${dbErr.constraint} rejected type "${type}", reference "${referenceType}". Saving a plain notification.`);
+                if (dbErr.constraint === "chk_notification_reference_type") {
+                    referenceType = null;
+                    referenceId = null;
+                } else {
+                    type = "general";
+                }
+            }
         }
-        
+
         if (result && result.rows.length > 0) {
             sendNotificationToUser(params.userId, result.rows[0]);
         }

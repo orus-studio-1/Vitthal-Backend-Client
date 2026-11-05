@@ -5,6 +5,7 @@ import { getPresignedUrlOrOriginal } from "../services/s3.service";
 import { createNotification } from "./Notification.controller";
 import { razorpay } from "../services/razorpay.service";
 import crypto from "crypto";
+import { notifyServiceRequestClosedForOthers } from "../services/serviceRequestNotifications.service";
 
 type AuthUser = { userId: string; role: string; email?: string };
 
@@ -713,6 +714,7 @@ export const createServiceTicket = async (
                 LEFT JOIN (
                     SELECT DISTINCT ON (user_id) user_id, latitude, longitude
                     FROM addresses
+                    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
                     ORDER BY user_id, created_at DESC
                 ) va ON v.user_id = va.user_id
                 WHERE v.approval_status = 'approved'
@@ -728,31 +730,37 @@ export const createServiceTicket = async (
       if (category_id) {
         const categoryParam = vParams.length + 1;
         vParams.push(category_id);
-        vendorQuery += ` AND EXISTS (
+        const offersService = (match: string) => `EXISTS (
+          SELECT 1 FROM vendor_services offered
+          JOIN services offered_service ON offered_service.id = offered.service_id
+          LEFT JOIN service_subcategories offered_sub ON offered_sub.id = offered_service.subcategory_id
+          WHERE offered.vendor_id = v.id AND offered.is_active = true AND offered_service.status = 'approved' AND ${match}
+        )`;
+        vendorQuery += ` AND (EXISTS (
           SELECT 1 FROM vendor_service_category_selections coverage
           WHERE coverage.vendor_id = v.id
             AND coverage.service_category_id = $${categoryParam}
             AND coverage.service_subcategory_id IS NULL
-        )`;
+        ) OR ${offersService(`offered_service.category_id = $${categoryParam}`)})`;
         if (resolvedServiceSubcategoryId) {
           const subcategoryParam = vParams.length + 1;
           vParams.push(resolvedServiceSubcategoryId);
-          vendorQuery += ` AND EXISTS (
+          vendorQuery += ` AND (EXISTS (
             SELECT 1 FROM vendor_service_category_selections coverage
             WHERE coverage.vendor_id = v.id
               AND coverage.service_category_id = $${categoryParam}
               AND coverage.service_subcategory_id = $${subcategoryParam}
-          )`;
+          ) OR ${offersService(`(offered_service.subcategory_id = $${subcategoryParam} OR offered_sub.parent_id = $${subcategoryParam})`)})`;
         }
         if (resolvedServiceSubSubcategoryId) {
           const childParam = vParams.length + 1;
           vParams.push(resolvedServiceSubSubcategoryId);
-          vendorQuery += ` AND EXISTS (
+          vendorQuery += ` AND (EXISTS (
             SELECT 1 FROM vendor_service_category_selections coverage
             WHERE coverage.vendor_id = v.id
               AND coverage.service_category_id = $${categoryParam}
               AND coverage.service_subcategory_id = $${childParam}
-          )`;
+          ) OR ${offersService(`offered_service.subcategory_id = $${childParam}`)})`;
         }
         if (serviceCategoryCode === "freelancer_work") {
           vendorQuery += ` AND EXISTS (SELECT 1 FROM vendor_services freelancer_vs JOIN services freelancer_s ON freelancer_s.id = freelancer_vs.service_id WHERE freelancer_vs.vendor_id = v.id AND freelancer_vs.is_active = true AND freelancer_s.category_id = $${categoryParam})`;
@@ -766,49 +774,31 @@ export const createServiceTicket = async (
       const vendorRes = await pool.query(vendorQuery, vParams);
       let targetVendors = vendorRes.rows;
 
-      if (targetVendors.length > 10) {
-        const clientAddrRes = await pool.query(
+      // Nearest vendors first, measured from where the work is. Vendors with no location go last.
+      const clientAddrRes = await pool.query(
           `SELECT latitude, longitude FROM addresses WHERE user_id = $1 AND latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
           [authUser.userId],
         );
-        const cLat =
-          clientAddrRes.rows[0]?.latitude != null
-            ? Number(clientAddrRes.rows[0].latitude)
-            : null;
-        const cLng =
-          clientAddrRes.rows[0]?.longitude != null
-            ? Number(clientAddrRes.rows[0].longitude)
-            : null;
-
-        if (cLat !== null && cLng !== null && !isNaN(cLat) && !isNaN(cLng)) {
-          targetVendors = targetVendors.map((v) => {
-            const vLat = v.latitude != null ? Number(v.latitude) : null;
-            const vLng = v.longitude != null ? Number(v.longitude) : null;
-            let dist = 99999;
-            if (
-              vLat !== null &&
-              vLng !== null &&
-              !isNaN(vLat) &&
-              !isNaN(vLng)
-            ) {
-              const R = 6371;
-              const dLat = (vLat - cLat) * (Math.PI / 180);
-              const dLng = (vLng - cLng) * (Math.PI / 180);
-              const a =
-                Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                Math.cos(cLat * (Math.PI / 180)) *
-                  Math.cos(vLat * (Math.PI / 180)) *
-                  Math.sin(dLng / 2) *
-                  Math.sin(dLng / 2);
-              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-              dist = R * c;
-            }
-            return { ...v, dist };
-          });
-          targetVendors.sort((a, b) => a.dist - b.dist);
+      const requestLat = Number(safeTicketPayload?.pickup_latitude ?? safeTicketPayload?.latitude ?? clientAddrRes.rows[0]?.latitude);
+      const requestLng = Number(safeTicketPayload?.pickup_longitude ?? safeTicketPayload?.longitude ?? clientAddrRes.rows[0]?.longitude);
+      const distanceKm = (latitude: unknown, longitude: unknown) => {
+        const vendorLat = Number(latitude);
+        const vendorLng = Number(longitude);
+        if (latitude == null || longitude == null || !Number.isFinite(vendorLat) || !Number.isFinite(vendorLng)
+          || !Number.isFinite(requestLat) || !Number.isFinite(requestLng)) {
+          return Number.POSITIVE_INFINITY;
         }
-        targetVendors = targetVendors.slice(0, 10);
-      }
+        const toRadians = Math.PI / 180;
+        const dLat = (vendorLat - requestLat) * toRadians;
+        const dLng = (vendorLng - requestLng) * toRadians;
+        const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(requestLat * toRadians) * Math.cos(vendorLat * toRadians) * Math.sin(dLng / 2) ** 2;
+        return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      };
+      targetVendors = targetVendors
+        .map((vendor) => ({ ...vendor, dist: distanceKm(vendor.latitude, vendor.longitude) }))
+        .sort((first, second) => first.dist - second.dist)
+        .slice(0, 10);
 
       const jobTitleText = ticket_payload?.job_title || "Service Request";
       for (const v of targetVendors) {
@@ -1145,23 +1135,7 @@ export const acceptTicketQuote = async (
       }).catch((err) => console.error("Error notifying accepted vendor:", err));
     }
 
-    // Notify other vendors that request has been claimed by another vendor
-    const otherQuotesRes = await pool.query(
-      `SELECT DISTINCT v.user_id FROM service_ticket_quotations stq JOIN vendors v ON v.id = stq.vendor_id WHERE stq.ticket_id = $1 AND stq.vendor_id != $2`,
-      [id, selectedQuote.vendor_id],
-    );
-    for (const row of otherQuotesRes.rows) {
-      if (row.user_id) {
-        await createNotification({
-          userId: row.user_id,
-          type: "quotation_rejected",
-          title: "Service Request Claimed",
-          body: `The service request "${result.rows[0].ticket_payload?.job_title || "Service Ticket"}" has been claimed and accepted by another vendor. Thank you for your response.`,
-          referenceType: "service_ticket",
-          referenceId: ticketIdStr,
-        }).catch((err) => console.error("Error notifying other vendor:", err));
-      }
-    }
+    await notifyServiceRequestClosedForOthers(ticketIdStr as string, selectedQuote.vendor_id);
 
     return res.status(200).json({
       success: true,
@@ -1354,6 +1328,7 @@ export const verifyMaintenancePayment = async (
         console.error("Error notifying maintenance vendor:", error),
       );
     }
+    await notifyServiceRequestClosedForOthers(String(id), quote.rows[0].vendor_id);
     return res.status(200).json({
       success: true,
       message: "Payment verified and quotation accepted.",
@@ -1573,6 +1548,7 @@ export const verifyJobInquiryPayment = async (
         ],
       );
       await client.query("COMMIT");
+      if (quote.vendor_id) await notifyServiceRequestClosedForOthers(id, quote.vendor_id);
       return res
         .status(200)
         .json({

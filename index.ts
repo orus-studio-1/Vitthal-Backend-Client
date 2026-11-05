@@ -12,7 +12,7 @@ try {
 
 import pool from './DbConnect';
 import { runDatabaseMigrations } from './DbMigrate';
-import { ensureNotificationRules } from './services/notificationRules.service';
+import { ensureDispatchColumnsOptional, ensureNotificationRules } from './services/notificationRules.service';
 import productRouter from './Routers/Product.router';
 import clientRouter from './Routers/ClientRouter';
 import checkoutRouter from './Routers/Checkout.Router';
@@ -122,6 +122,11 @@ async function startServer() {
             await ensureNotificationRules();
         } catch (rulesError) {
             console.error("[NotificationRules] Could not update the notification rules:", rulesError);
+        }
+        try {
+            await ensureDispatchColumnsOptional();
+        } catch (columnsError) {
+            console.error("[DispatchColumns] Could not update the dispatch columns:", columnsError);
         }
         startAbandonedReminderJob();
         startAccountDeletionJob();

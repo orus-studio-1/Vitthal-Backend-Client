@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import pool from "../DbConnect";
 import { sendDeliveredOrderInvoiceEmail } from "../helpers/emailService.helper";
+import { notifyOrderEvent } from "../services/orderNotifications.service";
 import { sendExpoPushNotification } from "../services/pushNotification.service";
 import { razorpay } from "../services/razorpay.service";
 import QRCode from "qrcode";
@@ -501,6 +502,7 @@ export const postHandoverScanController = async (req: Request, res: Response): P
         }
 
         await client.query("COMMIT");
+        if (!isNextHubAvailable) void notifyOrderEvent(orderId, "at_final_hub");
 
         if (rider.push_token) {
             void sendExpoPushNotification({
@@ -1192,6 +1194,7 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
         );
 
         await client.query("COMMIT");
+        void notifyOrderEvent(orderId, "delivered");
         sendInvoiceEmailInBackground({
                 customerName: orderRes.rows[0].customer_name,
                 customerEmail: orderRes.rows[0].customer_email,
@@ -1589,6 +1592,7 @@ export const postRiderConfirmPickupController = async (req: Request, res: Respon
         );
 
         await client.query("COMMIT");
+        void notifyOrderEvent(orderId, "picked_up");
         return res.status(200).json({
             message: "Pickup confirmed! Package is now in transit to the fulfillment center.",
             data: { orderId, status: 'shipped' }
@@ -2300,6 +2304,7 @@ export const verifyDeliveryController = async (
         }
 
         await client.query("COMMIT");
+        void notifyOrderEvent(orderId, "delivered");
 
         sendInvoiceEmailInBackground({
                 customerName: order.customer_name,

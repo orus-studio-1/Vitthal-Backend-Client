@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { razorpay } from "../services/razorpay.service";
 import crypto from "crypto";
+import { notifyOrderEvent, notifyServiceBookingPlaced } from "../services/orderNotifications.service";
 
 export const placeOrderController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
@@ -99,6 +100,7 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         const userProfile = userProfileQuery.rows[0];
 
         const createdOrderIds: string[] = [];
+        const createdBookingIds: string[] = [];
 
         for (const vendorId in itemsByVendor) {
             const vendorItems = itemsByVendor[vendorId];
@@ -153,18 +155,22 @@ export const placeOrderController = async (req: Request, res: Response): Promise
         // Service bookings via COD
         for (const item of serviceCartItems) {
             const amount = Number(item.price_at_added) * Number(item.quantity);
-            await pool.query(
+            const bookingResult = await pool.query(
                 `INSERT INTO service_bookings (
                     user_id, vendor_id, vendor_service_id, total_amount, status, payment_status, booking_notes
-                ) VALUES ($1, $2, $3, $4, 'pending', 'cod_pending', 'Cash on Delivery')`,
+                ) VALUES ($1, $2, $3, $4, 'pending', 'cod_pending', 'Cash on Delivery')
+                RETURNING id`,
                 [userId, item.vendor_id, item.vendor_service_id, amount]
             );
+            createdBookingIds.push(bookingResult.rows[0].id);
         }
 
         await pool.query(`DELETE FROM cart_items WHERE cart_id = $1`, [cartId]);
         await pool.query(`DELETE FROM service_cart_items WHERE cart_id = $1`, [cartId]);
 
         await pool.query('COMMIT');
+        for (const orderId of createdOrderIds) void notifyOrderEvent(orderId, "placed");
+        for (const bookingId of createdBookingIds) void notifyServiceBookingPlaced(bookingId);
         return res.status(200).json({
             message: "Order placed successfully! Pay on delivery.",
             orderIds: createdOrderIds,
@@ -510,6 +516,8 @@ export const verifyPaymentController = async (req: Request, res: Response): Prom
         }
 
         await pool.query('COMMIT');
+        for (const orderId of order_ids || []) void notifyOrderEvent(orderId, "placed");
+        for (const bookingId of booking_ids || []) void notifyServiceBookingPlaced(bookingId);
         return res.status(200).json({ message: "Payment verified and order placed successfully!" });
 
     } catch (error) {

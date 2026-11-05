@@ -87,3 +87,27 @@ export async function ensureNotificationRules(): Promise<void> {
     client.release();
   }
 }
+
+const OPTIONAL_DISPATCH_COLUMNS = [
+  "lr_number",
+  "eway_bill_number",
+  "transporter_name",
+  "eway_bill_url",
+  "delivery_challan_url",
+  "invoice_url",
+  "lr_document_url",
+];
+
+/** The dispatch form needs only one detail or document, but production required some of these columns. */
+export async function ensureDispatchColumnsOptional(): Promise<void> {
+  const required = await pool.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'order_dispatch_details' AND is_nullable = 'NO' AND column_name = ANY($1::text[])`,
+    [OPTIONAL_DISPATCH_COLUMNS],
+  );
+  for (const row of required.rows) {
+    await pool.query(`ALTER TABLE order_dispatch_details ALTER COLUMN ${row.column_name} DROP NOT NULL`);
+    console.log(`[DispatchColumns] ${row.column_name} is now optional.`);
+  }
+  if (required.rows.length === 0) console.log("[DispatchColumns] Already optional.");
+}

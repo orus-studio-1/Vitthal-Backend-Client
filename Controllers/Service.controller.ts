@@ -10,6 +10,7 @@ import {
   deleteFromS3,
 } from "../services/s3.service";
 import { createNotification } from "./Notification.controller";
+import { notifyServiceRequestClosedForOthers } from "../services/serviceRequestNotifications.service";
 import {
   generateBaseServiceQuotationDocument,
   generateVendorServiceQuotationDocument,
@@ -1006,7 +1007,7 @@ export const getServiceQuotationDetailController = async (
                 sender_role: "client" as any,
                 action: "reject" as any,
                 offer_price: null as any,
-                note: "Client has accepted another offer. The ticket room is closed.",
+                note: "This request was accepted by another vendor and is now closed.",
                 quote_breakdown: {},
                 reason: null as any,
                 created_at: t.updated_at || t.created_at,
@@ -1023,7 +1024,7 @@ export const getServiceQuotationDetailController = async (
                 sender_role: "client" as any,
                 action: "reject" as any,
                 offer_price: null as any,
-                note: "Client has accepted another offer. The ticket room is closed.",
+                note: "This request was accepted by another vendor and is now closed.",
                 quote_breakdown: {},
                 reason: null as any,
                 created_at: t.updated_at || t.created_at,
@@ -1035,8 +1036,12 @@ export const getServiceQuotationDetailController = async (
               computedStatus = "closed_accepted_by_other";
             }
           } else if (t.status === "broadcasted" || t.status === "quoted") {
-            computedStatus =
-              quotesResult.rows.length > 0
+            const declined = (Array.isArray(t.timeline_logs) ? t.timeline_logs : []).some(
+              (log: any) => log?.status === "vendor_declined" && log?.vendor_id === vendorId,
+            );
+            computedStatus = declined
+              ? "vendor_rejected"
+              : quotesResult.rows.length > 0
                 ? "vendor_offered"
                 : "pending_vendor";
           }
@@ -1224,6 +1229,13 @@ export const respondServiceQuotationController = async (
         const t = ticketResult.rows[0];
         const resolvedVendorId =
           vendorId || (await getVendorIdByUserId(authUser.userId));
+        const isVendorResponse = authUser.role === "vendor" && Boolean(resolvedVendorId);
+        const takenByAnotherVendor = Boolean(t.vendor_id && t.vendor_id !== resolvedVendorId);
+
+        if (isVendorResponse && takenByAnotherVendor) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({ message: "This request has already been accepted by another vendor." });
+        }
 
         if (action === "offer" || action === "counter") {
           if (!resolvedVendorId) {
@@ -1403,9 +1415,39 @@ export const respondServiceQuotationController = async (
             .json({ message: "Quotation offer submitted successfully." });
         }
 
+        if (action === "accept" && isVendorResponse) {
+          const claimed = await client.query(
+            `UPDATE service_tickets
+                         SET status = 'accepted', vendor_id = $1, total_amount = COALESCE($2, total_amount), updated_at = NOW()
+                         WHERE id = $3 AND (vendor_id IS NULL OR vendor_id = $1)
+                           AND status NOT IN ('accepted', 'in_progress', 'completed', 'cancelled')
+                         RETURNING id`,
+            [resolvedVendorId, offerPrice ? Number(offerPrice) : null, id],
+          );
+          if (claimed.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return res.status(409).json({ message: "This request has already been accepted by another vendor." });
+          }
+          await client.query("COMMIT");
+          await notifyServiceRequestClosedForOthers(String(id), resolvedVendorId as string);
+
+          if (t.client_user_id) {
+            await createNotification({
+              userId: t.client_user_id,
+              type: "quotation_accepted",
+              title: "Vendor accepted your request",
+              body: `A vendor accepted your service request "${t.ticket_payload?.job_title || t.ticket_number || "Service Request"}".`,
+              referenceType: "service_ticket",
+              referenceId: id as string,
+            }).catch((err) => console.error("[Notification] Failed to notify client of accept:", err));
+          }
+
+          return res.status(200).json({ message: "Service request accepted." });
+        }
+
         if (action === "accept") {
           await client.query(
-            `UPDATE service_tickets 
+            `UPDATE service_tickets
                          SET status = 'accepted', total_amount = COALESCE($1, total_amount), updated_at = NOW()
                          WHERE id = $2`,
             [offerPrice ? Number(offerPrice) : null, id],
@@ -1434,9 +1476,20 @@ export const respondServiceQuotationController = async (
             .json({ message: "Service quotation accepted." });
         }
 
+        if (action === "reject" && isVendorResponse && !t.vendor_id) {
+          await client.query(
+            `UPDATE service_tickets
+                         SET timeline_logs = COALESCE(timeline_logs, '[]'::jsonb) || $1::jsonb, updated_at = NOW()
+                         WHERE id = $2`,
+            [JSON.stringify([{ status: "vendor_declined", vendor_id: resolvedVendorId, note: reason || null, timestamp: new Date().toISOString() }]), id],
+          );
+          await client.query("COMMIT");
+          return res.status(200).json({ message: "You declined this service request." });
+        }
+
         if (action === "reject") {
           await client.query(
-            `UPDATE service_tickets 
+            `UPDATE service_tickets
                          SET status = 'cancelled', updated_at = NOW()
                          WHERE id = $1`,
             [id],
@@ -1597,8 +1650,8 @@ export const respondServiceQuotationController = async (
           await createNotification({
             userId: row.vendor_user_id,
             type: "quotation_rejected",
-            title: "Service request claimed by another vendor",
-            body: "A nearby vendor's offer has been accepted by the client. This request is now closed.",
+            title: "Request accepted by another vendor",
+            body: "This service request has been accepted by another vendor and is now closed. Thank you for your interest. New requests matching your services will keep reaching you.",
             referenceType: "service_quotation",
             referenceId: row.id,
           });
@@ -2159,6 +2212,9 @@ export const getVendorServiceQuotationsController = async (
       `SELECT
                 st.id,
                 CASE 
+                    WHEN st.status IN ('broadcasted', 'quoted')
+                         AND COALESCE(st.timeline_logs, '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('status', 'vendor_declined', 'vendor_id', CAST($1::uuid AS text)))
+                      THEN 'vendor_rejected'
                     WHEN st.status = 'broadcasted' THEN 'pending_vendor'
                     WHEN st.status = 'quoted' THEN 'vendor_offered'
                     WHEN st.status = 'accepted' AND st.vendor_id = $1 THEN 'client_accepted'
@@ -2193,8 +2249,7 @@ export const getVendorServiceQuotationsController = async (
              LEFT JOIN service_subcategories service_child ON service_child.id = st.service_sub_subcategory_id
              WHERE (st.vendor_id = $1
                     OR st.id IN (SELECT ticket_id FROM service_ticket_quotations WHERE vendor_id = $1)
-                    OR (st.vendor_id IS NULL
-                        AND EXISTS (
+                    OR (EXISTS (
                           SELECT 1
                           FROM notifications request_notice
                           JOIN vendors notified_vendor ON notified_vendor.user_id = request_notice.user_id

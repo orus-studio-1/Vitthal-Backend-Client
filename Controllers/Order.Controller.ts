@@ -5,6 +5,7 @@ import {
   uploadBufferToS3,
 } from "../services/s3.service"; // NOTE: adapt uploadBufferToS3 to your real S3 upload function
 import { createNotification } from "./Notification.controller";
+import { notifyOrderEvent } from "../services/orderNotifications.service";
 import { generateInvoicePDFBuffer } from "../services/invoiceDocument.service";
 
 // Helper: resolve S3 image URLs inside order items arrays
@@ -684,6 +685,9 @@ export const updateOrderStatusController = async (
           `Status updated to ${status} by vendor`,
       ],
     );
+
+    if (status.toLowerCase() === "processing") void notifyOrderEvent(id, "accepted");
+    if (status.toLowerCase() === "cancelled") void notifyOrderEvent(id, "cancelled_by_vendor");
 
     // Create fulfillment tracking entry for vendor acceptance
     if (status.toLowerCase() === "processing") {

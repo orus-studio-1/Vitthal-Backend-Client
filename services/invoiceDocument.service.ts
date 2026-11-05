@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import pool from "../DbConnect";
+import { loadPdfMake } from "./pdfMake.service";
 
 export type InvoiceDocumentType = "challan" | "tax-invoice";
 
@@ -276,9 +277,7 @@ export async function buildInvoicePDFBufferFromData(
     documentType: InvoiceDocumentType,
     logoDataUri: string,
 ): Promise<Buffer> {
-    const PdfPrinter = (await import("pdfmake/js/Printer.js" as any)).default;
-    const virtualFs = (await import("pdfmake/js/virtual-fs.js" as any)).default;
-    const URLResolver = (await import("pdfmake/js/URLResolver.js" as any)).default;
+    const { PdfPrinter, virtualFs, URLResolver } = await loadPdfMake();
     const printer = new PdfPrinter({ Helvetica: { normal: "Helvetica", bold: "Helvetica-Bold", italics: "Helvetica-Oblique", bolditalics: "Helvetica-Bold" } }, virtualFs, new URLResolver(virtualFs));
     const chunks: InvoiceDocumentItem[][] = [];
     const pageSize = 6;

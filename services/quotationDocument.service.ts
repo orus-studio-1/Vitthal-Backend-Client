@@ -1,6 +1,7 @@
 // pdfmake is used for PDF generation
 import pool from "../DbConnect";
 import { uploadBufferToS3 } from "./s3.service";
+import { loadPdfMake } from "./pdfMake.service";
 
 // ─── Company Constants ───────────────────────────────────────────────
 const COMPANY_NAME = "MTWO Groups";
@@ -79,9 +80,7 @@ async function getLogoBase64(): Promise<string> {
 
 // ─── Generate PDF using pdfmake ───────────────────────────────────────
 export async function generatePDFBuffer(data: QuotationDocumentData): Promise<Buffer> {
-    const PdfPrinter = (await import("pdfmake/js/Printer.js" as any)).default;
-    const virtualFs = (await import("pdfmake/js/virtual-fs.js" as any)).default;
-    const URLResolver = (await import("pdfmake/js/URLResolver.js" as any)).default;
+    const { PdfPrinter, virtualFs, URLResolver } = await loadPdfMake();
     const urlResolver = new URLResolver(virtualFs);
     const fonts = {
         Helvetica: {

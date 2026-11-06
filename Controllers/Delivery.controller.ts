@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import pool from "../DbConnect";
 import { sendDeliveredOrderInvoiceEmail } from "../helpers/emailService.helper";
 import { notifyOrderEvent } from "../services/orderNotifications.service";
+import { recordVendorPayoutDue } from "../services/vendorPayouts.service";
 import { sendExpoPushNotification } from "../services/pushNotification.service";
 import { razorpay } from "../services/razorpay.service";
 import QRCode from "qrcode";
@@ -1182,6 +1183,7 @@ export const postRiderDeliverController = async (req: Request, res: Response): P
                 data: { orderId },
             });
         }
+        await recordVendorPayoutDue(client, orderId);
 
         // Insert delivered tracking log — note COD collection method if applicable
         const trackingNote = wasCod
@@ -2170,6 +2172,7 @@ export const verifyDeliveryController = async (
             await client.query("ROLLBACK");
             return res.status(409).json({ message: "Order has already been delivered." });
         }
+        await recordVendorPayoutDue(client, orderId);
 
         // ---------------------------------------------------------
         // 7. Delivery history

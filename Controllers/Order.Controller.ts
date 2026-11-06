@@ -1238,8 +1238,8 @@ export const getVendorPayoutsController = async (
                 COALESCE(o.customer_name, u.name) AS customer_name,
                 v.company_name AS vendor_name,
                 v.credit_cycle AS vendor_credit_cycle,
-                -- Successful client payments total
-                COALESCE((
+                -- Successful client payments total (cash collected at delivery counts in full)
+                GREATEST(COALESCE((
                     SELECT SUM(p.amount)
                     FROM payments p
                     WHERE p.status = 'successful'
@@ -1247,9 +1247,9 @@ export const getVendorPayoutsController = async (
                           vp.order_id = ANY(p.order_ids) 
                           OR p.quotation_request_id = (SELECT id FROM quotation_requests WHERE order_id = vp.order_id LIMIT 1)
                       )
-                ), 0) AS client_paid_amount,
+                ), 0), CASE WHEN o.status = 'delivered' AND o.payment_status = 'paid' THEN o.total_amount ELSE 0 END) AS client_paid_amount,
                 -- Successful client payments split percentage sum
-                COALESCE((
+                GREATEST(COALESCE((
                     SELECT SUM(p.split_percentage)
                     FROM payments p
                     WHERE p.status = 'successful'
@@ -1257,7 +1257,7 @@ export const getVendorPayoutsController = async (
                           vp.order_id = ANY(p.order_ids) 
                           OR p.quotation_request_id = (SELECT id FROM quotation_requests WHERE order_id = vp.order_id LIMIT 1)
                       )
-                ), 0) AS client_paid_percentage
+                ), 0), CASE WHEN o.status = 'delivered' AND o.payment_status = 'paid' THEN 100 ELSE 0 END) AS client_paid_percentage
             FROM vendor_payouts vp
             JOIN orders o ON o.id = vp.order_id
             JOIN vendors v ON v.id = vp.vendor_id
@@ -1387,8 +1387,11 @@ export const requestVendorPayoutController = async (
 
       const order = orderResult.rows[0];
       const totalAmount = Number(order.total_amount);
-      const paidAmount = Number(order.successful_amount);
-      const paidPercentage = Number(order.successful_percentage);
+      // Cash collected by the rider at delivery has no online payment record, so a
+      // delivered order marked paid counts as fully paid.
+      const settledAtDelivery = order.status === "delivered" && order.payment_status === "paid";
+      const paidAmount = settledAtDelivery ? Math.max(Number(order.successful_amount), totalAmount) : Number(order.successful_amount);
+      const paidPercentage = settledAtDelivery ? Math.max(Number(order.successful_percentage), 100) : Number(order.successful_percentage);
       const dueDate = order.due_date ? new Date(order.due_date) : null;
       if (
         order.legacy_payout_status !== "pending" ||

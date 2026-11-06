@@ -2,6 +2,11 @@ import type { Request, Response } from "express";
 import pool from "../DbConnect";
 import { sendNotificationToUser } from "../socket";
 
+// Product quotations are handled on the vendor website, so the vendor app asks to leave them out.
+const PRODUCT_QUOTATION_FILTER = ` AND NOT (COALESCE(reference_type, '') = 'quotation'
+    OR (reference_type IS NULL AND type ILIKE '%quotation%' AND COALESCE(title, '') NOT ILIKE '%service%'))`;
+const notificationFilter = (req: Request) => (req.query.exclude === "product_quotations" ? PRODUCT_QUOTATION_FILTER : "");
+
 export const getNotificationsController = async (req: Request, res: Response): Promise<Response> => {
     const authUser = (req as any).user;
     if (!authUser?.userId) {
@@ -10,10 +15,11 @@ export const getNotificationsController = async (req: Request, res: Response): P
 
     const limit = Math.min(Number(req.query.limit) || 20, 100);
     const cursor = req.query.cursor as string | undefined; // ISO timestamp cursor
+    const filter = notificationFilter(req);
 
     try {
         const countResult = await pool.query(
-            `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_read = FALSE) AS unread FROM notifications WHERE user_id = $1`,
+            `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_read = FALSE) AS unread FROM notifications WHERE user_id = $1${filter}`,
             [authUser.userId]
         );
 
@@ -23,7 +29,7 @@ export const getNotificationsController = async (req: Request, res: Response): P
             result = await pool.query(
                 `SELECT id, type, title, body, reference_type, reference_id, is_read, created_at
                  FROM notifications
-                 WHERE user_id = $1 AND created_at < $2
+                 WHERE user_id = $1 AND created_at < $2${filter}
                  ORDER BY created_at DESC
                  LIMIT $3`,
                 [authUser.userId, cursor, limit]
@@ -33,7 +39,7 @@ export const getNotificationsController = async (req: Request, res: Response): P
             result = await pool.query(
                 `SELECT id, type, title, body, reference_type, reference_id, is_read, created_at
                  FROM notifications
-                 WHERE user_id = $1
+                 WHERE user_id = $1${filter}
                  ORDER BY created_at DESC
                  LIMIT $2`,
                 [authUser.userId, limit]
@@ -67,7 +73,7 @@ export const getUnreadCountController = async (req: Request, res: Response): Pro
 
     try {
         const result = await pool.query(
-            `SELECT COUNT(*) AS unread FROM notifications WHERE user_id = $1 AND is_read = FALSE`,
+            `SELECT COUNT(*) AS unread FROM notifications WHERE user_id = $1 AND is_read = FALSE${notificationFilter(req)}`,
             [authUser.userId]
         );
 

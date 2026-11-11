@@ -1116,7 +1116,7 @@ model subcategories {
 model users {
   id                                                                     String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   name                                                                   String
-  email                                                                  String                       @unique @db.Citext
+  email                                                                  String                       @db.Citext
   password_hash                                                          String
   role                                                                   user_role                    @default(client)
   is_active                                                              Boolean                      @default(true)
@@ -1172,6 +1172,8 @@ model users {
   vendor_reviews                                                         vendor_reviews[]
   vendors                                                                vendors?
   wishlists                                                              wishlists?
+
+  @@unique([email, role], map: "users_email_role_key")
 }
 
 model vendor_categories {

@@ -9,6 +9,31 @@ import { uploadBufferToS3, BUCKET_NAME } from "../services/s3.service";
 import { encryptPayoutAccountNumber } from "../services/payoutBankEncryption.service";
 
 const validUserRoles = new Set(["client", "worker", "vendor", "admin", "super_admin", "fulfillment_center", "delivery_agent"]);
+
+/**
+ * One email can hold a separate account in each app (client, vendor, worker), so every
+ * email lookup names the app it is for. Apps send it as `role` or the x-request-from header.
+ */
+function requestedAccountRole(req: Request): string | null {
+    const fromBody = typeof req.body?.role === "string" ? req.body.role : "";
+    const fromHeader = typeof req.headers["x-request-from"] === "string" ? req.headers["x-request-from"] : "";
+    const role = String(fromBody || fromHeader).trim().toLowerCase();
+    return validUserRoles.has(role) ? role : null;
+}
+
+type AccountLookup = { account: any | null; ambiguous: boolean };
+
+/** Finds the account an email refers to in the requesting app. Without an app, only an email with a single account resolves. */
+async function findAccountByEmail(email: string, role: string | null, columns: string): Promise<AccountLookup> {
+    if (role) {
+        const result = await pool.query(`SELECT ${columns} FROM users WHERE email = $1 AND role = $2 LIMIT 1`, [email, role]);
+        return { account: result.rows[0] || null, ambiguous: false };
+    }
+    const result = await pool.query(`SELECT ${columns} FROM users WHERE email = $1 LIMIT 2`, [email]);
+    return { account: result.rows.length === 1 ? result.rows[0] : null, ambiguous: result.rows.length > 1 };
+}
+
+const ACCOUNT_TYPE_REQUIRED = "This email has more than one account. Please continue from the app you registered in.";
 const gstDocumentMimeTypes = new Set(["application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp"]);
 
 function normalizeRequiredText(value: unknown) {
@@ -79,8 +104,8 @@ async function uploadRegistrationFile(file: Express.Multer.File | undefined, opt
 
 export async function registerUser(req: Request, res: Response): Promise<Response> {
 
-    const { name, email, password, role: requestedRole } = req.body;
-    const role = typeof requestedRole === "string" && requestedRole.trim() ? requestedRole.trim() : "client";
+    const { name, email, password } = req.body;
+    const role = requestedAccountRole(req) || "client";
 
     if (!name || !email || !password) {
         return res.status(400).json({ message: 'All fields are required' });
@@ -99,22 +124,22 @@ export async function registerUser(req: Request, res: Response): Promise<Respons
     }
 
     try {
-        // Check if user already exists
-        const existingUserResult = await pool.query('SELECT id, is_verified FROM users WHERE email = $1', [email]);
+        // Only an account in the same app blocks registering; the same email may be used in the other apps.
+        const existingUserResult = await pool.query('SELECT id, is_verified FROM users WHERE email = $1 AND role = $2', [email, role]);
 
         if (existingUserResult.rows.length > 0) {
             const existingUser = existingUserResult.rows[0];
 
             if (existingUser.is_verified) {
-                return res.status(409).json({ message: 'User with this email already exists' });
+                return res.status(409).json({ message: `A ${role} account with this email already exists. Please log in instead.` });
             }
 
             // User exists but is not verified — update details and resend OTP
 
             const hashedPassword = await bcrypt.hash(password, 10);
             await pool.query(
-                'UPDATE users SET name = $1, password_hash = $2, role = $3 WHERE id = $4',
-                [name, hashedPassword, role, existingUser.id]
+                'UPDATE users SET name = $1, password_hash = $2 WHERE id = $3',
+                [name, hashedPassword, existingUser.id]
             );
 
             // Generate new OTP
@@ -177,7 +202,7 @@ export async function registerUser(req: Request, res: Response): Promise<Respons
     catch (error) {
         const dbError = error as DatabaseError;
         if (dbError.code === '23505') {
-            return res.status(409).json({ message: 'User with this email already exists' });
+            return res.status(409).json({ message: 'An account with this email already exists. Please log in instead.' });
         }
         console.error('Error registering user:', error);
         return res.status(500).json({ message: 'Internal server error' });
@@ -193,16 +218,18 @@ export async function loginUser(req: Request, res: Response): Promise<Response> 
     }
 
     try {
-        const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        const result = await pool.query('SELECT * FROM users WHERE email = $1 AND role = $2', [email, role]);
 
         const user = result.rows[0];
 
         if (!user) {
-            return res.status(401).json({ message: 'Invalid email' });
+            const otherAccount = await pool.query('SELECT 1 FROM users WHERE email = $1 LIMIT 1', [email]);
+            return res.status(401).json({
+                message: otherAccount.rows.length
+                    ? `No ${role} account is registered with this email. Please register to create one.`
+                    : 'Invalid email',
+            });
         }
-
-        if (user.role != role)
-            return res.status(401).json({ message: `This email is associated with ${user.role} and you are trying to log in as ${role}! That is not allowed.` });
 
         if (!user.is_verified) {
             return res.status(403).json({ message: 'Please verify your email before logging in.' });
@@ -386,13 +413,13 @@ export const OTPSendingController = async (req: Request, res: Response): Promise
     }
 
     try {
-        // Check if user exists
-        const userResult = await pool.query('SELECT id, name FROM users WHERE email = $1', [email]);
-        if (userResult.rows.length === 0) {
+        const { account: user, ambiguous } = await findAccountByEmail(email, requestedAccountRole(req), 'id, name');
+        if (ambiguous) {
+            return res.status(400).json({ message: ACCOUNT_TYPE_REQUIRED });
+        }
+        if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
-
-        const user = userResult.rows[0];
 
         // Generate 6-digit OTP
         const plainOTP = Math.floor(100000 + Math.random() * 900000).toString();
@@ -404,8 +431,8 @@ export const OTPSendingController = async (req: Request, res: Response): Promise
 
         // Save hashed OTP and expiry to database
         await pool.query(
-            'UPDATE users SET OTP = $1, OTP_Expiry = $2 WHERE email = $3',
-            [hashedOTP, expiryTime, email]
+            'UPDATE users SET OTP = $1, OTP_Expiry = $2 WHERE id = $3',
+            [hashedOTP, expiryTime, user.id]
         );
 
         const emailResult = await sendOTPEmail(user.name, email, plainOTP, 10);
@@ -437,17 +464,14 @@ export const OTPVerificationController = async (req: Request, res: Response): Pr
     }
 
     try {
-        // Get user with OTP and expiry
-        const userResult = await pool.query(
-            'SELECT id, OTP, OTP_Expiry FROM users WHERE email = $1',
-            [email]
-        );
-
-        if (userResult.rows.length === 0) {
+        const { account: user, ambiguous } = await findAccountByEmail(email, requestedAccountRole(req), 'id, OTP, OTP_Expiry');
+        if (ambiguous) {
+            return res.status(400).json({ message: ACCOUNT_TYPE_REQUIRED });
+        }
+        if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        const user = userResult.rows[0];
         const storedHashedOTP = user.otp;
         const otpExpiry = user.otp_expiry;
 
@@ -460,8 +484,8 @@ export const OTPVerificationController = async (req: Request, res: Response): Pr
         if (new Date() > new Date(otpExpiry)) {
             // Clear expired OTP
             await pool.query(
-                'UPDATE users SET OTP = NULL, OTP_Expiry = NULL WHERE email = $1',
-                [email]
+                'UPDATE users SET OTP = NULL, OTP_Expiry = NULL WHERE id = $1',
+                [user.id]
             );
             return res.status(400).json({ message: 'OTP has expired. Please request a new OTP.' });
         }
@@ -476,8 +500,8 @@ export const OTPVerificationController = async (req: Request, res: Response): Pr
         // Set OTP = 'VERIFIED' with a 10-minute expiry window for password reset
         const verificationExpiry = new Date(Date.now() + 10 * 60 * 1000);
         await pool.query(
-            'UPDATE users SET OTP = $1, OTP_Expiry = $2 WHERE email = $3',
-            ['VERIFIED', verificationExpiry, email]
+            'UPDATE users SET OTP = $1, OTP_Expiry = $2 WHERE id = $3',
+            ['VERIFIED', verificationExpiry, user.id]
         );
 
         return res.status(200).json({
@@ -499,11 +523,18 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
     }
 
     try {
-        // Get user with OTP, expiry, and verification status
-        const userResult = await pool.query(
-            'SELECT id, name, email, role, OTP, OTP_Expiry, is_verified FROM users WHERE email = $1',
-            [email]
-        );
+        // The account being registered in this app; without an app, the newest unverified one.
+        const accountRole = requestedAccountRole(req);
+        const userResult = accountRole
+            ? await pool.query(
+                'SELECT id, name, email, role, OTP, OTP_Expiry, is_verified FROM users WHERE email = $1 AND role = $2',
+                [email, accountRole]
+            )
+            : await pool.query(
+                `SELECT id, name, email, role, OTP, OTP_Expiry, is_verified FROM users
+                 WHERE email = $1 ORDER BY is_verified ASC, created_at DESC LIMIT 1`,
+                [email]
+            );
 
         if (userResult.rows.length === 0) {
             return res.status(404).json({ message: 'User not found' });
@@ -526,8 +557,8 @@ export const verifyRegisteredUser = async (req: Request, res: Response): Promise
         // Check if OTP has expired
         if (new Date() > new Date(otpExpiry)) {
             await pool.query(
-                'UPDATE users SET OTP = NULL, OTP_Expiry = NULL WHERE email = $1',
-                [email]
+                'UPDATE users SET OTP = NULL, OTP_Expiry = NULL WHERE id = $1',
+                [user.id]
             );
             return res.status(400).json({ message: 'OTP has expired. Please request a new OTP.' });
         }
@@ -904,17 +935,13 @@ export const resetPasswordController = async (req: Request, res: Response) => {
     }
 
     try {
-        // Retrieve current OTP status
-        const userResult = await pool.query(
-            'SELECT OTP, OTP_Expiry FROM users WHERE email = $1',
-            [email]
-        );
-
-        if (userResult.rows.length === 0) {
+        const { account: user, ambiguous } = await findAccountByEmail(email, requestedAccountRole(req), 'id, OTP, OTP_Expiry');
+        if (ambiguous) {
+            return res.status(400).json({ message: ACCOUNT_TYPE_REQUIRED });
+        }
+        if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
-
-        const user = userResult.rows[0];
         
         // Ensure OTP has been verified
         if (user.otp !== 'VERIFIED') {
@@ -931,8 +958,8 @@ export const resetPasswordController = async (req: Request, res: Response) => {
 
         // Update user password and clear verification status
         await pool.query(
-            'UPDATE users SET password_hash = $1, OTP = NULL, OTP_Expiry = NULL WHERE email = $2',
-            [hashedPassword, email]
+            'UPDATE users SET password_hash = $1, OTP = NULL, OTP_Expiry = NULL WHERE id = $2',
+            [hashedPassword, user.id]
         );
 
         return res.status(200).json({

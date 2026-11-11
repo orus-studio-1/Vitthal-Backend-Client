@@ -111,3 +111,26 @@ export async function ensureDispatchColumnsOptional(): Promise<void> {
   }
   if (required.rows.length === 0) console.log("[DispatchColumns] Already optional.");
 }
+
+/**
+ * Lets one email hold one account per role (client, vendor, worker, ...) instead of one in total.
+ * Existing data already satisfies the new rule, since emails were unique before.
+ */
+export async function ensureEmailUniquePerRole(): Promise<void> {
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        await client.query("CREATE UNIQUE INDEX IF NOT EXISTS users_email_role_key ON users (email, role)");
+        await client.query("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key");
+        await client.query("ALTER TABLE users DROP CONSTRAINT IF EXISTS idx_users_email_unique");
+        await client.query("DROP INDEX IF EXISTS users_email_key");
+        await client.query("DROP INDEX IF EXISTS idx_users_email_unique");
+        await client.query("CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)");
+        await client.query("COMMIT");
+    } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
+    } finally {
+        client.release();
+    }
+}

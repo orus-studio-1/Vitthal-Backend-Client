@@ -12,7 +12,7 @@ try {
 
 import pool from './DbConnect';
 import { runDatabaseMigrations } from './DbMigrate';
-import { ensureDispatchColumnsOptional, ensureNotificationRules } from './services/notificationRules.service';
+import { ensureDispatchColumnsOptional, ensureEmailUniquePerRole, ensureNotificationRules } from './services/notificationRules.service';
 import productRouter from './Routers/Product.router';
 import clientRouter from './Routers/ClientRouter';
 import checkoutRouter from './Routers/Checkout.Router';
@@ -127,6 +127,11 @@ async function startServer() {
             await ensureDispatchColumnsOptional();
         } catch (columnsError) {
             console.error("[DispatchColumns] Could not update the dispatch columns:", columnsError);
+        }
+        try {
+            await ensureEmailUniquePerRole();
+        } catch (emailIndexError) {
+            console.error("[UsersEmail] Could not allow one account per role for an email:", emailIndexError);
         }
         startAbandonedReminderJob();
         startAccountDeletionJob();

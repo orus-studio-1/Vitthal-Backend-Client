@@ -540,6 +540,7 @@ model product_category {
   products                 products[]
   subcategories            subcategories[]
   vendor_categories        vendor_categories[]
+  vendor_category_request_items vendor_category_request_items[]
 }
 
 model service_categories {
@@ -1172,6 +1173,8 @@ model users {
   vendor_reviews                                                         vendor_reviews[]
   vendors                                                                vendors?
   wishlists                                                              wishlists?
+  vendor_category_requests_reviewed                                      vendor_category_requests[]   @relation("vendor_category_requests_reviewer")
+  product_import_batches                                                 product_import_batches[]
 
   @@unique([email, role], map: "users_email_role_key")
 }
@@ -1187,6 +1190,54 @@ model vendor_categories {
   @@unique([vendor_id, category_id], map: "unique_vendor_category_selection")
   @@index([category_id], map: "idx_vendor_categories_category_id")
   @@index([vendor_id], map: "idx_vendor_categories_vendor_id")
+}
+
+/// One Global Catalogue Excel import; file_hash blocks importing the exact same file twice.
+model product_import_batches {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_hash           String
+  file_name           String?
+  row_count           Int      @default(0)
+  imported_count      Int      @default(0)
+  skipped_count       Int      @default(0)
+  failed_count        Int      @default(0)
+  imported_by_user_id String?  @db.Uuid
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+  imported_by         users?   @relation(fields: [imported_by_user_id], references: [id], map: "fk_product_import_batches_user")
+
+  @@index([file_hash], map: "idx_product_import_batches_file_hash")
+}
+
+/// A product vendor's request for extra product categories; each requested category is decided on its own.
+model vendor_category_requests {
+  id                  String                          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendor_id           String                          @db.Uuid
+  reason              String
+  status              String                          @default("pending")
+  admin_note          String?
+  reviewed_by_user_id String?                         @db.Uuid
+  reviewed_at         DateTime?                       @db.Timestamptz(6)
+  created_at          DateTime                        @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime                        @default(now()) @db.Timestamptz(6)
+  vendors             vendors                         @relation(fields: [vendor_id], references: [id], onDelete: Cascade, map: "fk_vendor_category_requests_vendor")
+  reviewer            users?                          @relation("vendor_category_requests_reviewer", fields: [reviewed_by_user_id], references: [id], map: "fk_vendor_category_requests_reviewer")
+  items               vendor_category_request_items[]
+
+  @@index([vendor_id], map: "idx_vendor_category_requests_vendor_id")
+  @@index([status, created_at(sort: Desc)], map: "idx_vendor_category_requests_status")
+}
+
+model vendor_category_request_items {
+  id               String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  request_id       String                   @db.Uuid
+  category_id      String                   @db.Uuid
+  status           String                   @default("pending")
+  created_at       DateTime                 @default(now()) @db.Timestamptz(6)
+  request          vendor_category_requests @relation(fields: [request_id], references: [id], onDelete: Cascade, map: "fk_vendor_category_request_items_request")
+  product_category product_category         @relation(fields: [category_id], references: [id], onDelete: Cascade, map: "fk_vendor_category_request_items_category")
+
+  @@unique([request_id, category_id], map: "unique_vendor_category_request_item")
+  @@index([category_id], map: "idx_vendor_category_request_items_category_id")
 }
 
 model vendor_service_category_selections {
@@ -1465,6 +1516,7 @@ model vendors {
   service_ticket_quotations    service_ticket_quotations[]
   service_tickets              service_tickets[]
   vendor_categories            vendor_categories[]
+  vendor_category_requests     vendor_category_requests[]
   vendor_service_category_selections vendor_service_category_selections[]
   vendor_chat_messages         vendor_chat_messages[]
   vendor_payouts               vendor_payouts[]

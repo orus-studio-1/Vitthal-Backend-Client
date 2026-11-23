@@ -31,6 +31,11 @@ import {
   getMyLogisticsVehicles,
 } from "../Controllers/LogisticsVehicles.controller";
 
+import {
+  getVendorCategoryRequestsController,
+  createVendorCategoryRequestController,
+} from "../Controllers/VendorCategoryRequest.controller";
+
 import { authMiddleware } from "../Middleware/AuthMiddleware";
 import { requireApprovedVendor } from "../Middleware/VendorApprovalMiddleware";
 
@@ -53,6 +58,8 @@ vendorsRouter.post("/createVendorAddress", createVendorAddress);
 vendorsRouter.put("/updateVendorAddress", updateVendorAddress);
 
 vendorsRouter.get("/getVendorCategories", getVendorCategoriesController);
+vendorsRouter.get("/category-requests", requireApprovedVendor, getVendorCategoryRequestsController);
+vendorsRouter.post("/category-requests", requireApprovedVendor, createVendorCategoryRequestController);
 vendorsRouter.get("/getVendorDetails", getVendorDetailsController);
 vendorsRouter.get("/payout-bank-details", getVendorPayoutBankDetailsController);
 vendorsRouter.put(
